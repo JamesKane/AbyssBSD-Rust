@@ -183,6 +183,20 @@ ktest! {
 }
 
 ktest! {
+    /// The image up to the boot stack's guard page is in 2 MiB leaves
+    /// (kernel.ld), as FreeBSD's is: a small first-level TLB holds it in
+    /// a few entries.
+    fn kernel_image_is_mapped_with_2m_leaves() {
+        let l = crate::mm::layout();
+        assert_eq!((l.guard - l.start) % (2 << 20), 0);
+        for va in (l.start..l.guard).step_by(2 << 20) {
+            let t = crate::mm::translate(VirtAddr::new(va)).expect("mapped");
+            assert_eq!(t.size, pt::PageSize::Size2M, "{va:#x}");
+        }
+    }
+}
+
+ktest! {
     fn identity_map_is_gone() {
         // The kernel's own physical address was identity mapped by the
         // loader; it must not be any more.

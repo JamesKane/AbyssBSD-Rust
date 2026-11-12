@@ -3,8 +3,9 @@
 //! page tables, and the hand-over to `sys/vm`'s buddy allocator and heap.
 //!
 //! The kernel tables replace the loader's: the DMAP covers every RAM
-//! range, the image is mapped W^X with an unmapped guard page under the
-//! boot stack, the console devices keep their device-window addresses, and
+//! range, the image is mapped W^X in 2 MiB leaves (`kernel.ld` aligns its
+//! segments for that) with an unmapped guard page under the boot stack,
+//! the console devices keep their device-window addresses, and
 //! the identity map is gone. A second table maps the UEFI runtime regions
 //! 1:1 for firmware calls.
 //!
@@ -438,7 +439,8 @@ pub(crate) fn init(info: &BootInfo) -> Tables {
         );
     }
 
-    // The image, W^X, with the guard page left out.
+    // The image, W^X, with the guard page left out. The segments start
+    // on 2 MiB boundaries, so all but the boot stack is in 2 MiB leaves.
     let l = layout();
     let phys = |va: u64| info.kernel.phys + (va - info.kernel.virt.get());
     for (from, to, attrs) in [

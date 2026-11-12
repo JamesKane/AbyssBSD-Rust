@@ -180,8 +180,9 @@ leak: port I/O, `cli`/`sti` semantics, a strongly ordered memory model, and fixe
    to the loader's tables and jumps to the linked address. Rust code then installs the GDT, TSS
    and IDT (x86) or the EL1 vectors (arm64) and the per-CPU pointer, validates the handoff,
    starts the serial and framebuffer consoles, ingests the memory map, and builds and switches to
-   the kernel's own tables. Those have the DMAP, a W^X image with an unmapped boot-stack guard
-   page, and no identity map. UEFI runtime services are called in physical mode under a separate
+   the kernel's own tables. Those have the DMAP, a W^X image in 2 MiB leaves (its segments are
+   2 MiB-aligned for that, as FreeBSD maps its kernel) with an unmapped boot-stack guard page,
+   and no identity map. UEFI runtime services are called in physical mode under a separate
    table that maps the runtime regions 1:1 and shares the kernel half (as FreeBSD's `efirt`
    does).
 3. **Core init**: slab allocator, ACPI static tables (MADT, MCFG, SPCR, FADT, HPET/GTDT, SRAT/SLIT),

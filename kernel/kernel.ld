@@ -1,10 +1,18 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * The kernel image: a static PIE linked at KERNEL_LINK_BASE
- * (bootproto::layout), slid by the loader. Three page-aligned segments,
- * R+X, R, and R+W, so the kernel can map them W^X. Everything the loader
- * relocates lives in the R segment: it applies relocations before the
- * permissions take effect.
+ * (bootproto::layout), slid by the loader. Three segments, R+X, R, and
+ * R+W, so the kernel can map them W^X. Everything the loader relocates
+ * lives in the R segment: it applies relocations before the permissions
+ * take effect.
+ *
+ * Each segment starts on a 2 MiB boundary and the kernel maps it to the
+ * next one, so the image is mapped with 2 MiB leaves (the link base and
+ * the loader's slide and load address are 2 MiB-aligned too), as
+ * FreeBSD maps its kernel (arm64 locore.S, amd64 pmap_bootstrap). A
+ * core with a small first-level TLB then holds the image in a few
+ * entries. The padding costs memory, not file size, and the loader
+ * zeroes it.
  */
 ENTRY(_start)
 
@@ -27,7 +35,7 @@ SECTIONS
         *(.text .text.*)
     } :text
 
-    . = ALIGN(4096);
+    . = ALIGN(0x200000);
     __text_end = .;
 
     .rodata : { *(.rodata .rodata.*) } :rodata
@@ -50,15 +58,19 @@ SECTIONS
     .gnu.hash : { *(.gnu.hash) } :rodata
     .rela.dyn : { *(.rela.dyn .rela.*) } :rodata
 
-    . = ALIGN(4096);
+    . = ALIGN(0x200000);
     __rodata_end = .;
 
     .data : { *(.data .data.*) } :data
     .bss (NOLOAD) : {
         *(.bss .bss.*)
         *(COMMON)
-        /* The boot stack, with an unmapped guard page below it. */
-        . = ALIGN(4096);
+        /*
+         * The boot stack, with an unmapped guard page below it. They
+         * follow the 2 MiB leaves of the data, in 4 KiB pages of their
+         * own: a hole inside a leaf would split it.
+         */
+        . = ALIGN(0x200000);
         __boot_stack_guard = .;
         . += 4096;
         . += 65536;
