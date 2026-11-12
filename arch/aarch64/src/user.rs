@@ -77,6 +77,21 @@ pub struct Fault;
 
 /// `TCR_EL1.EPD0`.
 const TCR_EPD0: u64 = 1 << 7;
+/// `TCR_EL1.E0PD1`: EL0 accesses to the TTBR1 half fault without a walk.
+const TCR_E0PD1: u64 = 1 << 56;
+
+/// Whether this CPU has FEAT_E0PD (`ID_AA64MMFR2_EL1.E0PD`).
+#[must_use]
+pub fn has_e0pd() -> bool {
+    crate::cpu::id_register(7, 2) >> 60 != 0
+}
+
+/// Whether `TCR_EL1.E0PD1` is set on this CPU.
+#[must_use]
+pub fn e0pd1() -> bool {
+    crate::cpu::read_sysreg!("tcr_el1") & TCR_E0PD1 != 0
+}
+
 /// `SCTLR_EL1.SPAN`: when clear, taking an exception to EL1 sets PAN.
 const SCTLR_SPAN: u64 = 1 << 23;
 /// `SCTLR_EL1.MSCEn`: the FEAT_MOPS instructions are enabled at EL0.
@@ -89,10 +104,10 @@ const CNTKCTL_EL0_BITS: u64 = 0b11 << 8 | 0b11;
 
 /// Prepares this CPU for user mode: lets user code read the virtual count
 /// (libc's `clock_gettime` reads it through the shared page's timehands)
-/// and use FEAT_MOPS where the CPU has it, and turns on PAN (no kernel
-/// access to user pages except through the unprivileged loads and stores)
-/// where the CPU has it, keeping it on across exceptions. Call on every
-/// CPU.
+/// and use FEAT_MOPS where the CPU has it, closes the kernel half to EL0
+/// with FEAT_E0PD, and turns on PAN (no kernel access to user pages except
+/// through the unprivileged loads and stores) where the CPU has it,
+/// keeping it on across exceptions. Call on every CPU.
 pub fn init_cpu() {
     // The OS lock comes up locked, holding off debug exceptions; it
     // opens so that a debugger's software steps trap (FreeBSD's
@@ -129,6 +144,28 @@ pub fn init_cpu() {
                 "isb",
                 s = out(reg) _,
                 mscen = in(reg) SCTLR_MSCEN,
+                options(nostack),
+            );
+        }
+    }
+    // FEAT_E0PD: an EL0 access to the kernel half faults at once, with no
+    // TLB lookup and no table walk (FreeBSD's `tcr_set_e0pd1`). Without
+    // it a Cortex-A520 whose instruction TLB had filled took 2 to 4
+    // instruction-TLB refills of some 230 cycles each in every system
+    // call, one of them at EL0: half as much time again for a short
+    // call. Measured; the likely cause is EL0's wrong-path fetches of
+    // kernel addresses being translated.
+    if has_e0pd() {
+        // SAFETY: only EL0's view of the kernel half changes, and EL0 has
+        // no access there in any case.
+        unsafe {
+            asm!(
+                "mrs {t}, tcr_el1",
+                "orr {t}, {t}, {e0pd1}",
+                "msr tcr_el1, {t}",
+                "isb",
+                t = out(reg) _,
+                e0pd1 = in(reg) TCR_E0PD1,
                 options(nostack),
             );
         }

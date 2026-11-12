@@ -196,6 +196,16 @@ ktest! {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+ktest! {
+    /// With FEAT_E0PD the kernel half is closed to EL0 without a table
+    /// walk, as on FreeBSD (`tcr_set_e0pd1`); address spaces come and go
+    /// without clearing it.
+    fn kernel_half_is_closed_to_el0_with_e0pd() {
+        assert_eq!(arch::user::e0pd1(), arch::user::has_e0pd());
+    }
+}
+
 ktest! {
     fn identity_map_is_gone() {
         // The kernel's own physical address was identity mapped by the
