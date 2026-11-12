@@ -498,9 +498,12 @@ documents named; this section keeps what is done and what is open.
 - **Performance** (the exit's gate: every suite within 2% of FreeBSD on the board, per core
   class, P7's over `rge`). The first runs (`tests/perf/board/results/`) found arm64 well short;
   the gaps closed since are in git (`fc2c7d0` to `3c85e15`). On the big cores, one run each, the
-  userland suites are at or ahead of FreeBSD but for `sig.deliver` (1.42), the unix socket and
-  semaphore ping-pongs (1.07 to 1.09), `thr.create` (1.09), and the in-kernel `ctxsw.same`
+  userland suites are at or ahead of FreeBSD but for the unix socket and semaphore ping-pongs
+  (1.07 to 1.09), `thr.create` (1.09), and `sig.deliver` (1.02); in the kernel, `ctxsw.same`
   (1.29) and `ctxsw.cross` (1.14). To do:
+  - the arm64 kernel's target makes no unaligned access, so an integer read out of a byte
+    slice is a byte load each (it was 144 ns of every signal): a sweep of the hot paths that
+    parse bytes (packet headers, on-disk structures) for the same;
   - after `p5` has run in the same boot, `kevent.pipe1000` is 7% slower until a reboot
     (`poll1000` and `select1000` were a quarter slower and are no longer: ADR-0024's zones, and
     the pipe's `Notify` in the pipe). Each knote's filter is still its own allocation;
