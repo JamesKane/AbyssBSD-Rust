@@ -285,25 +285,80 @@ global_asm!(
     r#"
     .section .text.abyss_user, "ax"
 
+    /*
+     * The copies move 64 bytes a round, then words, then bytes. Every
+     * access to user memory is an unprivileged load or store (LDTR, STTR:
+     * there is no unprivileged pair), so a kernel address faults whatever
+     * the caller checked, and PAN stays set. Each may fault: the macros
+     * record it in the fixup table, landing on abyss_copy_fault.
+     */
+    .macro uld reg, off
+100: ldtr \reg, [x1, #\off]
+    .pushsection abyss_extable, "aw"
+    .balign 8
+    .quad 100b, abyss_copy_fault
+    .popsection
+    .endm
+    .macro ust reg, off
+100: sttr \reg, [x0, #\off]
+    .pushsection abyss_extable, "aw"
+    .balign 8
+    .quad 100b, abyss_copy_fault
+    .popsection
+    .endm
+    .macro uldb reg
+100: ldtrb \reg, [x1]
+    .pushsection abyss_extable, "aw"
+    .balign 8
+    .quad 100b, abyss_copy_fault
+    .popsection
+    .endm
+    .macro ustb reg
+100: sttrb \reg, [x0]
+    .pushsection abyss_extable, "aw"
+    .balign 8
+    .quad 100b, abyss_copy_fault
+    .popsection
+    .endm
+
     /* x0 = dst (kernel), x1 = src (user), x2 = len; 0, or 1 on a fault. */
     .global abyss_copy_from_user
     .type abyss_copy_from_user, @function
 abyss_copy_from_user:
-    cmp x2, #8
+    cmp x2, #64
     b.lo 2f
-1:  ldtr x3, [x1]
+1:  uld x3, 0
+    uld x4, 8
+    uld x5, 16
+    uld x6, 24
+    uld x7, 32
+    uld x8, 40
+    uld x9, 48
+    uld x10, 56
+    stp x3, x4, [x0]
+    stp x5, x6, [x0, #16]
+    stp x7, x8, [x0, #32]
+    stp x9, x10, [x0, #48]
+    add x0, x0, #64
+    add x1, x1, #64
+    sub x2, x2, #64
+    cmp x2, #64
+    b.hs 1b
+2:  cmp x2, #8
+    b.lo 4f
+3:  uld x3, 0
     str x3, [x0], #8
     add x1, x1, #8
     sub x2, x2, #8
     cmp x2, #8
-    b.hs 1b
-2:  cbz x2, 4f
-3:  ldtrb w3, [x1]
+    b.hs 3b
+4:  cbz x2, 6f
+5:  uldb w3
     strb w3, [x0], #1
     add x1, x1, #1
     subs x2, x2, #1
-    b.ne 3b
-4:  mov x0, #0
+    b.ne 5b
+6:  mov x0, #0
     ret
     .size abyss_copy_from_user, . - abyss_copy_from_user
 
@@ -311,34 +366,46 @@ abyss_copy_from_user:
     .global abyss_copy_to_user
     .type abyss_copy_to_user, @function
 abyss_copy_to_user:
-    cmp x2, #8
-    b.lo 6f
-5:  ldr x3, [x1], #8
-    sttr x3, [x0]
+    cmp x2, #64
+    b.lo 2f
+1:  ldp x3, x4, [x1]
+    ldp x5, x6, [x1, #16]
+    ldp x7, x8, [x1, #32]
+    ldp x9, x10, [x1, #48]
+    ust x3, 0
+    ust x4, 8
+    ust x5, 16
+    ust x6, 24
+    ust x7, 32
+    ust x8, 40
+    ust x9, 48
+    ust x10, 56
+    add x0, x0, #64
+    add x1, x1, #64
+    sub x2, x2, #64
+    cmp x2, #64
+    b.hs 1b
+2:  cmp x2, #8
+    b.lo 4f
+3:  ldr x3, [x1], #8
+    ust x3, 0
     add x0, x0, #8
     sub x2, x2, #8
     cmp x2, #8
-    b.hs 5b
-6:  cbz x2, 8f
-    ldrb w3, [x1], #1
-7:  sttrb w3, [x0]
+    b.hs 3b
+4:  cbz x2, 6f
+5:  ldrb w3, [x1], #1
+    ustb w3
     add x0, x0, #1
     subs x2, x2, #1
-    b.ne 6b
-8:  mov x0, #0
+    b.ne 5b
+6:  mov x0, #0
     ret
 
-9:  mov x0, #1
+abyss_copy_fault:
+    mov x0, #1
     ret
     .size abyss_copy_to_user, . - abyss_copy_to_user
-
-    .pushsection abyss_extable, "aw"
-    .balign 8
-    .quad 1b, 9b
-    .quad 3b, 9b
-    .quad 5b + 4, 9b
-    .quad 7b, 9b
-    .popsection
     "#
 );
 
