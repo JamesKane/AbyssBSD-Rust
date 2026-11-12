@@ -1,0 +1,32 @@
+p2 on the Orange Pi 6 Plus, big cores (abyss.bench.cpus / debug.kbench.cpus = 2,0,1,10,11: coordinator on an A520), one run each
+AbyssBSD 789a605 release vs FreeBSD 16.0-CURRENT f12c9f4ee6 GENERIC-HMP-IOMMU-NODEBUG; CPUs at their top frequency
+
+benchmark                  AbyssBSD      FreeBSD   ratio
+callout.armcancel            65.476       55.605    1.18  ns/op
+callout.latency.p50             600         1260    0.48  ns
+callout.latency.p99            1180         1920    0.61  ns
+ctxsw.cross                1532.465      973.141    1.57  ns/op
+ctxsw.same                  463.679      290.540    1.60  ns/op
+ipi.rtt                     875.488      759.173    1.15  ns/op
+malloc.hit.t1                44.100       41.026    1.07  ns/op
+malloc.miss.t1               43.886       41.489    1.06  ns/op
+mtx.t1                       16.112       23.548    0.68  ns/op
+mtx.t2                       16.172       51.341    0.31  ns/op
+mtx.t4                       16.567       46.676    0.35  ns/op
+page.hit.t1                  36.831       49.060    0.75  ns/op
+page.miss.t1                 84.274       52.275    1.61  ns/op
+rw.rd.t1                     17.128       24.350    0.70  ns/op
+rw.rd.t2                     64.455       55.921    1.15  ns/op
+rw.rd.t4                    124.640       65.816    1.89  ns/op
+rw.wr.t1                     16.428       23.586    0.70  ns/op
+rw.wr.t2                     16.471       60.383    0.27  ns/op
+rw.wr.t4                     16.772       69.745    0.24  ns/op
+sx.rd.t1                     17.022       24.383    0.70  ns/op
+sx.rd.t2                     64.871       54.887    1.18  ns/op
+sx.rd.t4                    128.806       65.722    1.96  ns/op
+sx.wr.t1                     16.439       23.658    0.69  ns/op
+sx.wr.t2                     16.479       61.293    0.27  ns/op
+sx.wr.t4                     16.936       70.648    0.24  ns/op
+tlb.shootdown               321.079      321.737    1.00  ns/op
+wakeup.latency.p50             1150         1520    0.76  ns
+wakeup.latency.p99             1420         2550    0.56  ns
