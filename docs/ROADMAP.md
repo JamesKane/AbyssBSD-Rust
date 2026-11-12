@@ -497,11 +497,12 @@ documents named; this section keeps what is done and what is open.
 **Open:**
 - **Performance** (the exit's gate: every suite within 2% of FreeBSD on the board, per core
   class, P7's over `rge`). The first runs (`tests/perf/board/results/`) found arm64 well short;
-  the gaps closed since are in git (`fc2c7d0` to `51b6407`). On the big cores, one run each:
-  `proc.exec`, `proc.fork`, `syscall.getpid`, page faults, `exec.*`, `pipe.pingpong` and
-  `thr.cond.pingpong` are ahead of FreeBSD; still behind are `sig.deliver` (about 1.6),
-  `ctxsw.same` (1.29), `ctxsw.cross` (1.14), `pty.raw` (1.24), `pipe.bw` (1.18), and the unix
-  socket, semaphore and `EVFILT_USER` ping-pongs (1.08 to 1.10). To do:
+  the gaps closed since are in git (`fc2c7d0` to `3c85e15`). On the big cores, one run each, the
+  userland suites are at or ahead of FreeBSD but for `sig.deliver` (1.42), the unix socket and
+  semaphore ping-pongs (1.07 to 1.09), `thr.create` (1.09), and the in-kernel `ctxsw.same`
+  (1.29) and `ctxsw.cross` (1.14). To do:
+  - after `p5` has run in the same boot, `poll1000`, `select1000` and `kevent.pipe1000` are a
+    quarter slower until a reboot (found 2026-11-12): what `p5` leaves behind, to find;
   - `rw`/`sx` readers at four threads (1.8 to 2.0 of FreeBSD's) and `page.miss` (1.60);
   - the contended writer locks (`mtx`, `rw.wr`, `sx.wr` at t2 and t4) read a flat 16.5 ns against
     FreeBSD's 47 to 70: probably one thread getting the lock back unfairly, to settle before
