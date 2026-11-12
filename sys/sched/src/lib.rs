@@ -1601,7 +1601,13 @@ fn idle_loop() {
                 core::hint::spin_loop();
             }
         }
-        release_space(c);
+        // Only on the way to a halt: with a thread already queued (the
+        // spin ended for it), the space stays loaded for the switch, as
+        // FreeBSD's idle thread keeps the last pmap. A thread queued just
+        // after this look finds the space released, no more.
+        if !c.need_resched.load(Ordering::Relaxed) && c.runq.len_hint() == 0 {
+            release_space(c);
+        }
         let irq = hal::irq::disable();
         c.halted.store(true, Ordering::Relaxed);
         // Pairs with the waker's fence in `make_runnable`: either it sees
