@@ -9,6 +9,7 @@ rustflags = [
     "-C", "link-arg=-pie",
     "-C", "link-arg=-zmax-page-size=4096",
     "-C", "force-frame-pointers=yes",
+    "-C", "llvm-args=-max-store-memcpy=16",
 ]
 
 # The prebuilt aarch64 `core` is not PIC, so it has absolute relocations in
