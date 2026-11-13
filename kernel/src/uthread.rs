@@ -261,10 +261,16 @@ impl UserThread {
     /// Takes the process's credential if it changed since this thread last
     /// did (`thread_cow_update`, at `syscallenter`). Only the thread
     /// itself calls this.
+    #[inline]
     pub(crate) fn update_cred(&self) {
-        if self.cred_seen.load(Ordering::Relaxed) == self.process.cred_gen() {
-            return;
+        if self.cred_seen.load(Ordering::Relaxed) != self.process.cred_gen() {
+            self.take_cred();
         }
+    }
+
+    /// [`Self::update_cred`] when the credential changed.
+    #[cold]
+    fn take_cred(&self) {
         if self.cred.lock().0 != self.process.cred_gen() {
             let new = own_cred(&self.process);
             let old = core::mem::replace(&mut *self.cred.lock(), new);
@@ -402,8 +408,17 @@ impl UserThread {
 
     /// Runs `f` on the current user thread, borrowed: `None` on a kernel
     /// thread.
+    #[inline]
     pub(crate) fn with_current<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
-        sched::with_owner(|o| o?.downcast_ref::<Self>().map(f))
+        debug_assert!(sched::with_owner(|o| o.is_none_or(|o| o.is::<Self>())));
+        // SAFETY: a thread's owner is only ever the `UserThread` its
+        // start gave it (`proc`'s `enter`, the one caller of
+        // `sched::set_owner` with a value), so a pointer that is not null
+        // is to one; the thread holds it until it sets another, which
+        // `f` does not. Asking the value what it is (`downcast_ref`)
+        // would be three loads and an indirect call, and every system
+        // call would pay for several.
+        unsafe { sched::owner_at().cast::<Self>().as_ref() }.map(f)
     }
 }
 

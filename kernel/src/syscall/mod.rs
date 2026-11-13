@@ -70,9 +70,28 @@ pub(crate) type SysResult = Result<u64, Errno>;
 #[derive(Clone, Copy, Debug)]
 struct Call {
     number: u64,
+    /// The call `number` names, if it is one (`sysent`'s entry), looked up
+    /// once.
+    live: Option<&'static abi::syscall::SyscallInfo>,
     args: [u64; 8],
     /// How many of `args` the call takes (`sy_narg`).
     narg: usize,
+}
+
+impl Call {
+    /// The call numbered `number`, its arguments not yet read.
+    fn numbered(number: u64) -> Self {
+        let live = match lookup(number) {
+            Some(Slot::Live(n)) => Some(n.info()),
+            _ => None,
+        };
+        Self {
+            number,
+            live,
+            args: [0; 8],
+            narg: live.map_or(0, |i| i.args.len()),
+        }
+    }
 }
 
 /// [`narg`] for a debugger (`sy_narg`).
@@ -88,10 +107,7 @@ pub(crate) fn args_of(f: &TrapFrame) -> [u64; 8] {
 /// How many arguments the call numbered `number` takes; none for one
 /// that is no call (`nosys_sysent`).
 fn narg(number: u64) -> usize {
-    match lookup(number) {
-        Some(Slot::Live(n)) => n.info().args.len(),
-        _ => 0,
-    }
+    Call::numbered(number).narg
 }
 
 /// The call in `f` (`cpu_fetch_syscall_args`): `syscall(2)` and
@@ -99,19 +115,26 @@ fn narg(number: u64) -> usize {
 /// six argument registers the rest are on the user stack, after the
 /// return address; `EFAULT` if they cannot be read.
 #[cfg(target_arch = "x86_64")]
+#[inline(always)]
 fn decode(f: &TrapFrame) -> (Call, Result<(), Errno>) {
-    let regs = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
-    let indirect = f.rax == Sysno::Syscall as u64 || f.rax == Sysno::SyscallQuad as u64;
-    let (number, regs) = if indirect {
-        (f.rdi, &regs[1..])
-    } else {
-        (f.rax, &regs[..])
-    };
-    let mut call = Call {
-        number,
-        args: [0; 8],
-        narg: narg(number),
-    };
+    if f.rax == Sysno::Syscall as u64 || f.rax == Sysno::SyscallQuad as u64 {
+        return decode_from(f, f.rdi, &[f.rsi, f.rdx, f.r10, f.r8, f.r9]);
+    }
+    // The common call: the six registers, whole, and nothing to read.
+    let mut call = Call::numbered(f.rax);
+    if call.narg > 6 {
+        return decode_from(f, f.rax, &[f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9]);
+    }
+    call.args = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9, 0, 0];
+    (call, Ok(()))
+}
+
+/// [`decode`] for an indirect call or one with arguments on the stack:
+/// call `number`, whose first arguments are `regs`.
+#[cfg(target_arch = "x86_64")]
+#[cold]
+fn decode_from(f: &TrapFrame, number: u64, regs: &[u64]) -> (Call, Result<(), Errno>) {
+    let mut call = Call::numbered(number);
     call.args[..regs.len()].copy_from_slice(regs);
     let mut fetched = Ok(());
     for (i, arg) in call.args[regs.len()..call.narg.max(regs.len())]
@@ -127,21 +150,15 @@ fn decode(f: &TrapFrame) -> (Call, Result<(), Errno>) {
 }
 
 #[cfg(target_arch = "aarch64")]
+#[inline(always)]
 fn decode(f: &TrapFrame) -> (Call, Result<(), Errno>) {
     let indirect = f.x[8] == Sysno::Syscall as u64 || f.x[8] == Sysno::SyscallQuad as u64;
-    let mut args = [0; 8];
-    let number = if indirect {
-        args.copy_from_slice(&f.x[1..9]);
-        f.x[0]
+    let mut call = Call::numbered(if indirect { f.x[0] } else { f.x[8] });
+    if indirect {
+        call.args.copy_from_slice(&f.x[1..9]);
     } else {
-        args.copy_from_slice(&f.x[..8]);
-        f.x[8]
-    };
-    let call = Call {
-        number,
-        args,
-        narg: narg(number),
-    };
+        call.args.copy_from_slice(&f.x[..8]);
+    }
     (call, Ok(()))
 }
 
@@ -185,6 +202,13 @@ fn encode(f: &mut TrapFrame, r: SysResult) {
     }
 }
 
+/// [`decode`] once more, after a debugger may have changed the call.
+#[cold]
+#[inline(never)]
+fn decode_again(f: &TrapFrame) -> (Call, Result<(), Errno>) {
+    decode(f)
+}
+
 /// The `kernel_hooks!` system-call hook (`syscallenter`, `syscallret`).
 /// Entered with interrupts masked; returns with them masked.
 pub(crate) fn entry(frame: &mut TrapFrame) {
@@ -213,14 +237,14 @@ pub(crate) fn entry(frame: &mut TrapFrame) {
         && fetched.is_ok()
         && crate::ptrace::syscall_enter(&s, code, &call.args[..call.narg])
     {
-        (call, fetched) = decode(frame);
+        (call, fetched) = decode_again(frame);
         if ktraced && crate::ktrace::point(abi::ktrace::KTR_SYSCALL) {
             crate::ktrace::syscall(&s, code, &call.args[..call.narg]);
         }
     }
     // `None`: the handler set the frame itself (`execve`), which returns
     // as `EJUSTRETURN`.
-    let r = fetched.and_then(|()| run(&s, frame, call));
+    let r = fetched.and_then(|()| run(&s, frame, &call));
     let ret = match r {
         Ok(Some(v)) => {
             encode(frame, Ok(v));
@@ -269,14 +293,15 @@ fn second_result(f: &TrapFrame) -> u64 {
     }
 }
 
-fn run(s: &Sleepable, frame: &mut TrapFrame, call: Call) -> Result<Option<u64>, Errno> {
+fn run(s: &Sleepable, frame: &mut TrapFrame, call: &Call) -> Result<Option<u64>, Errno> {
     let [a0, a1, a2, a3, a4, a5, ..] = call.args;
-    let Some(Slot::Live(n)) = lookup(call.number) else {
+    let Some(info) = call.live else {
         return nosys(call.number).map(Some);
     };
+    let n = info.sysno;
     // Capability mode allows only the calls marked for it; a traced
     // process's others are recorded as if it were in it.
-    if !n.info().cap_enabled {
+    if !info.cap_enabled {
         if crate::ktrace::cap_tracing() {
             crate::ktrace::capfail(crate::ktrace::CapFail::Syscall(None));
         }
@@ -655,11 +680,7 @@ pub(crate) fn remote(s: &Sleepable, code: u32, args: &[u64]) -> abi::ptrace::Ptr
         ret.sr_error = Errno::ENOSYS.get();
         return ret;
     };
-    let mut call = Call {
-        number,
-        args: [0; 8],
-        narg: narg(number),
-    };
+    let mut call = Call::numbered(number);
     let n = args.len().min(8);
     call.args[..n].copy_from_slice(&args[..n]);
     let saved = crate::uthread::UserThread::with_current(|t| {
@@ -670,7 +691,7 @@ pub(crate) fn remote(s: &Sleepable, code: u32, args: &[u64]) -> abi::ptrace::Ptr
         Some(f) if !f.is_null() => unsafe { *f },
         _ => TrapFrame::default(),
     };
-    match run(s, &mut frame, call) {
+    match run(s, &mut frame, &call) {
         Ok(Some(v)) => {
             ret.sr_retval[0] = v;
             ret.sr_retval[1] = second_result(&frame);

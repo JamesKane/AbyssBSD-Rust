@@ -1355,11 +1355,24 @@ pub fn set_address_space(space: Option<Arc<dyn AddressSpace>>) -> Option<Arc<dyn
             *t.tls.get() = regs;
             c.user_tls.set(regs);
         }
+        let at = space
+            .as_ref()
+            .map_or(core::ptr::null(), |a| Arc::as_ptr(a).cast::<()>());
+        t.space_at.store(at.cast_mut(), Ordering::Relaxed);
         core::mem::replace(&mut *t.space.get(), space)
     };
     load_space(c);
     hal::irq::restore(irq);
     old
+}
+
+/// Where the current thread's user address space is, null if it runs in
+/// none: it lives until the thread next calls [`set_address_space`]. For
+/// a caller that knows the value's type.
+#[inline]
+#[must_use]
+pub fn address_space_at() -> *const () {
+    current().space_at.load(Ordering::Relaxed)
 }
 
 /// Drops this CPU's hold on the address space it has loaded, when the
@@ -1385,8 +1398,22 @@ pub fn unload_address_space(to_kernel: impl FnOnce()) {
 pub fn set_owner(
     owner: Option<Arc<dyn core::any::Any + Send + Sync>>,
 ) -> Option<Arc<dyn core::any::Any + Send + Sync>> {
+    let t = current();
+    let at = owner
+        .as_ref()
+        .map_or(core::ptr::null(), |o| Arc::as_ptr(o).cast::<()>());
+    t.owner_at.store(at.cast_mut(), Ordering::Relaxed);
     // SAFETY: only the current thread writes its own `owner`.
-    unsafe { core::mem::replace(&mut *current().owner.get(), owner) }
+    unsafe { core::mem::replace(&mut *t.owner.get(), owner) }
+}
+
+/// Where the value [`set_owner`] was last given is, null if none: the
+/// current thread's, which lives until the thread next calls
+/// [`set_owner`]. For a caller that knows the value's type.
+#[inline]
+#[must_use]
+pub fn owner_at() -> *const () {
+    current().owner_at.load(Ordering::Relaxed)
 }
 
 /// What the kernel runs the current thread for, if it said.

@@ -8,7 +8,7 @@
 //! (`vn_read`, `vn_seek`, `vn_statfile`), sys/kern/sys_generic.c.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::fcntl::{
@@ -23,6 +23,73 @@ use vfs::{Device, Kind, Uio, Vnode, VnodeUse};
 use super::pipe;
 
 static OFFSET_LOCK: LockClass = LockClass::new("file offset", 300);
+
+/// A file's offset (`f_offset`). A transfer on a file holds its lock from
+/// reading it to advancing it (`foffset_lock`), so two cannot write the
+/// same bytes. A device's transfers read and set it without the lock
+/// (`FOF_NOLOCK` in `devfs_read_f` and `devfs_write_f`): a device may
+/// block for as long as it likes, and its offset means little.
+struct Offset {
+    at: AtomicU64,
+    lock: Mutex<()>,
+}
+
+impl Offset {
+    fn new() -> Self {
+        Self {
+            at: AtomicU64::new(0),
+            lock: Mutex::new(&OFFSET_LOCK, ()),
+        }
+    }
+
+    /// The offset now, whoever holds the lock.
+    fn get(&self) -> u64 {
+        self.at.load(Ordering::Relaxed)
+    }
+
+    /// Sets it, without the lock.
+    fn set(&self, at: u64) {
+        self.at.store(at, Ordering::Relaxed);
+    }
+
+    /// The offset, held until the guard is dropped, which stores what it
+    /// was changed to.
+    fn lock(&self, s: &Sleepable) -> OffsetGuard<'_> {
+        let held = self.lock.lock(s);
+        OffsetGuard {
+            at: &self.at,
+            now: self.at.load(Ordering::Relaxed),
+            _held: held,
+        }
+    }
+}
+
+/// A file's offset, held ([`File::offset`]).
+pub(crate) struct OffsetGuard<'a> {
+    at: &'a AtomicU64,
+    now: u64,
+    _held: sched::lock::MutexGuard<'a, ()>,
+}
+
+impl core::ops::Deref for OffsetGuard<'_> {
+    type Target = u64;
+
+    fn deref(&self) -> &u64 {
+        &self.now
+    }
+}
+
+impl core::ops::DerefMut for OffsetGuard<'_> {
+    fn deref_mut(&mut self) -> &mut u64 {
+        &mut self.now
+    }
+}
+
+impl Drop for OffsetGuard<'_> {
+    fn drop(&mut self) {
+        self.at.store(self.now, Ordering::Relaxed);
+    }
+}
 
 /// An open file system object: the vnode in use, and for a device, the
 /// device it reached when opened (its I/O does not go through the vnode).
@@ -184,7 +251,7 @@ pub(crate) struct File {
     flags: AtomicU32,
     /// The offset, held across a transfer so concurrent ones each see
     /// and advance it whole (FreeBSD's `foffset_lock`).
-    offset: Mutex<u64>,
+    offset: Offset,
     /// The jail of whoever opened it (`f_cred->cr_prison`); `None` for
     /// the host.
     jail: Option<Arc<dyn security::Jail>>,
@@ -222,7 +289,7 @@ impl File {
         Ok(Arc::new(Self {
             kind,
             flags: AtomicU32::new(flags),
-            offset: Mutex::new(&OFFSET_LOCK, 0),
+            offset: Offset::new(),
             jail,
         }))
     }
@@ -320,9 +387,9 @@ impl File {
                     // Not under the offset lock (`devfs_read_f`'s
                     // `FOF_NOLOCK`): a read waiting on a terminal must not
                     // hold up writes through the same file.
-                    let at = *self.offset.lock(s);
+                    let at = self.offset.get();
                     let n = d.ops.read(s, uio, at, self.nonblock())?;
-                    *self.offset.lock(s) = at + n as u64;
+                    self.offset.set(at + n as u64);
                     return Ok(n);
                 }
                 let mut off = self.offset.lock(s);
@@ -397,9 +464,9 @@ impl File {
                         return Err(Errno::ENXIO);
                     }
                     // As for reads (`devfs_write_f`'s `FOF_NOLOCK`).
-                    let at = *self.offset.lock(s);
+                    let at = self.offset.get();
                     let n = d.ops.write(s, uio, at, self.nonblock())?;
-                    *self.offset.lock(s) = at + n as u64;
+                    self.offset.set(at + n as u64);
                     return Ok(n);
                 }
                 let mut off = self.offset.lock(s);
@@ -520,7 +587,7 @@ impl File {
     }
 
     /// The offset, held: `getdirentries` reads and advances it in place.
-    pub(crate) fn offset(&self, s: &Sleepable) -> sched::lock::MutexGuard<'_, u64> {
+    pub(crate) fn offset(&self, s: &Sleepable) -> OffsetGuard<'_> {
         self.offset.lock(s)
     }
 
@@ -639,7 +706,7 @@ impl File {
     /// The offset as it stands, without waiting for a transfer under way
     /// (a kqueue filter's racy read of `f_offset`).
     pub(crate) fn offset_hint(&self) -> u64 {
-        self.offset.try_lock().map_or(0, |o| *o)
+        self.offset.get()
     }
 
     /// An `ioctl` request that is not about the descriptor itself; `arg`
@@ -824,10 +891,8 @@ impl Uio for Limited<'_> {
 /// past the limit stops there, and one starting at or past it is `EFBIG`
 /// with `SIGXFSZ` to the process (FreeBSD's `vn_rlimit_fsizex`).
 fn write_regular(s: &Sleepable, v: &Vnode, at: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
-    let lim = crate::proc::Process::with_current(|p| {
-        p.limits.lock()[abi::resource::rlimit::FSIZE as usize].rlim_cur
-    })
-    .unwrap_or(abi::resource::RLIM_INFINITY);
+    let lim = crate::proc::Process::with_current(|p| p.limit_cur(abi::resource::rlimit::FSIZE))
+        .unwrap_or(abi::resource::RLIM_INFINITY);
     let n = if v.kind() == vfs::Kind::Regular && at.saturating_add(uio.resid() as u64) > lim {
         if at >= lim {
             if let Some(p) = crate::proc::Process::current() {

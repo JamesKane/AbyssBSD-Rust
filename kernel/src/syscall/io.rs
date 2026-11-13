@@ -39,7 +39,7 @@ const IOSIZE_MAX: u64 = i64::MAX as u64;
 
 /// The descriptor limit (`RLIMIT_NOFILE`'s soft limit).
 pub(super) fn max_files(p: &Process) -> usize {
-    let lim = p.limits.lock()[abi::resource::rlimit::NOFILE as usize].rlim_cur;
+    let lim = p.limit_cur(abi::resource::rlimit::NOFILE);
     usize::try_from(lim).unwrap_or(usize::MAX)
 }
 

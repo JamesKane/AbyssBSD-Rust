@@ -332,6 +332,8 @@ pub(crate) struct AddressSpace {
     wxorx: core::sync::atomic::AtomicBool,
     /// The pages `mlock` wired (`MAP_ENTRY_USER_WIRED`).
     wired: SpinLock<Wired>,
+    /// Set once `wired` has held anything; see [`Self::wires`].
+    wiring: core::sync::atomic::AtomicBool,
     /// The program's data segment, as `break` moves its end: its first
     /// page and its size in bytes (`vm_daddr`, `vm_dsize`).
     data: SpinLock<(u64, u64)>,
@@ -436,8 +438,29 @@ impl Drop for Wired {
 impl AddressSpace {
     /// Runs `f` on the current thread's address space, borrowed (no
     /// reference taken): `None` if it runs in none.
+    #[inline]
     pub(crate) fn with_current<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
-        sched::with_address_space(|a| a?.as_any().downcast_ref::<Self>().map(f))
+        debug_assert!(sched::with_address_space(
+            |a| a.is_none_or(|a| a.as_any().is::<Self>())
+        ));
+        // SAFETY: this type is the kernel's one `sched::AddressSpace`, so
+        // a pointer that is not null is to one; the thread holds it until
+        // it sets another, which `f` does not. Asking the value what it
+        // is (`as_any`, `downcast_ref`) would be two indirect calls.
+        unsafe { sched::address_space_at().cast::<Self>().as_ref() }.map(f)
+    }
+
+    /// Whether it has ever wired pages or asked that new ones be
+    /// (`mlock`, `mlockall`): until it has, nothing need look at `wired`.
+    pub(crate) fn wires(&self) -> bool {
+        self.wiring.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// `mlockall(MCL_FUTURE)`: new memory comes wired.
+    pub(crate) fn wire_future(&self) {
+        self.wiring
+            .store(true, core::sync::atomic::Ordering::Relaxed);
+        self.wired.lock().future = true;
     }
 
     /// Whether mappings both writable and executable are refused
@@ -472,6 +495,8 @@ impl AddressSpace {
         }
         drop(map);
         let (a, b) = (range.start.get() / PAGE_SIZE, range.end.get() / PAGE_SIZE);
+        self.wiring
+            .store(true, core::sync::atomic::Ordering::Relaxed);
         Some(self.wired.lock().wire(a, b))
     }
 
@@ -606,6 +631,7 @@ impl AddressSpace {
             sysv_shm: sync::PreemptLock::new(alloc::vec::Vec::new()),
             wxorx: core::sync::atomic::AtomicBool::new(false),
             wired: SpinLock::new(Wired::default()),
+            wiring: core::sync::atomic::AtomicBool::new(false),
             data: SpinLock::new((0, 0)),
         }))
     }
@@ -879,7 +905,7 @@ impl AddressSpace {
             return Err(MapError::Misaligned.into());
         }
         // Unmapped pages are no longer wired.
-        if self.wired.lock().count > 0 {
+        if self.wires() && self.wired.lock().count > 0 {
             self.unwire(range.clone());
         }
         let len = range.end.get() - range.start.get();
@@ -1242,7 +1268,7 @@ impl AddressSpace {
         if new > old {
             map.insert(Entry::anonymous(range.clone(), Prot::RW, Prot::ALL))?;
             drop(map);
-            if self.wired().future {
+            if self.wires() && self.wired().future {
                 let _ = self.wire(s, range);
             }
         } else if new < old {

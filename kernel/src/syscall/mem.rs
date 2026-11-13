@@ -290,9 +290,8 @@ pub(super) fn mmap(
         r?;
     }
     // The whole map is held to `RLIMIT_VMEM` (`vm_mmap_object`).
-    let vmem =
-        Process::with_current(|p| p.limits.lock()[abi::resource::rlimit::VMEM as usize].rlim_cur)
-            .unwrap_or(abi::resource::RLIM_INFINITY);
+    let vmem = Process::with_current(|p| p.limit_cur(abi::resource::rlimit::VMEM))
+        .unwrap_or(abi::resource::RLIM_INFINITY);
     if vmem != abi::resource::RLIM_INFINITY
         && AddressSpace::with_current(|a| a.size(s))
             .unwrap_or(0)
@@ -350,15 +349,16 @@ pub(super) fn mmap(
     // After `mlockall(MCL_FUTURE)`, new memory comes wired, within
     // `RLIMIT_MEMLOCK` (`vm_mmap_object`'s `MAP_WIREFUTURE`).
     let future = AddressSpace::with_current(|sp| {
+        if !sp.wires() {
+            return None;
+        }
         let w = sp.wired();
         w.future.then_some(w.count)
     })
     .flatten();
     if let Some(have) = future {
-        let limit = Process::with_current(|p| {
-            p.limits.lock()[abi::resource::rlimit::MEMLOCK as usize].rlim_cur
-        })
-        .unwrap_or(abi::resource::RLIM_INFINITY);
+        let limit = Process::with_current(|p| p.limit_cur(abi::resource::rlimit::MEMLOCK))
+            .unwrap_or(abi::resource::RLIM_INFINITY);
         if have.saturating_mul(PAGE_SIZE).saturating_add(len) > limit {
             return Err(Errno::ENOMEM);
         }
@@ -631,7 +631,7 @@ pub(super) fn mlockall(s: &Sleepable, how: u64) -> SysResult {
         return Err(Errno::ENOMEM);
     }
     if how & MCL_FUTURE != 0 {
-        space.wired().future = true;
+        space.wire_future();
     }
     if how & MCL_CURRENT != 0 {
         let ranges = space.mapped_ranges(s);

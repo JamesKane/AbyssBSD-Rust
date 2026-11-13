@@ -359,6 +359,9 @@ pub struct Thread {
     /// the thread itself ([`crate::set_address_space`]); read by the CPU
     /// switching it in (the `on_cpu` handoff orders the two).
     pub(crate) space: UnsafeCell<Option<alloc::sync::Arc<dyn crate::AddressSpace>>>,
+    /// Where `space`'s value is (null with none), as `owner_at` is for
+    /// `owner`. Written with `space`.
+    pub(crate) space_at: AtomicPtr<()>,
     /// The top of the kernel stack, where traps from user mode land (0 for
     /// threads on a borrowed stack, which never enter user mode).
     pub(crate) kstack_top: u64,
@@ -368,6 +371,10 @@ pub struct Thread {
     /// What the kernel runs the thread for (its process), opaque here.
     /// Written only by the thread itself.
     pub(crate) owner: UnsafeCell<Option<alloc::sync::Arc<dyn core::any::Any + Send + Sync>>>,
+    /// Where `owner`'s value is (null with none), so that finding it is
+    /// one load: through `owner` it is the value's alignment out of its
+    /// vtable first. Written with `owner`.
+    pub(crate) owner_at: AtomicPtr<()>,
     /// Work to do before the thread next returns to user mode, as bits
     /// the kernel defines (FreeBSD's `td_ast`).
     pub(crate) ast: AtomicU32,
@@ -462,9 +469,11 @@ impl Thread {
             held: UnsafeCell::new(crate::lock::witness::Held::new()),
             fpu,
             space: UnsafeCell::new(None),
+            space_at: AtomicPtr::new(core::ptr::null_mut()),
             kstack_top,
             tls: UnsafeCell::new([0; 2]),
             owner: UnsafeCell::new(None),
+            owner_at: AtomicPtr::new(core::ptr::null_mut()),
             ast: AtomicU32::new(0),
             interrupted: AtomicBool::new(false),
             wchan: AtomicPtr::new(core::ptr::null_mut()),

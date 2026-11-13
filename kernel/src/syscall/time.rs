@@ -207,7 +207,7 @@ pub(super) fn setrlimit(s: &Sleepable, which: u64, rlp: u64) -> SysResult {
         }
         _ => {}
     }
-    p.limits.lock()[i] = l;
+    p.set_limit(i, l);
     match which {
         // The stack's growth follows the new limit at once.
         rlimit::STACK => p.space().set_stack_limit(s, l.rlim_cur),

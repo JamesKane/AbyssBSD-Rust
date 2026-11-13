@@ -657,6 +657,10 @@ pub(crate) struct Process {
     layout: SharedLayout,
     pub(crate) signals: SpinLock<Signals>,
     pub(crate) limits: PreemptLock<[Rlimit; rlimit::NLIMITS]>,
+    /// Each of `limits`' soft limits, stored with it locked, for the
+    /// paths that test one on every call (FreeBSD's `lim_cur` reads the
+    /// thread's own `td_limit` without a lock).
+    limit_cur: [AtomicU64; rlimit::NLIMITS],
     /// The `exterrctl` buffer, 0 for none.
     pub(crate) exterr: AtomicU64,
     pgid: AtomicI32,
@@ -695,6 +699,10 @@ pub(crate) struct Process {
     /// Its threads, in creation order (FreeBSD's `p_threads`). A thread
     /// joins before it runs and leaves as it exits.
     threads: SpinLock<Vec<Arc<UserThread>>>,
+    /// How many `threads` holds (FreeBSD's `p_numthreads`), stored with
+    /// the list locked, so that the one thread of a process can tell it
+    /// is the only one without the lock.
+    nthreads: AtomicU32,
     pub(crate) job: SpinLock<Job>,
     /// Where parked threads wait.
     pub(crate) stop_wait: WaitQueue,
@@ -1002,6 +1010,7 @@ impl Process {
                 vforked: AtomicBool::new(false),
                 layout: SharedLayout::new(parent.map_or(layout, |p| p.layout())),
                 signals: SpinLock::new(signals),
+                limit_cur: core::array::from_fn(|i| AtomicU64::new(limits[i].rlim_cur)),
                 limits: PreemptLock::new(limits),
                 exterr: AtomicU64::new(parent.map_or(0, |p| p.exterr.load(Ordering::Relaxed))),
                 pgid: AtomicI32::new(parent.map_or(pid, |p| p.pgid())),
@@ -1030,6 +1039,7 @@ impl Process {
                 child_gen: AtomicU64::new(0),
                 child_wait: WaitQueue::new(),
                 threads: SpinLock::new(Vec::new()),
+                nthreads: AtomicU32::new(0),
                 job: SpinLock::new(Job::default()),
                 stop_wait: WaitQueue::new(),
                 single_wait: WaitQueue::new(),
@@ -1428,8 +1438,28 @@ impl Process {
     /// Whether the calling thread is the process's only one, so that only
     /// it can change what the process's threads share (its descriptor
     /// table).
+    /// Resource `which`'s soft limit (`lim_cur`), without the lock.
+    pub(crate) fn limit_cur(&self, which: u32) -> u64 {
+        self.limit_cur[which as usize].load(Ordering::Relaxed)
+    }
+
+    /// Sets limit `i` (`kern_proc_setrlimit`).
+    pub(crate) fn set_limit(&self, i: usize, l: Rlimit) {
+        let mut limits = self.limits.lock();
+        limits[i] = l;
+        self.limit_cur[i].store(l.rlim_cur, Ordering::Relaxed);
+    }
+
     pub(crate) fn sole_thread(&self) -> bool {
-        self.threads.lock().len() <= 1
+        // Only a process's own threads add to it, so its one thread
+        // reads a count nothing else raises.
+        self.nthreads.load(Ordering::Relaxed) <= 1
+    }
+
+    /// Stores the length of `threads`, which the caller holds.
+    fn count_threads(&self, threads: &[Arc<UserThread>]) {
+        let n = u32::try_from(threads.len()).unwrap_or(u32::MAX);
+        self.nthreads.store(n, Ordering::Relaxed);
     }
 
     /// Whether its one thread is all that reaches its descriptor table
@@ -1663,6 +1693,7 @@ impl Process {
         {
             let mut threads = self.threads.lock();
             threads.push(Arc::clone(&t));
+            self.count_threads(&threads);
             if threads.len() > 1 {
                 self.had_threads.store(true, Ordering::Relaxed);
             }
@@ -1688,7 +1719,9 @@ impl Process {
             Err(_) => {
                 // SAFETY: the thread never started, so `arg` is still ours.
                 drop(unsafe { alloc::boxed::Box::from_raw(arg as *mut Start) });
-                self.threads.lock().retain(|o| !Arc::ptr_eq(o, &t));
+                let mut threads = self.threads.lock();
+                threads.retain(|o| !Arc::ptr_eq(o, &t));
+                self.count_threads(&threads);
                 Err(Errno::EAGAIN)
             }
         }
@@ -2377,6 +2410,7 @@ impl Process {
             return false;
         }
         threads.retain(|o| o.tid() != t.tid());
+        self.count_threads(&threads);
         true
     }
 
@@ -2464,7 +2498,12 @@ impl Process {
             self.bank_current_usage();
             t.set_sched(None);
         }
-        let gone = core::mem::take(&mut *self.threads.lock());
+        let gone = {
+            let mut threads = self.threads.lock();
+            let gone = core::mem::take(&mut *threads);
+            self.count_threads(&threads);
+            gone
+        };
         drop(gone);
         // The groups this exit may orphan (its own, its children's):
         // those not orphaned yet.
