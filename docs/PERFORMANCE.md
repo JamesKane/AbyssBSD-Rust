@@ -109,3 +109,21 @@ default the missing register changes.
 
 Still planned: `--platform x870e|opi6p` (P8), and `--compare <rev>`, which compares two AbyssBSD
 revisions with the same statistics to check a change before it lands.
+
+## 7. Code layout
+
+Where the kernel's functions lie in its image changes what the small cores measure. On the Orange
+Pi's Cortex-A520s a first-level instruction-cache miss costs 75 to 145 cycles (they have no
+second-level cache of their own; on its A720s a miss costs next to nothing), and how many misses
+a system call takes depends on where the linker put its functions. The release kernel is one LTO
+unit, so any change moves every function: the same source linked in three orders ran `dup` and
+`close` in 840 to 985 ns on an A520, a byte through a UNIX socket in 2400 to 3500, with the
+A720s' times unchanged.
+
+Linking the profiled hot functions next to one another (lld's `--symbol-ordering-file`), grouped
+by benchmark or clustered by caller and callee, was measured over the full suites and gave no
+gain beyond noise on any core class (ROADMAP, Phase 9), so the kernel is linked as it comes.
+
+What follows for measuring: a single little-core benchmark can move by tens of percent between
+two kernels for no reason in the change itself. Judge a change there by its component over the
+suites, or, where it is small, by instructions executed (PMU event `0x08`) rather than time.

@@ -553,8 +553,26 @@ documents named; this section keeps what is done and what is open.
     same throughout. With the functions a profile finds hot placed together
     (`--symbol-ordering-file`) each is at its best or near it, and at or under FreeBSD's
     (887, 2760, 8460). This is most of the little cores' "noisy" verdicts and of what a
-    change appears to cost or gain there. Not decided: whether the build orders the hot
-    functions, and from what list;
+    change appears to cost or gain there. Ordering the hot functions in the build was
+    tried and dropped: `p4`, `p5`, and `p6` three times each on three kernels of the same
+    code (FreeBSD's side that of the last report), as linked, with the 454 functions the
+    profiler found hot grouped by the kind of benchmark that runs them, and with them
+    clustered by what calls what (the profiler recording each sample's caller). Overall on
+    the little cores 0.684, 0.674, and 0.691 of FreeBSD's time; on the mid 0.671, 0.677,
+    0.679; on the big 0.676, 0.675, 0.673. Single benchmarks on the little cores moved by
+    20 to 60% either way under both orders (`io.null.write` 0.70 and 0.68 of its time as
+    linked, `sig.deliver` 0.83 and 1.18, `fs.ufs.open_close` 1.10 and 1.62): placing the
+    hot functions together gives another layout, not a better one, so the misses are
+    likely functions meeting in the same cache sets rather than hot code spread too far.
+    The A520s have no second-level cache of their own (the firmware's 4 MB is the eight
+    A720s' 512 KB each), so a miss goes to the shared third level, on FreeBSD too. The
+    report as linked: `tests/perf/board/results/2026-11-13-bc14163.txt`, every component
+    passing on every class. Until something controls it, a small change is compared on
+    the little cores by instructions executed (PMU event `0x08`), not by time;
+  - a release kernel built with the tests (`cargo xtask test --tier boot --release`)
+    overflows a kernel stack in `detach_stress_nvme` on both architectures
+    (`devfs::Registry::insert` under the NVMe driver's start); the boot tier's own (debug)
+    build passes;
   - the 10-run gating set, `p2` on the mid and little cores, and `p7`;
   - the arm64 kernel's target makes no unaligned access, so an integer read out of a byte
     slice is a byte load each (it was 144 ns of every signal): a sweep of the hot paths that
