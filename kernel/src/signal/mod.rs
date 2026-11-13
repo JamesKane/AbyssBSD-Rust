@@ -621,7 +621,7 @@ impl FpuImage {
     /// An image of nothing: every byte zero, for a caller that sets all
     /// of it (no registers are saved).
     #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
-    pub(super) fn zeroed() -> Option<Self> {
+    pub(crate) fn zeroed() -> Option<Self> {
         let len = hal::fpu::area_size();
         let cached =
             Self::cache_slot().swap(core::ptr::null_mut(), core::sync::atomic::Ordering::Acquire);
@@ -698,7 +698,7 @@ impl FpuImage {
     ///
     /// The image must be one the CPU loads without faulting: a saved or
     /// initial state, changed only in ways the caller checked.
-    pub(super) unsafe fn load(&self) {
+    pub(crate) unsafe fn load(&self) {
         // SAFETY: per the contract.
         unsafe { hal::fpu::restore(self.ptr.as_ptr()) };
     }

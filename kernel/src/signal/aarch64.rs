@@ -3,9 +3,10 @@
 //!
 //! The handler's frame is a `struct sigframe` below the interrupted stack
 //! or at the top of the alternate stack, under the list of extra register
-//! contexts `mc_ptr` points at: with SVE, a `struct sve_context` holding
-//! the Z and P registers, FFR, FPSR, and FPCR at the thread's vector
-//! length, then the end marker. A context coming back may carry one SVE
+//! contexts `mc_ptr` points at: for a thread that has started SVE (run
+//! an SVE instruction since its start or `execve`), a `struct sve_context`
+//! holding the Z and P registers, FFR, FPSR, and FPCR at the thread's
+//! vector length, then the end marker. A context coming back may carry one SVE
 //! context, of that size; the V registers in `mc_fpregs` then still set
 //! the Z registers' low 128 bits (FreeBSD's `vfp_to_sve_sync`).
 //! The handler gets the signal, the `siginfo`, and the context in `x0`
@@ -140,8 +141,10 @@ pub(super) fn sendsig(frame: &mut TrapFrame, d: &Delivery<'_>) -> Result<(), ()>
     UserPtr::<[u32; 2]>::new(first)
         .write(&[CTX_END, CTX_HEADER])
         .map_err(|_| ())?;
-    let vl = crate::arch::fpu::vector_length();
-    if vl != 0 {
+    // An SVE context only once the thread has started SVE (FreeBSD's
+    // `sendsig_ctx_sve`: "do nothing if sve hasn't started").
+    if crate::arch::fpu::sve_started() {
+        let vl = crate::arch::fpu::vector_length();
         first = first.wrapping_sub(sve_ctx_size(vl) as u64);
         write_sve(first, &fpu, vl)?;
     }
@@ -243,6 +246,9 @@ pub(crate) fn prepare_context(frame: &mut TrapFrame, mc: &McontextArm) -> Result
             w[sr / 8] = u64::from(mc.mc_fpregs.fp_sr & FPSR_BITS);
             w[cr / 8] = u64::from(mc.mc_fpregs.fp_cr & FPCR_BITS);
         }
+        // Loading the image does not change whether the thread has
+        // started SVE.
+        crate::arch::fpu::set_started(img.bytes_mut(), crate::arch::fpu::sve_started());
         Some(img)
     } else {
         None
@@ -281,7 +287,12 @@ fn sve_context(mut ptr: u64) -> Result<Option<u64>, Errno> {
             CTX_END => return Ok(sve),
             CTX_SVE => {
                 let vl = crate::arch::fpu::vector_length();
-                if sve.is_some() || vl == 0 || size as usize != sve_ctx_size(vl) {
+                // Only a thread that has started SVE may load one
+                // (`pcb_svesaved == NULL` is `EINVAL`).
+                if sve.is_some()
+                    || !crate::arch::fpu::sve_started()
+                    || size as usize != sve_ctx_size(vl)
+                {
                     return Err(Errno::EINVAL);
                 }
                 sve = Some(ptr.wrapping_add(SVE_HEADER as u64));

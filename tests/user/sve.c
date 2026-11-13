@@ -6,7 +6,9 @@
  * thread's vector length) and then the end marker, and sigreturn loads
  * the Z registers' bits past the V registers from it, while mc_fpregs
  * still sets their low 128 bits. Without SVE, the list is the end marker
- * alone. Elsewhere there is nothing to check.
+ * alone, and so it is for a thread that has not run an SVE instruction
+ * yet: the process before its first, and a forked child of a process
+ * that has run one. Elsewhere there is nothing to check.
  *
  * The signal comes from another thread while this one runs in user mode
  * holding a pattern in Z0, which mc_fpregs shows in V0. What the SVE
@@ -26,6 +28,7 @@
 #include <sys/types.h>
 #include <sys/auxv.h>
 #include <sys/ucontext.h>
+#include <sys/wait.h>
 
 #include <machine/elf.h>
 
@@ -189,6 +192,49 @@ end_only_handler(int sig, siginfo_t *si, void *ctx)
 	    rc->ctx_size == sizeof(*rc);
 }
 
+/* Whether the context list starts with an SVE context. */
+static int first_is_sve;
+
+static void
+first_handler(int sig, siginfo_t *si, void *ctx)
+{
+	ucontext_t *uc = ctx;
+	struct arm64_reg_context *rc = (void *)uc->uc_mcontext.mc_ptr;
+
+	(void)sig;
+	(void)si;
+	first_is_sve = rc != NULL && rc->ctx_id == ARM64_CTX_SVE;
+}
+
+/*
+ * After the process has run SVE instructions: its frames still carry an
+ * SVE context, a forked child's do not.
+ */
+static void
+check_fork(void)
+{
+	struct sigaction sa;
+	pid_t pid;
+	int status = -1;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_flags = SA_SIGINFO;
+	sa.sa_sigaction = first_handler;
+	sigaction(SIGUSR2, &sa, NULL);
+	pid = fork();
+	if (pid == 0) {
+		first_is_sve = 1;
+		raise(SIGUSR2);
+		_exit(first_is_sve);
+	}
+	CHECK(pid > 0, "fork failed");
+	if (pid > 0)
+		waitpid(pid, &status, 0);
+	CHECK(status == 0, "a forked child's frame has an SVE context");
+	raise(SIGUSR2);
+	CHECK(first_is_sve, "no SVE context after the fork");
+}
+
 int
 main(void)
 {
@@ -204,9 +250,16 @@ main(void)
 		raise(SIGUSR1);
 		CHECK(saw_end, "the context list is not just its end");
 	} else {
+		/* Before the first SVE instruction. */
+		sa.sa_sigaction = end_only_handler;
+		sigaction(SIGUSR2, &sa, NULL);
+		raise(SIGUSR2);
+		CHECK(saw_end, "an SVE context before any SVE instruction");
+		saw_end = 0;
 		sa.sa_sigaction = handler;
 		sigaction(SIGUSR1, &sa, NULL);
 		check_sve();
+		check_fork();
 	}
 	if (failures == 0)
 		printf("sve: ok (%s)\n", (hwcap & HWCAP_SVE) != 0 ?

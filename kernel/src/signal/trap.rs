@@ -128,10 +128,16 @@ fn classify(s: &Sleepable, p: &Process, report: &crate::arch::TrapReport) -> Opt
 }
 
 /// Whether the trap was an `mrs` of the ID registers, now emulated
-/// (FreeBSD's `undef_insn` and `undef_sys` handlers).
+/// (FreeBSD's `undef_insn` and `undef_sys` handlers), or the thread's
+/// first SVE instruction, now allowed (`sve_restore_state`).
 #[cfg(target_arch = "aarch64")]
 fn emulated(report: &crate::arch::TrapReport, frame: &mut TrapFrame) -> bool {
     use crate::arch::trap::Trap;
+    // The thread's first SVE instruction (`EXCP_SVE`): it runs again with
+    // SVE started.
+    if matches!(report.trap, Trap::Other(0x19)) && crate::arch::fpu::start_sve() {
+        return true;
+    }
     let read = match report.trap {
         Trap::Undefined => crate::uaccess::UserPtr::<u32>::new(frame.elr)
             .read()

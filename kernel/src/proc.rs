@@ -2028,6 +2028,15 @@ impl Process {
             hal::user::set_tls(0);
             hal::user::set_tls2(0);
         }
+        // The new image starts with clear FP registers and SVE not yet
+        // started (FreeBSD's `vfp_reset_state`).
+        #[cfg(target_arch = "aarch64")]
+        match crate::signal::FpuImage::zeroed() {
+            // SAFETY: the image is all zeros: the initial state.
+            Some(clear) => unsafe { clear.load() },
+            // No memory for an image: the registers stay.
+            None => arch::fpu::stop_sve(),
+        }
         self.layout.set(image.layout);
         *frame = arch::user::user_frame(image.entry, image.sp, image.arg);
         drop(file);
@@ -3025,6 +3034,10 @@ fn enter(s: &Sleepable, arg: usize) -> ! {
     // and a stop or single-threading under way, are looked at below.
     thread.set_sched(Some(sched::current_thread()));
     sched::set_owner(Some(thread));
+    // A forked thread has its creator's FP registers, but has not started
+    // SVE (FreeBSD's `vfp_new_thread`).
+    #[cfg(target_arch = "aarch64")]
+    arch::fpu::stop_sve();
     sched::current().request_ast(crate::signal::AST_SUSPEND);
     UserThread::with_current(crate::signal::recheck);
     let mut frame = frame;

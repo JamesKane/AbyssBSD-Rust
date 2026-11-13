@@ -6,6 +6,14 @@
 //! The kernel is built soft-float and never touches these registers, so
 //! the scheduler saves and restores them only for threads that use them.
 //!
+//! User mode's SVE starts trapped (`CPACR_EL1.ZEN`): a thread's first SVE
+//! instruction starts SVE for it ([`start_sve`], FreeBSD's
+//! `sve_restore_state`), and only a thread that has started it gets an
+//! SVE context in its signal frames. Whether the thread has is kept in
+//! its save area: [`save`] records it and [`restore`] puts it back.
+//! Kernel mode's SVE is never trapped, so the save area is the same for
+//! every thread.
+//!
 //! Behavior reference: sys/arm64/arm64/vfp.c (Arm ARM for SVE).
 
 use core::arch::asm;
@@ -16,13 +24,18 @@ use crate::cpu::read_sysreg;
 /// SVE vector length in bytes (0 without SVE).
 static VL: AtomicUsize = AtomicUsize::new(0);
 
+/// `CPACR_EL1.ZEN`: `0b01` traps SVE from EL0 only, `0b11` from nowhere.
+const CPACR_ZEN: u64 = 3 << 16;
+const CPACR_ZEN_EL1: u64 = 1 << 16;
+
 /// Whether the CPU implements SVE (`ID_AA64PFR0_EL1.SVE`).
 #[must_use]
 pub fn has_sve() -> bool {
     (read_sysreg!("id_aa64pfr0_el1") >> 32) & 0xf != 0
 }
 
-/// Enables FP/SIMD (and SVE at its largest vector length) on this CPU.
+/// Enables FP/SIMD (and, for the kernel, SVE at its largest vector
+/// length) on this CPU. User mode's SVE stays trapped.
 ///
 /// # Safety
 ///
@@ -30,7 +43,7 @@ pub fn has_sve() -> bool {
 pub unsafe fn init_cpu(boot: bool) {
     let mut cpacr = read_sysreg!("cpacr_el1") | (3 << 20);
     if has_sve() {
-        cpacr |= 3 << 16;
+        cpacr = (cpacr & !CPACR_ZEN) | CPACR_ZEN_EL1;
     }
     // SAFETY: enabling FP/SIMD and SVE access at EL1 changes no memory.
     unsafe {
@@ -54,7 +67,8 @@ pub fn vector_length() -> usize {
 }
 
 /// Bytes in a save area: Z (32 × VL), P (16 × VL/8), FFR (VL/8), then
-/// FPSR and FPCR; without SVE, 32 × 16 bytes of V registers instead.
+/// FPSR and FPCR, then whether the thread has started SVE; without SVE,
+/// 32 × 16 bytes of V registers instead.
 #[must_use]
 pub fn area_size() -> usize {
     let vl = vector_length();
@@ -63,7 +77,7 @@ pub fn area_size() -> usize {
     } else {
         32 * vl + 17 * (vl / 8)
     };
-    regs.next_multiple_of(16) + 16
+    regs.next_multiple_of(16) + 32
 }
 
 /// What the save area holds, for diagnostics.
@@ -87,7 +101,125 @@ pub unsafe fn init_area(area: *mut u8) {
 }
 
 fn control_offset() -> usize {
+    area_size() - 32
+}
+
+/// Where a save area says whether its thread has started SVE (8 bytes).
+fn started_offset() -> usize {
     area_size() - 16
+}
+
+/// Whether the current thread has started SVE: user mode's SVE is not
+/// trapped. Only a user thread's answer means anything (a kernel thread
+/// runs with whatever the CPU's last user thread left).
+#[must_use]
+pub fn sve_started() -> bool {
+    vector_length() != 0 && read_sysreg!("cpacr_el1") & CPACR_ZEN == CPACR_ZEN
+}
+
+/// Traps user mode's SVE on this CPU, or stops trapping it.
+fn trap_sve(trap: bool) {
+    let cpacr = read_sysreg!("cpacr_el1");
+    let want = (cpacr & !CPACR_ZEN) | if trap { CPACR_ZEN_EL1 } else { CPACR_ZEN };
+    if want != cpacr {
+        // SAFETY: only EL0's access to SVE changes; the kernel's stays.
+        unsafe { asm!("msr cpacr_el1, {}", "isb", in(reg) want, options(nostack)) };
+    }
+}
+
+/// Starts SVE for the current thread, on its first SVE instruction (the
+/// trap of one from user mode): what SVE adds to the V registers starts
+/// clear, as FreeBSD's fresh `pcb_svesaved` does, and user mode's SVE is
+/// no longer trapped. `false` without SVE: the instruction is undefined.
+#[must_use]
+pub fn start_sve() -> bool {
+    let vl = vector_length();
+    if vl == 0 {
+        return false;
+    }
+    // SAFETY: the registers are the current thread's, which could not
+    // have changed what is cleared here (its SVE was trapped). A switch
+    // in between saves and restores them as they are.
+    unsafe {
+        if vl > 16 {
+            // Writing a V register clears its Z register's other bits.
+            asm!(
+                ".arch_extension fp",
+                ".arch_extension simd",
+                "mov v0.16b, v0.16b",
+                "mov v1.16b, v1.16b",
+                "mov v2.16b, v2.16b",
+                "mov v3.16b, v3.16b",
+                "mov v4.16b, v4.16b",
+                "mov v5.16b, v5.16b",
+                "mov v6.16b, v6.16b",
+                "mov v7.16b, v7.16b",
+                "mov v8.16b, v8.16b",
+                "mov v9.16b, v9.16b",
+                "mov v10.16b, v10.16b",
+                "mov v11.16b, v11.16b",
+                "mov v12.16b, v12.16b",
+                "mov v13.16b, v13.16b",
+                "mov v14.16b, v14.16b",
+                "mov v15.16b, v15.16b",
+                "mov v16.16b, v16.16b",
+                "mov v17.16b, v17.16b",
+                "mov v18.16b, v18.16b",
+                "mov v19.16b, v19.16b",
+                "mov v20.16b, v20.16b",
+                "mov v21.16b, v21.16b",
+                "mov v22.16b, v22.16b",
+                "mov v23.16b, v23.16b",
+                "mov v24.16b, v24.16b",
+                "mov v25.16b, v25.16b",
+                "mov v26.16b, v26.16b",
+                "mov v27.16b, v27.16b",
+                "mov v28.16b, v28.16b",
+                "mov v29.16b, v29.16b",
+                "mov v30.16b, v30.16b",
+                "mov v31.16b, v31.16b",
+                options(nomem, nostack),
+            );
+        }
+        asm!(
+            ".arch_extension sve",
+            "pfalse p0.b",
+            "pfalse p1.b",
+            "pfalse p2.b",
+            "pfalse p3.b",
+            "pfalse p4.b",
+            "pfalse p5.b",
+            "pfalse p6.b",
+            "pfalse p7.b",
+            "pfalse p8.b",
+            "pfalse p9.b",
+            "pfalse p10.b",
+            "pfalse p11.b",
+            "pfalse p12.b",
+            "pfalse p13.b",
+            "pfalse p14.b",
+            "pfalse p15.b",
+            "wrffr p0.b",
+            options(nomem, nostack),
+        );
+    }
+    trap_sve(false);
+    true
+}
+
+/// Puts the current thread back to before its first SVE instruction: a
+/// new thread, which does not inherit its creator's having started
+/// (FreeBSD's `vfp_new_thread`). What SVE adds is cleared when it starts.
+pub fn stop_sve() {
+    if vector_length() != 0 {
+        trap_sve(true);
+    }
+}
+
+/// Sets whether the thread whose state `area` holds has started SVE.
+pub fn set_started(area: &mut [u8], started: bool) {
+    let at = started_offset();
+    area[at..at + 8].copy_from_slice(&u64::from(started).to_ne_bytes());
 }
 
 /// Where V register `n` (Z register `n`'s low 128 bits, with SVE) starts
@@ -117,7 +249,8 @@ pub fn clear_sve_extra(area: &mut [u8]) {
     area[32 * vl..32 * vl + 17 * (vl / 8)].fill(0);
 }
 
-/// Saves this CPU's FP/SIMD registers to `area`.
+/// Saves this CPU's FP/SIMD registers to `area`, and whether the current
+/// thread has started SVE.
 ///
 /// # Safety
 ///
@@ -182,10 +315,12 @@ pub unsafe fn save(area: *mut u8) {
         asm!("mrs {}, S3_3_C4_C4_1", "mrs {}, S3_3_C4_C4_0", out(reg) fpsr, out(reg) fpcr, options(nomem, nostack));
         ctl.write(fpsr);
         ctl.add(1).write(fpcr);
+        ctl.add(2).write(u64::from(sve_started()));
     }
 }
 
-/// Loads this CPU's FP/SIMD registers from `area`.
+/// Loads this CPU's FP/SIMD registers from `area`, and traps user mode's
+/// SVE unless the area's thread has started it.
 ///
 /// # Safety
 ///
@@ -246,6 +381,9 @@ pub unsafe fn restore(area: *const u8) {
         }
         let ctl = area.add(control_offset()).cast::<u64>();
         asm!("msr S3_3_C4_C4_1, {}", "msr S3_3_C4_C4_0, {}", in(reg) ctl.read(), in(reg) ctl.add(1).read(), options(nostack));
+        if vl != 0 {
+            trap_sve(ctl.add(2).read() == 0);
+        }
     }
 }
 
