@@ -521,7 +521,24 @@ documents named; this section keeps what is done and what is open.
     whatever ran before). Running at EL2 with VHE, CnP, and no PAN were tried and change
     nothing. Left: a program's own code layout still moves that `write` between 470 and
     620 ns (one test program built `-O1`, `-O2`, `-O3`), where FreeBSD stays at about 510.
-    The suites are not rerun yet;
+    The suites rerun with both (`tests/perf/board/results/2026-11-12-6aae600.txt`): on the
+    little cores `io.null.write` 1.68 to 0.95, `syscall` 0.89, every component passing; but
+    `sig` failed on the big and mid cores (`sig.deliver` 1.018 to 1.044), see the next item;
+  - `sig.deliver` with E0PD1: the user copies of a signal's frame cost more with it, and
+    AbyssBSD made nine a round trip to FreeBSD's four, because it wrote and read an SVE
+    context (some 580 bytes each way) for every thread. FreeBSD traps SVE at EL0 until a
+    thread's first SVE instruction and writes the context only after it (`pcb_svesaved`); now
+    AbyssBSD does the same (a new thread, a forked child, and an `execve` start without it),
+    and `sig.deliver` on the big cores is 949 ns to FreeBSD's 973. The rerun, three runs a
+    side (`tests/perf/board/results/2026-11-13-382361c.txt`), passes every component in
+    every class, `sig` at 0.98 on the big and mid cores, overall 0.67 to 0.69. Still behind:
+    `unix.rights` (1.10 mid, 1.55 little, 1.44 with all cores), `thr.create` (1.06 to 1.09),
+    `thr.sem.pingpong` (1.08 to 1.11), contended `thr.mutex` at two and eight threads (1.1
+    to 1.4), `fs.ufs.fsx` (1.06); on the little cores `tmpfs.open_close` (1.21),
+    `kevent.pipe1000` (1.14), `tmpfs.extract` and `thr.cond.pingpong` (1.08); with all cores
+    the unix socket ping-pongs (1.10 to 1.13).
+    Lifting PAN around a copy as FreeBSD does (plain loads and stores in place of
+    `ldtr`/`sttr`) was tried and is slower here (`sig.deliver` 1370 ns, `pipe.pingpong` 8%);
   - the 10-run gating set, `p2` on the mid and little cores, and `p7`;
   - the arm64 kernel's target makes no unaligned access, so an integer read out of a byte
     slice is a byte load each (it was 144 ns of every signal): a sweep of the hot paths that
