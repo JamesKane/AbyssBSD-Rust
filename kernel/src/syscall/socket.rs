@@ -41,6 +41,10 @@ const SUN_PATH: usize = 2;
 /// `MCLBYTES`: the most control a send takes.
 const MCLBYTES: usize = 2048;
 
+/// The longest control a send keeps on the stack (an mbuf's own storage
+/// holds about this much).
+const SHORT_CONTROL: usize = 160;
+
 /// A socket's type from `socket`'s `type`, and its flags.
 fn kind(ty: u64) -> Result<(Type, u32), Errno> {
     let ty = int(ty).cast_unsigned();
@@ -623,7 +627,8 @@ pub(super) fn getsockopt(
 /// `unp_internalize`: a send's control messages, in the kernel's form.
 fn internalize(s: &Sleepable, raw: &[u8]) -> Result<Vec<Control>, Errno> {
     let p = process()?;
-    let mut out = Vec::new();
+    // One message, the usual.
+    let mut out = Vec::with_capacity(1);
     let rd = |b: &[u8], i: usize| -> u32 {
         u32::from_ne_bytes(b[i..i + 4].try_into().unwrap_or([0; 4]))
     };
@@ -647,27 +652,29 @@ fn internalize(s: &Sleepable, raw: &[u8]) -> Result<Vec<Control>, Errno> {
                     if cmsg_space(n * 8) > MCLBYTES {
                         return Err(Errno::EMSGSIZE);
                     }
-                    let t = p.files.lock(s);
-                    let mut files = Vec::with_capacity(n);
-                    for i in 0..n {
-                        let fd = rd(data, i * 4).cast_signed();
-                        let slot = t.slot(fd)?;
-                        files.push((Arc::clone(&slot.file), slot.caps.as_deref().cloned()));
-                    }
-                    drop(t);
                     // Each goes with its Capsicum limits (`unp_internalize`'s
-                    // `filecaps_copy`).
-                    let rights = files
-                        .into_iter()
-                        .map(|(f, caps)| {
-                            let mut r = InFlight::new(f as Arc<dyn socket::Passable>, 0);
-                            r.caps = caps.map(|c| {
-                                alloc::boxed::Box::new(c)
-                                    as alloc::boxed::Box<dyn core::any::Any + Send + Sync>
-                            });
-                            r
-                        })
-                        .collect();
+                    // `filecaps_copy`). The files are held under the table's
+                    // lock; a bad descriptor lets go of them after it.
+                    let mut rights = Vec::with_capacity(n);
+                    let t = p.files.lock(s);
+                    let bad = (0..n).find_map(|i| {
+                        let slot = match t.slot(rd(data, i * 4).cast_signed()) {
+                            Ok(slot) => slot,
+                            Err(e) => return Some(e),
+                        };
+                        let file = Arc::clone(&slot.file) as Arc<dyn socket::Passable>;
+                        let mut r = InFlight::new(file, 0);
+                        r.caps = slot.caps.as_deref().cloned().map(|c| {
+                            alloc::boxed::Box::new(c)
+                                as alloc::boxed::Box<dyn core::any::Any + Send + Sync>
+                        });
+                        rights.push(r);
+                        None
+                    });
+                    drop(t);
+                    if let Some(e) = bad {
+                        return Err(e);
+                    }
                     out.push(Control::Rights(rights));
                 }
             }
@@ -715,7 +722,7 @@ fn sendit(
     sock_fd: u64,
     uio: &mut UserIo,
     to: Option<Vec<u8>>,
-    control: Option<Vec<u8>>,
+    control: Option<&[u8]>,
     flags: i32,
 ) -> SysResult {
     // An address names something outside the sandbox (`kern_sendit`).
@@ -740,7 +747,7 @@ fn sendit(
     }
     let so = &so_of(&f).so;
     let control = match control {
-        Some(raw) => internalize(s, &raw)?,
+        Some(raw) => internalize(s, raw)?,
         None => Vec::new(),
     };
     let to = match to {
@@ -797,6 +804,10 @@ pub(super) fn sendmsg(s: &Sleepable, sock_fd: u64, msg: u64, flags: u64) -> SysR
     } else {
         Some(sockaddr(m.msg_name, u64::from(m.msg_namelen))?)
     };
+    // A short control is copied in to the stack, as an mbuf's own
+    // storage holds it for `sockargs`.
+    let mut short;
+    let mut long = Vec::new();
     let control = if m.msg_control == 0 {
         None
     } else {
@@ -805,16 +816,38 @@ pub(super) fn sendmsg(s: &Sleepable, sock_fd: u64, msg: u64, flags: u64) -> SysR
         if !(12..=MCLBYTES).contains(&n) {
             return Err(Errno::EINVAL);
         }
-        let mut raw = alloc::vec![0u8; n];
-        uaccess::copy_in(&mut raw, m.msg_control).map_err(|_| Errno::EFAULT)?;
-        Some(raw)
+        let raw = if n <= SHORT_CONTROL {
+            short = [0u8; SHORT_CONTROL];
+            &mut short[..n]
+        } else {
+            long.resize(n, 0);
+            &mut long[..]
+        };
+        uaccess::copy_in(raw, m.msg_control).map_err(|_| Errno::EFAULT)?;
+        Some(&*raw)
     };
     sendit(s, sock_fd, &mut uio, to, control, int(flags))
 }
 
 /// `unp_externalize`: received control messages in the user's form, with
-/// their descriptors installed; each a whole `CMSG_SPACE`.
-fn externalize(s: &Sleepable, control: Vec<Control>, flags: i32) -> Result<Vec<Vec<u8>>, Errno> {
+/// their descriptors installed; each a whole `CMSG_SPACE`, one after
+/// another at the end of `out` (which is as it was after an error).
+fn externalize(
+    s: &Sleepable,
+    control: Vec<Control>,
+    flags: i32,
+    out: &mut Vec<u8>,
+) -> Result<(), Errno> {
+    let start = out.len();
+    out.reserve_exact(
+        control
+            .iter()
+            .map(|c| match c {
+                Control::Rights(r) => cmsg_space(r.len() * 4),
+                Control::Raw { data, .. } => cmsg_space(data.len()),
+            })
+            .sum(),
+    );
     let p = process()?;
     let cred = crate::fs::cred();
     let fdf = FdFlags {
@@ -823,7 +856,6 @@ fn externalize(s: &Sleepable, control: Vec<Control>, flags: i32) -> Result<Vec<V
         resolve_beneath: false,
     };
     let limit = super::io::max_files(&p);
-    let mut out = Vec::new();
     let mut err = Ok(());
     for c in control {
         match c {
@@ -833,7 +865,7 @@ fn externalize(s: &Sleepable, control: Vec<Control>, flags: i32) -> Result<Vec<V
                 }
                 // Each descriptor is written into the message as it is
                 // installed; all of a message's or none (`fdallocn`).
-                let mut m = cmsg(SOL_SOCKET, SCM_RIGHTS, rights.len() * 4);
+                let m = cmsg(out, SOL_SOCKET, SCM_RIGHTS, rights.len() * 4);
                 let mut got = 0;
                 let mut t = p.files.lock(s);
                 for mut r in rights {
@@ -878,35 +910,45 @@ fn externalize(s: &Sleepable, control: Vec<Control>, flags: i32) -> Result<Vec<V
                         .collect();
                     drop(t);
                     drop(closed);
-                    continue;
                 }
-                drop(t);
-                out.push(m);
             }
             Control::Raw { level, ty, data } => {
-                let mut m = cmsg(level, ty, data.len());
+                let m = cmsg(out, level, ty, data.len());
                 m[CMSG_HDR..CMSG_HDR + data.len()].copy_from_slice(&data);
-                out.push(m);
             }
         }
     }
-    err.map(|()| out)
+    if err.is_err() {
+        out.truncate(start);
+    }
+    err
 }
 
-/// A control message of `len` data bytes, its header filled in and its
-/// data zero, a whole `CMSG_SPACE`.
-fn cmsg(level: i32, ty: i32, len: usize) -> Vec<u8> {
-    let mut m = alloc::vec![0u8; cmsg_space(len)];
+/// Appends a control message of `len` data bytes to `out`, its header
+/// filled in and its data zero, a whole `CMSG_SPACE`; returns it.
+fn cmsg(out: &mut Vec<u8>, level: i32, ty: i32, len: usize) -> &mut [u8] {
+    let at = out.len();
+    out.resize(at + cmsg_space(len), 0);
+    let m = &mut out[at..];
     m[0..4].copy_from_slice(&u32::try_from(cmsg_len(len)).unwrap_or(0).to_ne_bytes());
     m[4..8].copy_from_slice(&level.to_ne_bytes());
     m[8..12].copy_from_slice(&ty.to_ne_bytes());
     m
 }
 
+/// The first of the externalized messages in `msgs` (each a whole
+/// `CMSG_SPACE`), and those after it.
+fn first_cmsg(msgs: &[u8]) -> Option<(&[u8], &[u8])> {
+    let len = u32::from_ne_bytes(msgs.get(0..4)?.try_into().ok()?) as usize;
+    let space = cmsg_space(len.checked_sub(CMSG_HDR)?);
+    msgs.split_at_checked(space)
+}
+
 /// Closes the descriptors of messages that did not fit
 /// (`m_dispose_extcontrolm`).
-fn dispose(s: &Sleepable, msgs: &[Vec<u8>]) {
-    for m in msgs {
+fn dispose(s: &Sleepable, mut msgs: &[u8]) {
+    while let Some((m, rest)) = first_cmsg(msgs) {
+        msgs = rest;
         let ty = i32::from_ne_bytes(m[8..12].try_into().unwrap_or([0; 4]));
         let len = u32::from_ne_bytes(m[0..4].try_into().unwrap_or([0; 4])) as usize;
         if ty != SCM_RIGHTS {
@@ -936,11 +978,9 @@ fn recvit(
         return super::netlink::recvit(s, &f, sock_fd, uio, flags, name);
     }
     let so = &so_of(&f).so;
-    let mut msgs: Vec<Vec<u8>> = Vec::new();
-    let mut ext = |c: Vec<Control>| -> Result<(), Errno> {
-        msgs.extend(externalize(s, c, flags)?);
-        Ok(())
-    };
+    // The control messages for the user, one after another.
+    let mut msgs: Vec<u8> = Vec::new();
+    let mut ext = |c: Vec<Control>| -> Result<(), Errno> { externalize(s, c, flags, &mut msgs) };
     let ext: Option<&mut dyn FnMut(Vec<Control>) -> Result<(), Errno>> = if control.is_some() {
         Some(&mut ext)
     } else {
@@ -977,21 +1017,22 @@ fn recvit(
     }
     let mut ctllen = 0;
     if let Some((addr, len)) = control {
-        let mut left = len as usize;
+        // The whole messages that fit, in one copy.
         let mut at = 0;
-        for (i, m) in msgs.iter().enumerate() {
-            if left < m.len() {
+        let mut rest = &msgs[..];
+        while let Some((m, after)) = first_cmsg(rest) {
+            if len as usize - at < m.len() {
                 outflags |= MSG_CTRUNC;
-                dispose(s, &msgs[i..]);
+                dispose(s, rest);
                 break;
             }
-            if uaccess::copy_out(addr + at as u64, m).is_err() {
-                // Every received descriptor goes (`m_dispose_extcontrolm`).
-                dispose(s, &msgs);
-                return Err(Errno::EFAULT);
-            }
             at += m.len();
-            left -= m.len();
+            rest = after;
+        }
+        if uaccess::copy_out(addr, &msgs[..at]).is_err() {
+            // Every received descriptor goes (`m_dispose_extcontrolm`).
+            dispose(s, &msgs);
+            return Err(Errno::EFAULT);
         }
         ctllen = u32::try_from(at).unwrap_or(0);
     }

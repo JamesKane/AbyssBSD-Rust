@@ -384,10 +384,10 @@ pub(super) fn sendit(
     sock_fd: u64,
     uio: &mut UserIo,
     to: Option<Vec<u8>>,
-    control: Option<Vec<u8>>,
+    control: Option<&[u8]>,
     flags: i32,
 ) -> SysResult {
-    let ctl = match &control {
+    let ctl = match control {
         Some(c) => check_control(so, c)?,
         None => inet::SendCtl::default(),
     };
