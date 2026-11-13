@@ -539,6 +539,22 @@ documents named; this section keeps what is done and what is open.
     the unix socket ping-pongs (1.10 to 1.13).
     Lifting PAN around a copy as FreeBSD does (plain loads and stores in place of
     `ldtr`/`sttr`) was tried and is slower here (`sig.deliver` 1370 ns, `pipe.pingpong` 8%);
+  - `unix.rights`: a passed descriptor took some thirteen allocations a round trip to
+    FreeBSD's four; with four fewer (the control on the stack, one list of files, one buffer
+    of received messages) the round trip is 6765 instructions for 7776, and the benchmark
+    1347 ns on the big cores (FreeBSD: 1484) and about 7250 on the little (it was 8850;
+    FreeBSD: 5700 to 6300);
+  - the little cores and where the kernel's code lies: an A520 pays 75 to 145 cycles for
+    each first-level instruction-cache miss (a big core next to nothing), and how many a
+    system call takes depends on where the linker put its functions, which every change
+    moves. The same code linked in three orders: `dup` and `close` 840 to 985 ns, a byte
+    written to and read from a UNIX socket 2400 to 3500, a passed descriptor 7800 to 9800
+    (counted with the PMU: 0 to 2.5, 14 to 33, and 80 to 112 misses), the big cores the
+    same throughout. With the functions a profile finds hot placed together
+    (`--symbol-ordering-file`) each is at its best or near it, and at or under FreeBSD's
+    (887, 2760, 8460). This is most of the little cores' "noisy" verdicts and of what a
+    change appears to cost or gain there. Not decided: whether the build orders the hot
+    functions, and from what list;
   - the 10-run gating set, `p2` on the mid and little cores, and `p7`;
   - the arm64 kernel's target makes no unaligned access, so an integer read out of a byte
     slice is a byte load each (it was 144 ns of every signal): a sweep of the hot paths that
