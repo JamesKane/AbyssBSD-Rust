@@ -1705,11 +1705,13 @@ mod machdep {
     }
 
     /// The Q registers and FPSR/FPCR from the thread's saved state (the
-    /// HAL's layout: 32 Q registers, then FPSR and FPCR).
+    /// HAL's layout: the V registers, each the start of its Z register
+    /// where there is SVE, and FPSR and FPCR after them).
     pub(super) fn fill_fpregs(area: &mut [u8]) -> Fpreg {
         let mut r = Fpreg::default();
         for (i, q) in r.fp_q.iter_mut().enumerate() {
-            if let Some(b) = area.get(16 * i..16 * i + 16) {
+            let at = crate::arch::fpu::vreg_offset(i);
+            if let Some(b) = area.get(at..at + 16) {
                 *q = u128::from_ne_bytes(b.try_into().unwrap_or([0; 16]));
             }
         }
@@ -1717,21 +1719,24 @@ mod machdep {
             area.get(at..at + 4)
                 .map_or(0, |b| u32::from_ne_bytes(b.try_into().unwrap_or([0; 4])))
         };
-        r.fp_sr = word(512);
-        r.fp_cr = word(520);
+        let (sr, cr) = crate::arch::fpu::status_offsets();
+        r.fp_sr = word(sr);
+        r.fp_cr = word(cr);
         r
     }
 
     pub(super) fn set_fpregs(area: &mut [u8], r: &Fpreg) {
         for (i, q) in r.fp_q.iter().enumerate() {
-            if let Some(b) = area.get_mut(16 * i..16 * i + 16) {
+            let at = crate::arch::fpu::vreg_offset(i);
+            if let Some(b) = area.get_mut(at..at + 16) {
                 b.copy_from_slice(&q.to_ne_bytes());
             }
         }
-        if let Some(b) = area.get_mut(512..516) {
+        let (sr, cr) = crate::arch::fpu::status_offsets();
+        if let Some(b) = area.get_mut(sr..sr + 4) {
             b.copy_from_slice(&r.fp_sr.to_ne_bytes());
         }
-        if let Some(b) = area.get_mut(520..524) {
+        if let Some(b) = area.get_mut(cr..cr + 4) {
             b.copy_from_slice(&r.fp_cr.to_ne_bytes());
         }
     }
