@@ -3,7 +3,7 @@
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering, fence};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering, fence};
 
 use abi::event::{EV_EOF, EV_ONESHOT};
 use sync::SpinLock;
@@ -90,8 +90,19 @@ pub struct Notify {
     /// Whether anything is registered: lets [`Notify::notify`] skip the
     /// lock when nobody waits.
     armed: AtomicBool,
+    /// Counts the object's changes, for a waiter that spins a moment
+    /// before it registers ([`Notify::changes`]). Notifiers may race and
+    /// lose a count; it still differs from what a spinner read.
+    changes: AtomicU32,
+    /// How the last spins went ([`Notify::may_spin`]).
+    spin_missed: AtomicU8,
     inner: SpinLock<Inner>,
 }
+
+/// After this many spins in a row that saw no change, waiters stop
+/// spinning, but for one in every [`SPIN_PROBE`] waits.
+const SPIN_MISSES: u8 = 2;
+const SPIN_PROBE: u8 = 64;
 
 impl core::fmt::Debug for Notify {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -112,6 +123,8 @@ impl Notify {
     pub const fn new() -> Self {
         Self {
             armed: AtomicBool::new(false),
+            changes: AtomicU32::new(0),
+            spin_missed: AtomicU8::new(0),
             inner: SpinLock::new(Inner {
                 knotes: Vec::new(),
                 pollers: Pollers::new(),
@@ -174,8 +187,47 @@ impl Notify {
     /// caller changed the state it is about first).
     #[must_use]
     pub fn armed(&self) -> bool {
+        self.changed();
         fence(Ordering::SeqCst);
         self.armed.load(Ordering::Relaxed)
+    }
+
+    fn changed(&self) {
+        let n = self.changes.load(Ordering::Relaxed);
+        self.changes.store(n.wrapping_add(1), Ordering::Relaxed);
+    }
+
+    /// A number that differs after the object changes (its notifier
+    /// called [`Notify::notify`] or [`Notify::armed`]).
+    #[must_use]
+    pub fn changes(&self) -> u32 {
+        self.changes.load(Ordering::Relaxed)
+    }
+
+    /// Whether a waiter about to sleep should first spin a moment for a
+    /// change: yes while spinning has been finding one (the other side
+    /// is at work on another CPU, and waking a sleeper costs it more
+    /// than the spin costs this side), and now and then to find out.
+    #[must_use]
+    pub fn may_spin(&self) -> bool {
+        let m = self.spin_missed.load(Ordering::Relaxed);
+        if m < SPIN_MISSES {
+            return true;
+        }
+        let next = if m >= SPIN_MISSES + SPIN_PROBE {
+            SPIN_MISSES - 1
+        } else {
+            m + 1
+        };
+        self.spin_missed.store(next, Ordering::Relaxed);
+        false
+    }
+
+    /// Records whether a spin saw a change.
+    pub fn spun(&self, hit: bool) {
+        let m = self.spin_missed.load(Ordering::Relaxed);
+        let next = if hit { 0 } else { (m + 1).min(SPIN_MISSES) };
+        self.spin_missed.store(next, Ordering::Relaxed);
     }
 
     /// The object's state changed: pollers wake (`selwakeup`) and knotes
@@ -207,6 +259,7 @@ impl Notify {
     }
 
     fn deliver(&self, hint: u64, pollers: bool) {
+        self.changed();
         fence(Ordering::SeqCst);
         if !self.armed.load(Ordering::Relaxed) {
             return;

@@ -150,6 +150,9 @@ pub(crate) fn collect() {
     }
 }
 
+/// How long a socket's waiter spins for a change before it sleeps.
+const SPIN_NS: u64 = 2_000;
+
 /// Waits for a change `notify` tells of: `retry` first, then, if it
 /// would block, again after registering (so a change meanwhile is seen),
 /// and if it still would, until woken, `timeout` (0: none) passes, or a
@@ -177,6 +180,29 @@ pub(crate) fn wait_until_lazy<R>(
     match retry() {
         Err(Errno::EAGAIN) => {}
         r => return r,
+    }
+    // A moment's spin before the sleep, while that has been paying: the
+    // other side, at work on another CPU, makes room or data within a
+    // microsecond, where putting this thread to sleep costs that side a
+    // wakeup (an interrupt to a halted CPU) and this one the way back.
+    if notify.may_spin() {
+        let was = notify.changes();
+        let end = crate::time::counter().saturating_add(crate::time::ns_to_ticks(SPIN_NS));
+        let mut hit = false;
+        while crate::time::counter() < end {
+            if notify.changes() != was {
+                hit = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        notify.spun(hit);
+        if hit {
+            match retry() {
+                Err(Errno::EAGAIN) => {}
+                r => return r,
+            }
+        }
     }
     let timeout = timeout();
     let poller = Poller::new();
