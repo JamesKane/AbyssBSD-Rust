@@ -35,7 +35,7 @@ impl Filter for UserFilter {
         true
     }
 
-    fn register(&self, _kn: &Knote, note: &mut Note, kev: &Kevent) {
+    fn register(&self, _kn: &Knote, note: &mut Note, kev: &Kevent) -> bool {
         if kev.fflags & NOTE_TRIGGER != 0 {
             note.hook = 1;
         }
@@ -54,6 +54,7 @@ impl Filter for UserFilter {
             note.kev.data = 0;
             note.kev.fflags = 0;
         }
+        false
     }
 
     fn process(&self, _kn: &Knote, note: &mut Note) -> Kevent {

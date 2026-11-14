@@ -3,16 +3,17 @@
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering, fence};
 
 use abi::errno::Errno;
 use abi::event::{
     EV_ADD, EV_CLEAR, EV_DELETE, EV_DISABLE, EV_DISPATCH, EV_DROP, EV_ENABLE, EV_FLAG1, EV_FLAG2,
     EV_FORCEONESHOT, EV_KEEPUDATA, EV_ONESHOT, EVFILT_PROC, Kevent,
 };
-use sync::SpinLock;
+use sync::{SpinGuard, SpinLock};
 
 use crate::notify::{Notify, Wake};
 
@@ -26,6 +27,10 @@ mod status {
     pub(super) const DISABLED: u16 = 0x08;
     /// Not on its object's list (`KN_DETACHED`).
     pub(super) const DETACHED: u16 = 0x10;
+    /// Queued by a scan that reported it and will ask its filter again
+    /// (a level-triggered event of a [`super::Filter::level`] filter): a
+    /// notification changes nothing and takes no lock.
+    pub(super) const RESCAN: u16 = 0x20;
     /// Gone from its kqueue: whoever still holds it ignores it.
     pub(super) const DROPPED: u16 = 0x8000;
 }
@@ -63,9 +68,10 @@ pub trait Filter: Send + Sync {
 
     /// Whether the event is active (`f_event`), updating `note` from the
     /// object's state. `hint` is the object's notification, 0 when a scan
-    /// or a registration asks. Called with the note locked and, from a
-    /// notification, the object's [`Notify`]: it must not sleep, and must
-    /// not touch that `Notify`.
+    /// or a registration asks. Called with the knote's kqueue locked and,
+    /// from a notification, the object's [`Notify`]: it must not sleep,
+    /// must not touch that `Notify`, and must not ask the knote for its
+    /// note or change its kqueue.
     fn event(&self, kn: &Knote, note: &mut Note, hint: u64) -> bool;
 
     /// Whether [`Filter::event`] answers from the object's state as it
@@ -84,11 +90,15 @@ pub trait Filter: Send + Sync {
         false
     }
 
-    /// A change to an existing knote (`f_touch(EVENT_REGISTER)`).
-    fn register(&self, kn: &Knote, note: &mut Note, kev: &Kevent) {
+    /// A change to an existing knote (`f_touch(EVENT_REGISTER)`), under
+    /// the same rules as [`Filter::event`]. Returns whether the knote
+    /// starts over: off the queue and inactive, as a timer re-added with
+    /// new parameters.
+    fn register(&self, kn: &Knote, note: &mut Note, kev: &Kevent) -> bool {
         let _ = kn;
         note.sfflags = kev.fflags;
         note.sdata = kev.data;
+        false
     }
 
     /// The event to report (`f_touch(EVENT_PROCESS)`).
@@ -133,12 +143,22 @@ pub trait Source {
     fn filter(&self, kev: &Kevent) -> Result<Box<dyn Filter>, Errno>;
 }
 
+/// A knote's [`Note`], under its kqueue's lock ([`Knote::note_mut`]).
+struct NoteCell(UnsafeCell<Note>);
+
+// SAFETY: the note is reached only through `Knote::note_mut`, which
+// takes the exclusive borrow of the held lock of the knote's own kqueue:
+// one thread at a time.
+unsafe impl Sync for NoteCell {}
+
 /// One registered event (FreeBSD's `struct knote`).
 pub struct Knote {
     /// First, so it is dropped first: a filter's own callbacks may use
     /// the knote until the filter has stopped them.
     filt: Box<dyn Filter>,
-    kq: Weak<Kqueue>,
+    /// Its kqueue, which holds it in turn until it is dropped from it
+    /// (`knote_drop`, or the kqueue's close, which drops them all).
+    kq: Arc<Kqueue>,
     pub ident: u64,
     pub filter: i16,
     fd: bool,
@@ -149,7 +169,11 @@ pub struct Knote {
     pass: AtomicU64,
     /// [`Filter::level`], asked once.
     level: bool,
-    note: SpinLock<Note>,
+    /// What it reports, under the kqueue's lock as its status is: a
+    /// notification runs the filter and queues the knote under that one
+    /// lock (`knote` under `KQ_LOCK`), and a scan holds it from one
+    /// knote to the next.
+    note: NoteCell,
 }
 
 impl core::fmt::Debug for Knote {
@@ -160,6 +184,12 @@ impl core::fmt::Debug for Knote {
             .field("status", &self.status.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
+}
+
+/// A kqueue's lock, held.
+struct Held<'a> {
+    kq: &'a Kqueue,
+    st: SpinGuard<'a, State>,
 }
 
 impl Knote {
@@ -173,106 +203,79 @@ impl Knote {
         self.status.store((s | on) & !off, Ordering::Relaxed);
     }
 
-    /// The kqueue it belongs to, while it lives.
+    /// The note, with the knote's kqueue locked.
+    ///
+    /// # Panics
+    ///
+    /// If `h` is another kqueue's lock.
+    fn note_mut<'a>(&'a self, h: &'a mut Held<'_>) -> &'a mut Note {
+        assert!(
+            core::ptr::eq(Arc::as_ptr(&self.kq), h.kq),
+            "a knote's note under another kqueue's lock"
+        );
+        // SAFETY: `h` is the held lock of this knote's kqueue (just
+        // checked), borrowed exclusively for as long as the reference
+        // lives, and every access to the note comes through here: no
+        // other reference to it exists meanwhile.
+        unsafe { &mut *self.note.0.get() }
+    }
+
+    /// The kqueue it belongs to.
     pub fn kqueue(&self) -> Option<Arc<Kqueue>> {
-        self.kq.upgrade()
+        Some(Arc::clone(&self.kq))
     }
 
     /// The registered (ident, filter, flags, udata, ...), as it stands.
+    /// Not for a filter's [`Filter::event`], which is handed the note.
     pub fn note(&self) -> Note {
-        *self.note.lock()
+        let mut h = self.kq.hold();
+        *self.note_mut(&mut h)
     }
 
     /// Runs `f` on the note and, if it says the event happened, activates
     /// the knote, as a callout or other source without a [`Notify`] does
-    /// (FreeBSD's `KNOTE_ACTIVATE` from `filt_timerexpire`).
+    /// (FreeBSD's `KNOTE_ACTIVATE` from `filt_timerexpire`). `f` runs
+    /// under the kqueue's lock, as [`Filter::event`] does.
     pub fn trigger(&self, f: impl FnOnce(&mut Note) -> bool) {
-        let watched = {
-            let mut note = self.note.lock();
-            if f(&mut note) { self.activate() } else { None }
-        };
-        if let Some(kq) = watched {
+        let kq = &self.kq;
+        let mut h = kq.hold();
+        let queued = f(self.note_mut(&mut h)) && kq.activate_locked(&mut h.st, self);
+        if kq.release(h, queued) {
             kq.sel.notify(0);
         }
-    }
-
-    /// Takes the knote out of its queue and makes it inactive, as a timer
-    /// re-added with new parameters does.
-    pub fn deactivate(&self) {
-        let Some(kq) = self.kq.upgrade() else {
-            return;
-        };
-        let mut st = kq.st.lock();
-        if self.status() & status::QUEUED != 0 {
-            kq.unqueue(&mut st, self);
-        }
-        self.set(0, status::ACTIVE);
     }
 
     /// Drops it from its kqueue (`knote_drop`), as [`crate::Notify::delete`]
     /// does for an object that is freed.
     pub fn delete(&self) {
-        if let Some(kq) = self.kq.upgrade() {
-            kq.drop_knote(self);
-        }
+        self.kq.drop_knote(self);
     }
 
-    /// A notification: runs the filter, the note and the object's list
-    /// locked; returns its kqueue if it newly has an event and is watched.
+    /// A notification, the object's list locked: runs the filter and
+    /// queues the knote under its kqueue's lock; returns the kqueue if it
+    /// newly has an event and is watched.
     pub(crate) fn deliver(&self, hint: u64) -> Option<Arc<Kqueue>> {
-        if self.level && self.settled() {
+        // A scan will ask the filter again, and the filter answers from
+        // the object alone: nothing to do. The scan that finds the event
+        // gone clears this and then asks once more, so a notification
+        // that came in between is not lost (`Kqueue::collect`).
+        if self.status() & (status::RESCAN | status::DROPPED) == status::RESCAN {
             return None;
         }
-        let mut note = self.note.lock();
-        if self.filt.event(self, &mut note, hint) {
-            self.activate()
-        } else {
-            None
+        let kq = &self.kq;
+        let mut h = kq.hold();
+        if !self.filt.event(self, self.note_mut(&mut h), hint) {
+            return None;
         }
+        let queued = kq.activate_locked(&mut h.st, self);
+        kq.release(h, queued).then(|| Arc::clone(kq))
     }
 
     /// Off its object's list (`knlist_clear`): `flags` join its own.
     pub(crate) fn detached(&self, flags: u16) {
-        let mut note = self.note.lock();
-        note.kev.flags |= flags;
-        if let Some(kq) = self.kq.upgrade() {
-            let _st = kq.st.lock();
-            self.set(status::DETACHED, 0);
-        }
-    }
-
-    /// Active and on its kqueue's queue, where an activation changes
-    /// nothing.
-    fn settled(&self) -> bool {
-        const SETTLED: u16 = status::ACTIVE | status::QUEUED;
-        self.status() & (SETTLED | status::DROPPED) == SETTLED
-    }
-
-    /// `KNOTE_ACTIVATE`, the note locked: active, and queued unless
-    /// disabled or already there. Returns the kqueue if it is watched and
-    /// was just queued on.
-    fn activate(&self) -> Option<Arc<Kqueue>> {
-        // Already active and on the queue (a level-triggered event a scan
-        // reported and put back, as most are): nothing changes. Both bits
-        // are cleared only with the note locked, as it is here, but by
-        // `deactivate` and a scan dropping the knote, and an activation
-        // just before either of those is lost the same way.
-        if self.settled() {
-            return None;
-        }
-        let kq = self.kq.upgrade()?;
-        let (queued, sleepers) = {
-            let mut st = kq.st.lock();
-            let queued = kq.activate_locked(&mut st, self);
-            (queued, queued && core::mem::take(&mut st.sleeping))
-        };
-        if sleepers {
-            kq.wake.wake();
-        }
-        if queued && kq.sel.is_armed() {
-            return Some(kq);
-        }
-        None
+        let mut h = self.kq.hold();
+        self.note_mut(&mut h).kev.flags |= flags;
+        self.set(status::DETACHED, 0);
     }
 }
 
@@ -292,8 +295,11 @@ struct State {
     sleeping: bool,
 }
 
-/// A kqueue (FreeBSD's `struct kqueue`).
+/// A kqueue (FreeBSD's `struct kqueue`). Its knotes hold it, and it
+/// them: [`Kqueue::close`] lets both go.
 pub struct Kqueue {
+    /// `KQ_LOCK`: the queue, the index, and every knote's status and
+    /// note.
     st: SpinLock<State>,
     /// Knotes queued (`kq_count`), for polling and `EVFILT_READ` on it.
     count: AtomicUsize,
@@ -344,6 +350,28 @@ impl Kqueue {
         self.count.load(Ordering::Acquire)
     }
 
+    fn hold(&self) -> Held<'_> {
+        Held {
+            kq: self,
+            st: self.st.lock(),
+        }
+    }
+
+    /// Unlocks; `queued` says a knote was queued meanwhile. Wakes the
+    /// scanners if one sleeps, and returns whether the kqueue's own
+    /// watchers are to be told (by the caller, with nothing locked: a
+    /// kqueue watching this one may be one this one watches).
+    fn release(&self, mut h: Held<'_>, queued: bool) -> bool {
+        let sleepers = queued && core::mem::take(&mut h.st.sleeping);
+        drop(h);
+        if sleepers {
+            self.wake.wake();
+        }
+        queued && self.sel.is_armed()
+    }
+
+    /// `KNOTE_ACTIVATE`: active, and queued unless disabled or already
+    /// there. Returns whether it was just queued.
     fn activate_locked(&self, st: &mut State, kn: &Knote) -> bool {
         let s = kn.status();
         if s & status::DROPPED != 0 {
@@ -361,10 +389,15 @@ impl Kqueue {
         let Some(arc) = Self::find_arc(st, kn) else {
             return;
         };
-        // Behind the marker of every scan under way.
-        arc.pass.store(st.passes, Ordering::Relaxed);
-        st.queue.push_back(arc);
-        kn.set(status::QUEUED, 0);
+        self.requeue(st, arc, 0);
+    }
+
+    /// Queues `kn`, behind the marker of every scan under way, with
+    /// `also` set.
+    fn requeue(&self, st: &mut State, kn: Arc<Knote>, also: u16) {
+        kn.pass.store(st.passes, Ordering::Relaxed);
+        kn.set(status::QUEUED | also, 0);
+        st.queue.push_back(kn);
         self.count.store(st.queue.len(), Ordering::Release);
     }
 
@@ -373,7 +406,7 @@ impl Kqueue {
             st.queue.remove(at);
             self.count.store(st.queue.len(), Ordering::Release);
         }
-        kn.set(0, status::QUEUED);
+        kn.set(0, status::QUEUED | status::RESCAN);
     }
 
     /// The `Arc` the kqueue's index holds for `kn`.
@@ -425,8 +458,9 @@ impl Kqueue {
                     return Err(Errno::ENOENT);
                 }
                 let kn = self.add(kev, fd, src)?;
-                let watched = self.settle(&kn, &mut kn.note.lock());
-                if watched {
+                let mut h = self.hold();
+                let queued = self.settle(&mut h, &kn);
+                if self.release(h, queued) {
                     self.sel.notify(0);
                 }
                 return Ok(());
@@ -437,42 +471,38 @@ impl Kqueue {
             self.drop_knote(&kn);
             return Ok(());
         }
-        let mut note = kn.note.lock();
-        let mut watched = false;
+        let mut h = self.hold();
+        let mut queued = false;
         if flags & EV_FORCEONESHOT != 0 {
-            note.kev.flags |= EV_ONESHOT;
-            let (queued, sleepers) = {
-                let mut st = self.st.lock();
-                let queued = self.activate_locked(&mut st, &kn);
-                (queued, queued && core::mem::take(&mut st.sleeping))
-            };
-            if sleepers {
-                self.wake.wake();
+            kn.note_mut(&mut h).kev.flags |= EV_ONESHOT;
+            queued = self.activate_locked(&mut h.st, &kn);
+        }
+        if flags & EV_ENABLE != 0 {
+            kn.set(0, status::DISABLED);
+        } else if flags & EV_DISABLE != 0 {
+            kn.set(status::DISABLED, 0);
+        }
+        let restart = {
+            let note = kn.note_mut(&mut h);
+            if flags & EV_KEEPUDATA == 0 {
+                note.kev.udata = kev.udata;
             }
-            if queued {
-                watched = self.sel.is_armed();
+            if !fd && kn.filt.touches() {
+                kn.filt.register(&kn, note, kev)
+            } else {
+                note.sfflags = kev.fflags;
+                note.sdata = kev.data;
+                false
             }
-        }
-        {
-            let _st = self.st.lock();
-            if flags & EV_ENABLE != 0 {
-                kn.set(0, status::DISABLED);
-            } else if flags & EV_DISABLE != 0 {
-                kn.set(status::DISABLED, 0);
+        };
+        if restart {
+            if kn.status() & status::QUEUED != 0 {
+                self.unqueue(&mut h.st, &kn);
             }
+            kn.set(0, status::ACTIVE);
         }
-        if flags & EV_KEEPUDATA == 0 {
-            note.kev.udata = kev.udata;
-        }
-        if !fd && kn.filt.touches() {
-            kn.filt.register(&kn, &mut note, kev);
-        } else {
-            note.sfflags = kev.fflags;
-            note.sdata = kev.data;
-        }
-        watched |= self.settle(&kn, &mut note);
-        drop(note);
-        if watched {
+        queued |= self.settle(&mut h, &kn);
+        if self.release(h, queued) {
             self.sel.notify(0);
         }
         Ok(())
@@ -495,19 +525,19 @@ impl Kqueue {
             s |= status::DISABLED;
         }
         let kn = Arc::new(Knote {
-            kq: Arc::downgrade(self),
+            kq: Arc::clone(self),
             ident: kev.ident,
             filter: kev.filter,
             fd,
             status: AtomicU16::new(s),
             pass: AtomicU64::new(0),
             level: filt.level(),
-            note: SpinLock::new(Note {
+            note: NoteCell(UnsafeCell::new(Note {
                 kev: k,
                 sfflags: kev.fflags,
                 sdata: kev.data,
                 hook: 0,
-            }),
+            })),
             filt,
         });
         self.insert(&kn)?;
@@ -543,15 +573,18 @@ impl Kqueue {
     /// Takes `kn` out of the index and the queue, marking it dropped.
     /// Returns whether it was there.
     fn forget(&self, kn: &Knote) -> bool {
-        let mut st = self.st.lock();
+        self.forget_locked(&mut self.st.lock(), kn)
+    }
+
+    fn forget_locked(&self, st: &mut State, kn: &Knote) -> bool {
         if kn.status() & status::DROPPED != 0 {
             return false;
         }
         if kn.status() & status::QUEUED != 0 {
-            self.unqueue(&mut st, kn);
+            self.unqueue(st, kn);
         }
         kn.set(status::DROPPED, status::ACTIVE);
-        if let Some(l) = list(&mut st, kn) {
+        if let Some(l) = list(st, kn) {
             l.retain(|k| !core::ptr::eq(&**k, kn));
             if l.is_empty() && !kn.fd {
                 st.other.remove(&kn.ident);
@@ -562,32 +595,22 @@ impl Kqueue {
 
     /// The end of a registration (`done_ev_add`): the event is checked
     /// unless disabled, and the knote queued if active. Returns whether
-    /// it was just queued and the kqueue is watched: the caller tells the
-    /// watchers once the note is unlocked (a kqueue watching this one may
-    /// be one this one watches).
-    fn settle(&self, kn: &Knote, note: &mut Note) -> bool {
-        let event = kn.status() & status::DISABLED == 0 && kn.filt.event(kn, note, 0);
-        let (queued, sleepers) = {
-            let mut st = self.st.lock();
-            let s = kn.status();
-            if s & status::DROPPED != 0 {
-                return false;
-            }
-            if event {
-                kn.set(status::ACTIVE, 0);
-            }
-            let s = kn.status();
-            if s & (status::ACTIVE | status::DISABLED | status::QUEUED) == status::ACTIVE {
-                self.enqueue(&mut st, kn);
-                (true, core::mem::take(&mut st.sleeping))
-            } else {
-                (false, false)
-            }
-        };
-        if sleepers {
-            self.wake.wake();
+    /// it was just queued.
+    fn settle(&self, h: &mut Held<'_>, kn: &Knote) -> bool {
+        let s = kn.status();
+        if s & status::DROPPED != 0 {
+            return false;
         }
-        queued && self.sel.is_armed()
+        if s & status::DISABLED == 0 && kn.filt.event(kn, kn.note_mut(h), 0) {
+            kn.set(status::ACTIVE, 0);
+        }
+        let s = kn.status();
+        if s & (status::ACTIVE | status::DISABLED | status::QUEUED) == status::ACTIVE {
+            self.enqueue(&mut h.st, kn);
+            true
+        } else {
+            false
+        }
     }
 
     /// Deletes `kn` (`knote_drop`): out of the kqueue, detached from its
@@ -615,78 +638,82 @@ impl Kqueue {
     /// call's collection: `kqueue_scan`'s loop): returns how many. `pass`
     /// is `None` for the scan's first call and names the scan after it.
     /// Events queued after the scan began, and level-triggered ones it
-    /// reported and put back, end it.
+    /// reported and put back, end it. The kqueue stays locked from one
+    /// knote to the next, but for a knote that leaves it.
     pub fn collect(&self, pass: &mut Option<u64>, out: &mut [Kevent]) -> usize {
         let mut n = 0;
-        // The queue's next knote is not this scan's: seen while the queue
-        // was locked for something else.
-        let mut ended = false;
-        while n < out.len() && !ended {
-            let kn = {
-                let mut st = self.st.lock();
-                let pass = *pass.get_or_insert_with(|| {
-                    st.passes += 1;
-                    st.passes
-                });
-                let Some(kn) = st.queue.pop_front() else {
-                    break;
-                };
-                if kn.pass.load(Ordering::Relaxed) >= pass {
-                    st.queue.push_front(kn);
-                    break;
-                }
-                self.count.store(st.queue.len(), Ordering::Release);
-                if kn.status() & status::DISABLED != 0 {
-                    kn.set(0, status::QUEUED);
-                    continue;
-                }
-                kn
+        let mut h = self.hold();
+        let pass = *pass.get_or_insert_with(|| {
+            h.st.passes += 1;
+            h.st.passes
+        });
+        while n < out.len() {
+            let Some(kn) = h.st.queue.pop_front() else {
+                break;
             };
-            let pass = pass.unwrap_or(0);
-            // Off the queue but still marked queued: a notification now
-            // only makes it active.
-            let mut note = kn.note.lock();
-            let flags = note.kev.flags;
-            if flags & EV_DROP != 0 {
-                drop(note);
-                self.dequeued(&kn);
-                self.drop_knote(&kn);
+            if kn.pass.load(Ordering::Relaxed) >= pass {
+                h.st.queue.push_front(kn);
+                break;
+            }
+            self.count.store(h.st.queue.len(), Ordering::Release);
+            // Off the queue: a notification now finds it not queued, and
+            // waits for this lock.
+            kn.set(0, status::QUEUED | status::RESCAN);
+            if kn.status() & status::DISABLED != 0 {
                 continue;
             }
-            if flags & EV_ONESHOT != 0 {
-                // Notifications passed over a level filter's knote once
-                // it was queued: its data as it is now, if still an event.
-                let before = *note;
-                if kn.level && !kn.filt.event(&kn, &mut note, 0) {
-                    *note = before;
-                }
-                let kev = note.kev;
-                drop(note);
-                self.dequeued(&kn);
-                if self.forget(&kn) {
-                    if kn.status() & status::DETACHED == 0 {
-                        kn.filt.detach(&kn);
+            let flags = kn.note_mut(&mut h).kev.flags;
+            if flags & (EV_DROP | EV_ONESHOT) != 0 {
+                if flags & EV_DROP == 0 {
+                    // Notifications passed over a level filter's knote
+                    // while a scan was to ask again: its data as it is
+                    // now, if still an event.
+                    let note = kn.note_mut(&mut h);
+                    let before = *note;
+                    if kn.level && !kn.filt.event(&kn, note, 0) {
+                        *note = before;
                     }
-                    out[n] = kev;
-                    n += 1;
+                    let kev = note.kev;
+                    if self.forget_locked(&mut h.st, &kn) {
+                        out[n] = kev;
+                        n += 1;
+                    }
+                } else {
+                    self.forget_locked(&mut h.st, &kn);
                 }
+                // Its object's list is locked before a kqueue, never
+                // after: detached with this one unlocked.
+                drop(h);
+                if kn.status() & status::DETACHED == 0 {
+                    kn.filt.detach(&kn);
+                }
+                drop(kn);
+                h = self.hold();
                 continue;
             }
-            if !kn.filt.event(&kn, &mut note, 0) {
-                let _st = self.st.lock();
-                kn.set(0, status::QUEUED | status::ACTIVE);
+            let note = kn.note_mut(&mut h);
+            if !kn.filt.event(&kn, note, 0) {
+                kn.set(0, status::ACTIVE);
+                if kn.level {
+                    // A notification that saw `RESCAN` before it was
+                    // cleared did nothing, trusting this scan to ask the
+                    // filter: ask once more now that it is clear. Either
+                    // the notifier's change is seen here, or it sees the
+                    // bit clear and queues the knote itself.
+                    fence(Ordering::SeqCst);
+                    if kn.filt.event(&kn, kn.note_mut(&mut h), 0) {
+                        kn.set(status::ACTIVE, 0);
+                        self.requeue(&mut h.st, kn, 0);
+                    }
+                }
                 continue;
             }
             let touch = !kn.fd && kn.filt.touches();
             let kev = if touch {
-                kn.filt.process(&kn, &mut note)
+                kn.filt.process(&kn, note)
             } else {
                 note.kev
             };
-            let mut st = self.st.lock();
-            if kn.status() & status::DROPPED != 0 {
-                continue;
-            }
             if note.kev.flags & (EV_CLEAR | EV_DISPATCH) != 0 {
                 if !touch && note.kev.flags & EV_CLEAR != 0 {
                     note.kev.data = 0;
@@ -695,28 +722,15 @@ impl Kqueue {
                 if note.kev.flags & EV_DISPATCH != 0 {
                     kn.set(status::DISABLED, 0);
                 }
-                kn.set(0, status::QUEUED | status::ACTIVE);
+                kn.set(0, status::ACTIVE);
             } else {
-                kn.pass.store(st.passes, Ordering::Relaxed);
-                st.queue.push_back(Arc::clone(&kn));
-                self.count.store(st.queue.len(), Ordering::Release);
+                let again = if kn.level { status::RESCAN } else { 0 };
+                self.requeue(&mut h.st, kn, again);
             }
-            ended = st
-                .queue
-                .front()
-                .is_none_or(|next| next.pass.load(Ordering::Relaxed) >= pass);
-            drop(st);
-            drop(note);
             out[n] = kev;
             n += 1;
         }
         n
-    }
-
-    /// A knote `collect` took off the queue leaves it for good.
-    fn dequeued(&self, kn: &Knote) {
-        let _st = self.st.lock();
-        kn.set(0, status::QUEUED);
     }
 
     /// Descriptor `fd` closed (`knote_fdclose`): its knotes go.
@@ -770,16 +784,16 @@ impl Kqueue {
             let Some(filt) = kn.filt.fork(&kn) else {
                 continue;
             };
-            let note = *kn.note.lock();
+            let note = kn.note();
             let copy = Arc::new(Knote {
-                kq: Arc::downgrade(child),
+                kq: Arc::clone(child),
                 ident: kn.ident,
                 filter: kn.filter,
                 fd: kn.fd,
                 status: AtomicU16::new(status::DETACHED | (kn.status() & status::DISABLED)),
                 pass: AtomicU64::new(0),
                 level: filt.level(),
-                note: SpinLock::new(note),
+                note: NoteCell(UnsafeCell::new(note)),
                 filt,
             });
             if child.insert(&copy).is_err() {
@@ -789,11 +803,10 @@ impl Kqueue {
                 child.forget(&copy);
                 continue;
             }
-            {
-                let _st = child.st.lock();
-                copy.set(0, status::DETACHED);
-            }
-            if child.settle(&copy, &mut copy.note.lock()) {
+            let mut h = child.hold();
+            copy.set(0, status::DETACHED);
+            let queued = child.settle(&mut h, &copy);
+            if child.release(h, queued) {
                 child.sel.notify(0);
             }
         }
@@ -803,27 +816,36 @@ impl Kqueue {
     /// descriptor order, then the others' (`kern_proc_kqueue_report`'s
     /// `kn_kevent` and `kn_status`, as `KNOTE_STATUS_*` bits).
     pub fn report(&self) -> Vec<(Kevent, u32)> {
-        let st = self.st.lock();
-        let all = st.fds.iter().flatten().chain(st.other.values().flatten());
-        all.map(|kn| {
-            let s = kn.status.load(Ordering::Relaxed);
-            let mut bits = 0;
-            for (have, report) in [
-                (status::ACTIVE, 0x01),
-                (status::QUEUED, 0x02),
-                (status::DISABLED, 0x04),
-                (status::DETACHED, 0x08),
-            ] {
-                if s & have != 0 {
-                    bits |= report;
+        let mut h = self.hold();
+        let all: Vec<Arc<Knote>> = {
+            let st = &h.st;
+            st.fds
+                .iter()
+                .flatten()
+                .chain(st.other.values().flatten())
+                .cloned()
+                .collect()
+        };
+        all.iter()
+            .map(|kn| {
+                let s = kn.status.load(Ordering::Relaxed);
+                let mut bits = 0;
+                for (have, report) in [
+                    (status::ACTIVE, 0x01),
+                    (status::QUEUED, 0x02),
+                    (status::DISABLED, 0x04),
+                    (status::DETACHED, 0x08),
+                ] {
+                    if s & have != 0 {
+                        bits |= report;
+                    }
                 }
-            }
-            let mut kev = kn.note.lock().kev;
-            kev.ident = kn.ident;
-            kev.filter = kn.filter;
-            (kev, bits)
-        })
-        .collect()
+                let mut kev = kn.note_mut(&mut h).kev;
+                kev.ident = kn.ident;
+                kev.filter = kn.filter;
+                (kev, bits)
+            })
+            .collect()
     }
 
     /// Registered knotes, for diagnostics and tests.

@@ -288,12 +288,11 @@ impl Filter for KqTimer {
 
     /// A re-add with new parameters (`filt_timertouch`): what was
     /// pending is forgotten, and the timer starts over.
-    fn register(&self, kn: &Knote, note: &mut Note, kev: &Kevent) {
+    fn register(&self, _kn: &Knote, note: &mut Note, kev: &Kevent) -> bool {
         if kev.flags & abi::event::EV_ADD == 0 {
-            return;
+            return false;
         }
         self.stop();
-        kn.deactivate();
         note.kev.data = 0;
         note.sfflags = kev.fflags;
         note.sdata = kev.data;
@@ -304,6 +303,8 @@ impl Filter for KqTimer {
                 note.kev.data = i64::from(e.get());
             }
         }
+        // Off the queue and inactive: what was pending is forgotten.
+        true
     }
 
     fn process(&self, _kn: &Knote, note: &mut Note) -> Kevent {
