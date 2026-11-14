@@ -1282,7 +1282,21 @@ pub(crate) fn thread_gone(t: &UserThread) {
 /// The kernel's last word before a thread returns to user mode (the
 /// `user_return` hook): pending signals. Interrupts masked on entry and
 /// exit. Returns whether the frame was rewritten.
+#[inline]
 pub(crate) fn user_return(frame: &mut TrapFrame) -> bool {
+    // Nothing to do, nearly always: the work is kept out of line, so a
+    // system call's way out is this test.
+    let rewritten = sched::current().ast_pending() && user_return_work(frame);
+    // A debugger's single step, for the thread going out (arm64 arms it
+    // per CPU).
+    #[cfg(target_arch = "aarch64")]
+    crate::arch::user::sync_step(frame.spsr);
+    rewritten
+}
+
+/// [`user_return`] with work pending.
+#[inline(never)]
+fn user_return_work(frame: &mut TrapFrame) -> bool {
     let t = sched::current();
     let mut rewritten = false;
     // Where a debugger finds this thread's registers if it stops on the
@@ -1329,10 +1343,6 @@ pub(crate) fn user_return(frame: &mut TrapFrame) -> bool {
     if had_ast {
         UserThread::with_current(|u| u.set_syscall_code(0));
     }
-    // A debugger's single step, for the thread going out (arm64 arms it
-    // per CPU).
-    #[cfg(target_arch = "aarch64")]
-    crate::arch::user::sync_step(frame.spsr);
     rewritten
 }
 

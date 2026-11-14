@@ -78,19 +78,42 @@ struct Call {
     narg: usize,
 }
 
+/// Each number's call, if it names one: `SLOTS` and `SYSCALLS` as one
+/// table (FreeBSD's `sysent`), so that a call's entry is one load.
+static SYSENT: [Option<&'static abi::syscall::SyscallInfo>; SLOT_COUNT] = {
+    let mut t: [Option<&'static abi::syscall::SyscallInfo>; SLOT_COUNT] = [None; SLOT_COUNT];
+    let mut i = 0;
+    while i < SLOT_COUNT {
+        if let Slot::Live(n) = abi::syscall::SLOTS[i] {
+            t[i] = Some(&abi::syscall::SYSCALLS[n.index()]);
+        }
+        i += 1;
+    }
+    t
+};
+
 impl Call {
     /// The call numbered `number`, its arguments not yet read.
     fn numbered(number: u64) -> Self {
-        let live = match lookup(number) {
-            Some(Slot::Live(n)) => Some(n.info()),
-            _ => None,
-        };
+        let (live, narg) = Self::entry(number);
         Self {
             number,
             live,
             args: [0; 8],
-            narg: live.map_or(0, |i| i.args.len()),
+            narg,
         }
+    }
+
+    /// Number `number`'s call, if it names one, and how many arguments
+    /// that takes.
+    #[inline(always)]
+    fn entry(number: u64) -> (Option<&'static abi::syscall::SyscallInfo>, usize) {
+        let live = usize::try_from(number)
+            .ok()
+            .and_then(|n| SYSENT.get(n))
+            .copied()
+            .flatten();
+        (live, live.map_or(0, |i| i.args.len()))
     }
 }
 
@@ -101,7 +124,7 @@ pub(crate) fn narg_of(code: u32) -> usize {
 
 /// The arguments of the call `f` holds, as `syscallenter` read them.
 pub(crate) fn args_of(f: &TrapFrame) -> [u64; 8] {
-    decode(f).0.args
+    decode(f, &mut Ok(())).args
 }
 
 /// How many arguments the call numbered `number` takes; none for one
@@ -116,50 +139,60 @@ fn narg(number: u64) -> usize {
 /// return address; `EFAULT` if they cannot be read.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-fn decode(f: &TrapFrame) -> (Call, Result<(), Errno>) {
+fn decode(f: &TrapFrame, fetched: &mut Result<(), Errno>) -> Call {
     if f.rax == Sysno::Syscall as u64 || f.rax == Sysno::SyscallQuad as u64 {
-        return decode_from(f, f.rdi, &[f.rsi, f.rdx, f.r10, f.r8, f.r9]);
+        return decode_from(f, fetched, f.rdi, &[f.rsi, f.rdx, f.r10, f.r8, f.r9]);
     }
     // The common call: the six registers, whole, and nothing to read.
-    let mut call = Call::numbered(f.rax);
-    if call.narg > 6 {
-        return decode_from(f, f.rax, &[f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9]);
+    let (live, narg) = Call::entry(f.rax);
+    if narg > 6 {
+        return decode_from(f, fetched, f.rax, &[f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9]);
     }
-    call.args = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9, 0, 0];
-    (call, Ok(()))
+    Call {
+        number: f.rax,
+        live,
+        args: [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9, 0, 0],
+        narg,
+    }
 }
 
 /// [`decode`] for an indirect call or one with arguments on the stack:
 /// call `number`, whose first arguments are `regs`.
 #[cfg(target_arch = "x86_64")]
 #[cold]
-fn decode_from(f: &TrapFrame, number: u64, regs: &[u64]) -> (Call, Result<(), Errno>) {
+fn decode_from(f: &TrapFrame, fetched: &mut Result<(), Errno>, number: u64, regs: &[u64]) -> Call {
     let mut call = Call::numbered(number);
     call.args[..regs.len()].copy_from_slice(regs);
-    let mut fetched = Ok(());
     for (i, arg) in call.args[regs.len()..call.narg.max(regs.len())]
         .iter_mut()
         .enumerate()
     {
         match crate::uaccess::UserPtr::<u64>::new(f.rsp + 8 + 8 * i as u64).read() {
             Ok(v) => *arg = v,
-            Err(_) => fetched = Err(Errno::EFAULT),
+            Err(_) => *fetched = Err(Errno::EFAULT),
         }
     }
-    (call, fetched)
+    call
 }
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-fn decode(f: &TrapFrame) -> (Call, Result<(), Errno>) {
+fn decode(f: &TrapFrame, _fetched: &mut Result<(), Errno>) -> Call {
     let indirect = f.x[8] == Sysno::Syscall as u64 || f.x[8] == Sysno::SyscallQuad as u64;
-    let mut call = Call::numbered(if indirect { f.x[0] } else { f.x[8] });
+    let number = if indirect { f.x[0] } else { f.x[8] };
+    let (live, narg) = Call::entry(number);
+    let mut args = [0; 8];
     if indirect {
-        call.args.copy_from_slice(&f.x[1..9]);
+        args.copy_from_slice(&f.x[1..9]);
     } else {
-        call.args.copy_from_slice(&f.x[..8]);
+        args.copy_from_slice(&f.x[..8]);
     }
-    (call, Ok(()))
+    Call {
+        number,
+        live,
+        args,
+        narg,
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -205,8 +238,9 @@ fn encode(f: &mut TrapFrame, r: SysResult) {
 /// [`decode`] once more, after a debugger may have changed the call.
 #[cold]
 #[inline(never)]
-fn decode_again(f: &TrapFrame) -> (Call, Result<(), Errno>) {
-    decode(f)
+fn decode_again(f: &TrapFrame, fetched: &mut Result<(), Errno>) -> Call {
+    *fetched = Ok(());
+    decode(f, fetched)
 }
 
 /// The `kernel_hooks!` system-call hook (`syscallenter`, `syscallret`).
@@ -216,7 +250,8 @@ pub(crate) fn entry(frame: &mut TrapFrame) {
     // SAFETY: a system call runs in its thread, which may sleep; it holds
     // nothing (it came from user mode).
     let s = unsafe { Sleepable::assume() };
-    let (mut call, mut fetched) = decode(frame);
+    let mut fetched = Ok(());
+    let mut call = decode(frame, &mut fetched);
     let code = u32::try_from(call.number).unwrap_or(u32::MAX);
     // Where a debugger finds the registers while the thread is in here;
     // and whether ktrace or a debugger traces the process, looked up once
@@ -237,7 +272,7 @@ pub(crate) fn entry(frame: &mut TrapFrame) {
         && fetched.is_ok()
         && crate::ptrace::syscall_enter(&s, code, &call.args[..call.narg])
     {
-        (call, fetched) = decode_again(frame);
+        call = decode_again(frame, &mut fetched);
         if ktraced && crate::ktrace::point(abi::ktrace::KTR_SYSCALL) {
             crate::ktrace::syscall(&s, code, &call.args[..call.narg]);
         }
