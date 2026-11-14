@@ -47,6 +47,13 @@ use vfs::Uio;
 const SMALL_PIPE_SIZE: usize = 4096;
 const PIPE_SIZE: usize = 16 * 1024;
 const BIG_PIPE_SIZE: usize = 64 * 1024;
+/// A transfer of at least this much wakes the other side before it
+/// copies: a sleeper takes microseconds to run again (an interrupt to its
+/// CPU, which has halted), and so does the copy, so the one is spent
+/// during the other. The sleeper then finds `ring` held and waits for it
+/// as for any mutex whose owner is running. Below this the copy is over
+/// long before the sleeper is up, and one wakeup after it is enough.
+const EARLY_WAKE: usize = 4096;
 
 static PIPE_LOCK: LockClass = LockClass::new("pipe", 400);
 
@@ -142,6 +149,11 @@ struct Channel {
     cap: AtomicUsize,
     reader_gone: AtomicBool,
     writer_gone: AtomicBool,
+    /// A writer is copying at least `EARLY_WAKE` bytes in, or a reader
+    /// out, with `ring` held: it woke the other side first, which then
+    /// waits for `ring` rather than sleep again.
+    incoming: AtomicBool,
+    outgoing: AtomicBool,
     /// Readers waiting for bytes, writers waiting for room.
     readable: WaitQueue,
     writable: WaitQueue,
@@ -177,6 +189,8 @@ impl Channel {
             cap: AtomicUsize::new(initial),
             reader_gone: AtomicBool::new(false),
             writer_gone: AtomicBool::new(false),
+            incoming: AtomicBool::new(false),
+            outgoing: AtomicBool::new(false),
             readable: WaitQueue::new(),
             writable: WaitQueue::new(),
             notify,
@@ -276,7 +290,16 @@ impl End {
             {
                 let mut r = ch.ring.lock(s);
                 if r.len > 0 {
-                    let n = r.read(uio)?;
+                    let early = r.len.min(uio.resid()) >= EARLY_WAKE;
+                    if early {
+                        ch.outgoing.store(true, Ordering::Release);
+                        ch.writable.wake_all();
+                    }
+                    let n = r.read(uio);
+                    if early {
+                        ch.outgoing.store(false, Ordering::Release);
+                    }
+                    let n = n?;
                     r.atime = super::now();
                     ch.len.store(r.len, Ordering::Release);
                     drop(r);
@@ -295,7 +318,11 @@ impl End {
             crate::signal::sleep(
                 s,
                 &ch.readable,
-                || ch.len.load(Ordering::Acquire) > 0 || ch.writer_gone.load(Ordering::Acquire),
+                || {
+                    ch.len.load(Ordering::Acquire) > 0
+                        || ch.incoming.load(Ordering::Acquire)
+                        || ch.writer_gone.load(Ordering::Acquire)
+                },
                 None,
             )?;
         }
@@ -336,7 +363,16 @@ impl End {
                 }
                 if r.data.len() - r.len >= need {
                     let max = uio.resid();
-                    let n = r.write(uio, max)?;
+                    let early = max.min(r.data.len() - r.len) >= EARLY_WAKE;
+                    if early {
+                        ch.incoming.store(true, Ordering::Release);
+                        ch.readable.wake_all();
+                    }
+                    let n = r.write(uio, max);
+                    if early {
+                        ch.incoming.store(false, Ordering::Release);
+                    }
+                    let n = n?;
                     r.mtime = super::now();
                     ch.len.store(r.len, Ordering::Release);
                     drop(r);
@@ -359,7 +395,11 @@ impl End {
             let woke = crate::signal::sleep(
                 s,
                 &ch.writable,
-                || ch.room() >= need || ch.reader_gone.load(Ordering::Acquire),
+                || {
+                    ch.room() >= need
+                        || ch.outgoing.load(Ordering::Acquire)
+                        || ch.reader_gone.load(Ordering::Acquire)
+                },
                 None,
             );
             if let Err(e) = woke {
