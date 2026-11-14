@@ -120,12 +120,12 @@ fn kev(ident: u64, filter: i16, flags: u16, fflags: u32, data: i64, udata: u64) 
 }
 
 fn scan(kq: &Kqueue, max: usize) -> Vec<Kevent> {
-    let pass = kq.begin_scan();
+    let mut pass = None;
     let mut out = Vec::new();
     loop {
         let mut buf = [Kevent::default(); crate::KQ_NEVENTS];
         let room = (max - out.len()).min(buf.len());
-        let n = kq.collect(pass, &mut buf[..room]);
+        let n = kq.collect(&mut pass, &mut buf[..room]);
         out.extend_from_slice(&buf[..n]);
         if n < room || out.len() == max {
             return out;

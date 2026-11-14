@@ -60,10 +60,12 @@ static SHUTDOWN: Mutex<bool> = Mutex::new(&SHUTDOWN_LOCK, false);
 
 /// The time now, for file times.
 pub(crate) fn now() -> Timespec {
-    let ns = crate::shared_page::to_ns(crate::shared_page::realtime());
+    // `bintime2timespec`: no division.
+    let bt = crate::shared_page::realtime();
+    let nsec = (1_000_000_000 * (bt.frac >> 32)) >> 32;
     Timespec {
-        tv_sec: i64::try_from(ns / 1_000_000_000).unwrap_or(i64::MAX),
-        tv_nsec: i64::try_from(ns % 1_000_000_000).unwrap_or(0),
+        tv_sec: bt.sec,
+        tv_nsec: i64::try_from(nsec).unwrap_or(0),
     }
 }
 

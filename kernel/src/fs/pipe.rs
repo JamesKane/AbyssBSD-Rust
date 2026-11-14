@@ -73,6 +73,11 @@ struct Ring {
     len: usize,
     mtime: Timespec,
     atime: Timespec,
+    /// A reader found it empty, or a writer full, and is going to sleep
+    /// (`PIPE_WANTR`, `PIPE_WANTW`): the other side wakes it, and takes
+    /// no wait queue's lock while nobody sleeps.
+    want_read: bool,
+    want_write: bool,
 }
 
 impl Ring {
@@ -89,6 +94,8 @@ impl Ring {
                 tv_sec: 0,
                 tv_nsec: 0,
             },
+            want_read: false,
+            want_write: false,
         }
     }
 
@@ -306,11 +313,17 @@ impl End {
                     let n = n?;
                     r.atime = super::now();
                     ch.len.store(r.len, Ordering::Release);
+                    let wanted = core::mem::take(&mut r.want_write);
                     drop(r);
-                    ch.writable.wake_all();
+                    if wanted {
+                        ch.writable.wake_all();
+                    }
                     ch.notify.notify(0);
                     return Ok(n);
                 }
+                // Under the lock a writer fills it under: it sees this
+                // or we see its bytes.
+                r.want_read |= !nonblock;
             }
             if ch.writer_gone.load(Ordering::Acquire) {
                 return Ok(0);
@@ -379,10 +392,16 @@ impl End {
                     let n = n?;
                     r.mtime = super::now();
                     ch.len.store(r.len, Ordering::Release);
+                    let wanted = core::mem::take(&mut r.want_read);
+                    r.want_write |= uio.resid() != 0 && !nonblock;
                     drop(r);
                     done += n;
-                    ch.readable.wake_all();
+                    if wanted {
+                        ch.readable.wake_all();
+                    }
                     ch.notify.notify(0);
+                } else {
+                    r.want_write |= !nonblock;
                 }
             }
             if uio.resid() == 0 {
@@ -557,6 +576,10 @@ impl Filter for PipeRead {
         self.check(note, true)
     }
 
+    fn level(&self) -> bool {
+        true
+    }
+
     fn fork(&self, _kn: &Knote) -> Option<Box<dyn Filter>> {
         Some(Box::new(Self {
             pipe: Arc::clone(&self.pipe),
@@ -596,6 +619,10 @@ impl Filter for PipeWrite {
         }
         note.kev.flags &= !EV_EOF;
         note.kev.data >= i64::try_from(PIPE_BUF).unwrap_or(i64::MAX)
+    }
+
+    fn level(&self) -> bool {
+        true
     }
 
     fn fork(&self, _kn: &Knote) -> Option<Box<dyn Filter>> {

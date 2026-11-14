@@ -547,7 +547,7 @@ fn scan(
     };
     let deadline = ns.map(|n| crate::time::now_ns().saturating_add(n));
     loop {
-        if k.kq.pending() == 0 {
+        if k.kq.pending() == 0 && k.kq.sleeps() {
             let left = deadline.map(|d| d.saturating_sub(crate::time::now_ns()));
             if left == Some(0) {
                 return Ok(0);
@@ -562,12 +562,12 @@ fn scan(
                 Err(e) => return Err(e),
             }
         }
-        let pass = k.kq.begin_scan();
+        let mut pass = None;
         let mut total = 0;
         while total < max {
             let mut buf = [Kevent::default(); event::KQ_NEVENTS];
             let room = (max - total).min(buf.len());
-            let n = k.kq.collect(pass, &mut buf[..room]);
+            let n = k.kq.collect(&mut pass, &mut buf[..room]);
             if n > 0 {
                 // SAFETY: `Kevent` is plain.
                 let bytes = unsafe {

@@ -399,7 +399,7 @@ pub(crate) mod ktests {
             assert_eq!(d.poll(abi::event::POLLOUT, None), 0);
             assert_eq!(kq.pending(), 1);
             let mut out = [Kevent::default(); 2];
-            assert_eq!(kq.collect(kq.begin_scan(), &mut out), 1);
+            assert_eq!(kq.collect(&mut None, &mut out), 1);
             assert_eq!((out[0].filter, out[0].data), (EVFILT_READ, 2));
             // A short read loses the rest of its line.
             assert_eq!(read(&d, &s, 8, true).unwrap(), "!system=");
