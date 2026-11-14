@@ -171,6 +171,23 @@ impl WaitQueue {
         n
     }
 
+    /// Wakes every waiter ahead of the event they wait for, if that gains
+    /// anything: the longest waiter's CPU is halted, so waking it takes an
+    /// interrupt and the time the CPU needs to come out of its halt, which
+    /// the caller's remaining work then overlaps. A CPU still spinning in
+    /// its idle loop takes a thread at once, and one woken early there
+    /// would only wait for the caller. Returns how many were woken.
+    pub fn wake_all_if_halted(&self) -> usize {
+        let halted = {
+            let q = self.waiters.lock();
+            q.iter().next().is_some_and(|t| {
+                let last = t.inner.lock().cpu;
+                crate::cpu(last).is_some_and(|c| c.halted.load(Ordering::Relaxed))
+            })
+        };
+        if halted { self.wake_all() } else { 0 }
+    }
+
     /// Number of waiters (racy; for diagnostics).
     pub fn waiters(&self) -> usize {
         self.waiters.lock().len()

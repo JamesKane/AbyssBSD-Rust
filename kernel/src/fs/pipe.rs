@@ -53,6 +53,10 @@ const BIG_PIPE_SIZE: usize = 64 * 1024;
 /// during the other. The sleeper then finds `ring` held and waits for it
 /// as for any mutex whose owner is running. Below this the copy is over
 /// long before the sleeper is up, and one wakeup after it is enough.
+/// Only a sleeper whose CPU has halted is woken early: one whose CPU
+/// still spins in its idle loop runs at once, and early would only wait
+/// for `ring` (a 64 KiB `pipe.bw` write on the Orange Pi's A720s: 9.45 us
+/// woken early always, 8.8 us not).
 const EARLY_WAKE: usize = 4096;
 
 static PIPE_LOCK: LockClass = LockClass::new("pipe", 400);
@@ -293,7 +297,7 @@ impl End {
                     let early = r.len.min(uio.resid()) >= EARLY_WAKE;
                     if early {
                         ch.outgoing.store(true, Ordering::Release);
-                        ch.writable.wake_all();
+                        ch.writable.wake_all_if_halted();
                     }
                     let n = r.read(uio);
                     if early {
@@ -366,7 +370,7 @@ impl End {
                     let early = max.min(r.data.len() - r.len) >= EARLY_WAKE;
                     if early {
                         ch.incoming.store(true, Ordering::Release);
-                        ch.readable.wake_all();
+                        ch.readable.wake_all_if_halted();
                     }
                     let n = r.write(uio, max);
                     if early {
