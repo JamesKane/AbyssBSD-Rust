@@ -10,6 +10,7 @@
 //! an insert or remove moves at most a chunk's entries.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::Entry;
 
@@ -25,6 +26,14 @@ pub(super) struct Entries {
     /// Each non-empty and sorted; each chunk's entries all start below
     /// the next chunk's.
     chunks: Vec<Vec<Entry>>,
+    /// Where the last search ended (chunk and index, packed): the next
+    /// is tried there and just after before it searches, since a call
+    /// looks near where the last one did (`mmap` then `munmap` of the
+    /// same pages; FreeBSD's map, a splay tree, keeps the last entry
+    /// found at its root for the same reason). Only a guess: it is
+    /// checked against the entries, so a change to them leaves it stale
+    /// and harmless.
+    finger: AtomicU64,
 }
 
 /// Where an entry is, or would go: chunk and index. A chunk index equal to
@@ -35,13 +44,38 @@ struct Pos(usize, usize);
 impl Entries {
     /// The position of the first entry starting at or above `key`.
     fn locate(&self, key: u64) -> Pos {
+        let f = self.finger.load(Ordering::Relaxed);
+        let (c, i) = ((f >> 32) as usize, (f & 0xffff_ffff) as usize);
+        if let Some(chunk) = self.chunks.get(c) {
+            // The answer is index `j` of this chunk if the entry there
+            // starts at or above `key` and the one before it, in this
+            // chunk, starts below.
+            for j in [i, i + 1] {
+                if j > 0
+                    && chunk.get(j).is_some_and(|e| e.start.get() >= key)
+                    && chunk[j - 1].start.get() < key
+                {
+                    self.point(c, j);
+                    return Pos(c, j);
+                }
+            }
+        }
         let c = self
             .chunks
             .partition_point(|chunk| chunk.last().is_some_and(|e| e.start.get() < key));
         match self.chunks.get(c) {
-            Some(chunk) => Pos(c, chunk.partition_point(|e| e.start.get() < key)),
+            Some(chunk) => {
+                let i = chunk.partition_point(|e| e.start.get() < key);
+                self.point(c, i);
+                Pos(c, i)
+            }
             None => Pos(c, 0),
         }
+    }
+
+    fn point(&self, c: usize, i: usize) {
+        self.finger
+            .store(((c as u64) << 32) | i as u64, Ordering::Relaxed);
     }
 
     /// The position just before `pos`, if there is one.
