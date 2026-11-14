@@ -1575,6 +1575,8 @@ fn reap() {
 /// Idle-spin parameters (FreeBSD's `sched_idlespins`,
 /// `sched_idlespinthresh`, and its switch-count window of one stat tick).
 const IDLE_SPINS: u32 = 10_000;
+/// The spin of a CPU whose core has another thread (see `idle_loop`).
+const IDLE_SPINS_SMT: u32 = 64;
 const IDLE_SPIN_THRESHOLD: u32 = 157;
 const SWITCH_WINDOW_MS: u64 = 8;
 
@@ -1623,14 +1625,25 @@ fn idle_loop() {
     loop {
         let irq = hal::irq::disable();
         let c = this_cpu();
-        // As ULE's TDQ_IDLESPIN: never on an SMT sibling, where spinning
-        // takes the core from the other thread.
-        let spin = !c.smt.load(Ordering::Relaxed) && switching_often(c);
+        // As ULE's TDQ_IDLESPIN, the long spin is not for an SMT sibling,
+        // where it takes the core from the other thread. A sibling still
+        // spins a moment: a thread that sleeps for another's answer is
+        // woken within a microsecond or two, and waking a halted CPU
+        // costs the waker an interrupt (microseconds of it under a
+        // hypervisor). ULE's idle thread has such a moment too, while it
+        // looks for a thread to steal (`tdq_idled`) before it halts.
+        let spins = if !switching_often(c) {
+            0
+        } else if c.smt.load(Ordering::Relaxed) {
+            IDLE_SPINS_SMT
+        } else {
+            IDLE_SPINS
+        };
         hal::irq::restore(irq);
-        if spin {
+        if spins > 0 {
             // A waker sees `halted` clear and sets `need_resched` instead
             // of sending an IPI.
-            for _ in 0..IDLE_SPINS {
+            for _ in 0..spins {
                 if c.need_resched.load(Ordering::Relaxed) {
                     break;
                 }
