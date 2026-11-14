@@ -319,13 +319,15 @@ fn send_stream(
         if chain.is_empty() && control.is_empty() {
             return Ok(sent);
         }
-        let r = if nonblock {
-            so.send_stream_to(&peer, &mut chain, control, cred)
-        } else {
-            let _w = sched::wait_message("sbwait");
-            wait_until(s, &so.wr, timeo, || {
-                so.send_stream_to(&peer, &mut chain, control, cred)
-            })
+        // The wait message is set only on the way to a wait: most sends
+        // find room.
+        let mut once = || so.send_stream_to(&peer, &mut chain, control, cred);
+        let r = match once() {
+            Err(Errno::EAGAIN) if !nonblock => {
+                let _w = sched::wait_message("sbwait");
+                wait_until(s, &so.wr, timeo, once)
+            }
+            r => r,
         };
         match r {
             Ok((n, left)) => {
@@ -410,11 +412,12 @@ pub(crate) fn receive(
     if so.ty == Type::Dgram {
         let max = uio.resid();
         let once = || so.recv_dgram(max, peek, want_control);
-        let r = if nonblock {
-            once()
-        } else {
-            let _w = sched::wait_message("sbwait");
-            wait_until(s, &so.rd, timeo, once)
+        let r = match once() {
+            Err(Errno::EAGAIN) if !nonblock => {
+                let _w = sched::wait_message("sbwait");
+                wait_until(s, &so.rd, timeo, once)
+            }
+            r => r,
         }?;
         if let Some(ext) = ext.as_mut()
             && !r.control.is_empty()
@@ -434,11 +437,12 @@ pub(crate) fn receive(
         let want = piece(uio, peek);
         let skip = got.count;
         let first = || so.recv_stream_parts(want, peek, skip, false, want_control);
-        let r = if nonblock {
-            first()
-        } else {
-            let _w = sched::wait_message("sbwait");
-            wait_until(s, &so.rd, timeo, first)
+        let r = match first() {
+            Err(Errno::EAGAIN) if !nonblock => {
+                let _w = sched::wait_message("sbwait");
+                wait_until(s, &so.rd, timeo, first)
+            }
+            r => r,
         };
         let mut r = match r {
             Ok(r) => r,
