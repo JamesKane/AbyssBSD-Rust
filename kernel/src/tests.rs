@@ -4801,7 +4801,17 @@ fn detach_stress(node_name: &str, disk: &'static str, cycles: u32) {
             .unwrap()
         })
         .collect();
-    let free_pages = || crate::mm::phys_stats().free;
+    // Memory in two parts, since the heap's magazines fill on each CPU as
+    // the work comes to it: the pages outside the heap (free, or the
+    // heap's own), and what the heap's callers hold.
+    let measure = || {
+        let h = crate::mm::heap_stats();
+        (
+            crate::mm::phys_stats().free + h.slab_pages + h.magazine_pages + h.large_pages,
+            h.live_objects,
+            h.large_pages,
+        )
+    };
     let mut baseline = None;
     let start = crate::time::counter();
     for cycle in 0..cycles {
@@ -4821,14 +4831,27 @@ fn detach_stress(node_name: &str, disk: &'static str, cycles: u32) {
             "{disk} back after cycle {cycle}"
         );
         // The first cycle warms caches; after it, memory must not drift.
-        let free = free_pages();
+        let (pages, live, large) = measure();
         match baseline {
-            None => baseline = Some(free),
-            Some(b) => assert!(
-                free + 64 >= b,
-                "cycle {cycle}: {} pages fewer free than after the first",
-                b - free
-            ),
+            None => baseline = Some((pages, live, large)),
+            Some((p, l, g)) => {
+                assert!(
+                    pages + 64 >= p,
+                    "cycle {cycle}: {} pages fewer outside the heap than after the first",
+                    p - pages
+                );
+                // The I/O threads' requests in flight come and go.
+                assert!(
+                    live <= l + 1024,
+                    "cycle {cycle}: {} more objects held than after the first",
+                    live - l
+                );
+                assert!(
+                    large <= g + 64,
+                    "cycle {cycle}: {} more pages of large allocations than after the first",
+                    large - g
+                );
+            }
         }
     }
     stop.store(true, Ordering::Release);

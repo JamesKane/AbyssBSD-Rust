@@ -19,8 +19,8 @@
 //! depot of full and empty magazines, so a refill or flush moves one
 //! pointer under a lock rather than many objects. Only when the depot has
 //! no full magazine are objects taken from slabs. A magazine holds about
-//! 64 KiB of objects (16 to 510 of them) and lives in one page from the
-//! page source.
+//! 64 KiB of objects, or 1 MiB of the largest (16 to 510 of them), and
+//! lives in one page from the page source.
 //!
 //! A depot would otherwise keep what the busiest moment freed for good.
 //! [`Heap::trim`], called every [`TRIM_SECONDS`], gives back the magazines
@@ -265,9 +265,17 @@ const _: () = assert!(size_of::<Mag>() <= PAGE);
 
 /// Objects a magazine of objects of `size` bytes holds: about 64 KiB
 /// worth (256 for 256-byte objects, UMA's largest bucket), at least 16, at
-/// most a page.
+/// most a page of pointers; for objects of 2 KiB and more (the mbuf
+/// clusters' sizes) about 1 MiB worth. A buffer one CPU fills and another
+/// empties and frees comes back to the first through a magazine, and a
+/// small magazine brings it back while it is still in the other CPU's
+/// cache, where every line the first then writes has to be taken from
+/// that cache: 4 KiB writes through a UNIX socket took 501 ns with 16
+/// buffers to a magazine, 445 with 64, 416 with 256 (FreeBSD: 440). UMA
+/// gets there by growing a zone's buckets as its CPUs contend for them.
 const fn capacity(size: usize) -> usize {
-    let n = 64 * 1024 / size;
+    let worth = if size >= 2048 { 1024 * 1024 } else { 64 * 1024 };
+    let n = worth / size;
     if n < 16 {
         16
     } else if n > MAG_SLOTS {
