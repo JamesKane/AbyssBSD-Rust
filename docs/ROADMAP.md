@@ -617,22 +617,55 @@ documents named; this section keeps what is done and what is open.
     FreeBSD's 9302 again), `unix` 0.48 from 0.51 (`unix.stream.bw4k` 643 ns from 785). The
     little cores' `fs.tmpfs` and `fs.ufs` read 7 and 6% slower (0.637, 0.557), which no
     change here touches: the code moved (the layout item above).
-    Still behind in bhyve, and what is known of each:
-    - `thr.mutex.pi` at four and eight threads (1.22, 1.70): every CPU is in the kernel,
-      nearly half the samples in the backoff spin for a umtx lock. The paths are
-      `do_lock_pi`'s and `do_unlock_pi`'s and the lock is FreeBSD's kind, so the difference
-      is in what is not yet measured (how often each side's threads sleep). Waking the
-      waiters after the chain's lock is released, not under it, was tried and is far
-      worse (138 ns to 3196 at four threads, 251 to 10604 at eight): the waker's slow
-      interrupt under the lock is what keeps the others spinning rather than asleep;
-    - `unix.stream.bw4k`: the sender stalls on its first locked instruction after copying
-      the 4 KiB in, which looks like the copy's stores draining into lines the receiver's
-      CPU last held (it frees each buffer the sender then gets back); not confirmed, and
-      it wants FreeBSD's profile of the same benchmark beside it;
-    - `kevent.pipe1000`: the knote that is not yet queued (each pipe's, once a round) still
-      takes its kqueue's reference, the queue's lock and a search of the kqueue's index;
-      passing the notifier's own reference down to skip the search changed nothing;
-    - `thr.mutex.t2` (1.07 to 1.11), `vm.mmap` (1.03);
+  - what closed those gaps (`8502a8e` to `cd34521`): each was a difference of design, found
+    by measuring both systems the same way, not by a profile of ours alone.
+    - `kevent`: a benchmark of 2, 10, and 100 pipes beside those of 1 and 1000 showed the
+      whole gap at two (ours 120 ns over one pipe's, FreeBSD's 38), so it was the path of a
+      knote not yet queued and the scan of the last one gone quiet, not the memory of a
+      thousand pipes. A knote's note is now under its kqueue's lock with its status
+      (`KQ_LOCK`), a notification takes that lock once for the filter and the queue, a scan
+      holds it from one knote to the next, and a knote holds its kqueue outright:
+      `kevent.pipe1000` 1.009 (1.15). FreeBSD's `sys/kqueue` tests: 25 of 25. The lock-free
+      pass over a queued pipe knote (`1bf1ad7`) could lose an event against a scan clearing
+      the knote; it goes by a status bit now, and the scan asks the filter once more behind
+      a fence.
+    - the umtx chain: FreeBSD's `umtxq_busy` spins 200 times for a busy chain before it
+      sleeps, and ours slept at once.
+    - the wake-up: counting each side's sleeps (`ru_nvcsw` an operation) showed both
+      sleeping as often on the contended mutexes, so each sleep and wake cost us more. A CPU
+      whose core has a second thread halted the instant it went idle, and waking a halted
+      CPU is an interrupt (5 µs of the waker's time in bhyve, whose guests have that
+      topology); ULE's idle thread has a moment before it halts, while it looks for a
+      thread to steal. An SMT sibling's idle thread now spins 64 times first when its CPU
+      has been switching often: `unix.stream.pingpong` 1.24 µs (FreeBSD's 17.0),
+      `pipe.pingpong` 2.68 (16.7), `thr.sem.pingpong` 3.06 (16.8), `pty.raw` 7.08 (34.3).
+    - the contended mutexes, which that made slower (`thr.mutex.pi.t8` 274 ns from 227):
+      with a wake-up that takes no interrupt, the waiter ran the instant the owner unlocked,
+      found the mutex retaken, marked it contested and slept, and the owner's every unlock
+      became a system call. FreeBSD runs the same rounds, spaced by its wake-up. A locker
+      woken for a mutex and back to queue for it now passes 4 µs first; and a umtx call no
+      longer takes the process's address-space lock and reference, nor its job lock, on
+      the way. `thr.mutex.pi.t8` 88.6 ns (FreeBSD's 150), `thr.mutex.t4` 42.5 (69.4).
+      Watching the word and taking the mutex the moment it is free was tried and is worse
+      (196 ns: the mutex goes from CPU to CPU). FreeBSD's `lib/libthr` tests: 68 of 68.
+    - `unix.stream.bw4k`: the heap's magazines for 4 KiB buffers held 16, so a buffer the
+      receiver freed came back to the sender while still in the receiver's cache. With 64
+      it is 445 ns, with 256 (1 MiB, now the size for classes of 2 KiB and up) 411, to
+      FreeBSD's 441; UMA grows its buckets under such traffic.
+    Three runs a side at `cd34521`: `unix` 0.310, `pty` 0.371, `thr` 0.542, `event` 0.677,
+    `exec` 0.884, `boot` 0.555; `pipe` 0.338, `vm` 0.559, `proc` 0.746, `sig` 0.856, `io`
+    0.973, `syscall` 0.986. No benchmark of `p6` is slower than FreeBSD's; of `p4` only
+    `vm.mmap` (1.020). On the board at `cd34521`, three runs of `p4`, `p5`, and `p6`
+    (`tests/perf/board/results/2026-11-15-cd34521.txt`, FreeBSD's side as before): every
+    component passes on every class, overall 0.585, 0.577, 0.616, and 0.559 on the big,
+    mid, little, and all cores (0.629, 0.632, 0.635, 0.622 at `bbddcc3`); `thr` 0.61 on
+    every class from 0.81, 0.87, and 0.76 (the hold-off; the board's cores have no second
+    thread, so its idle spin was already the long one). The little cores' `event`, `sig`,
+    and `unix` read 6 to 11% slower (0.645, 0.572, 0.712) with the big and mid cores' level
+    or better: the code moved again (the layout item above).
+    Still to do there: the ten-run gate, and `p2`, `p3`, `p5`, and `p7` again; a locker's
+    hold-off favours the owner as FreeBSD's slow wake-up does, and how the threads share
+    a mutex under it has not been measured;
   - a release kernel built with the tests (`cargo xtask test --tier boot --release`)
     overflows a kernel stack in `detach_stress_nvme` on both architectures
     (`devfs::Registry::insert` under the NVMe driver's start); the boot tier's own (debug)

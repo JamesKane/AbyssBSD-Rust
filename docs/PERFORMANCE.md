@@ -160,5 +160,19 @@ Causes found behind a gap, to look for first the next time one opens (ROADMAP, P
   Moving the wake-up past the unlock made the priority-inheritance mutex twenty to forty
   times slower: the threads that had been spinning for the lock went to sleep instead, and
   each then needed a wake-up of its own.
+- **Measure both systems the same way before changing ours.** A profile of ours says where
+  our time goes, not which of it FreeBSD does not spend. What found the last gaps: the same
+  benchmark at other sizes (a `kevent` over 2, 10, and 100 pipes put the whole gap at two,
+  so it was a path and not memory), and a count taken on both sides (sleeps an operation,
+  from `getrusage`, showed both sleeping as often, so a wake-up cost us more). Each then
+  pointed at a difference of design: where a knote's state is locked, what an idle CPU does
+  before it halts, how large an allocator's per-CPU cache is.
+- **Some benchmarks are faster for a slower kernel.** A contended mutex's throughput is
+  highest when one thread keeps it: every hand-over costs more than the operation. A
+  wake-up that got cheaper made these slower, and so did a cheaper system call, until the
+  loser of a race for the mutex was made to hold off before trying again.
+- **An allocator's per-CPU cache sets how soon a buffer comes back.** One CPU filling
+  buffers that another frees gets them back through the cache; a small one returns them
+  while they are still in the other CPU's cache.
 - After checking out an older revision for the server (a bisect), touch the tree's files before
   the next `--remote` run: rsync keeps their times and cargo then builds a mixture.
