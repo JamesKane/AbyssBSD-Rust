@@ -127,3 +127,27 @@ gain beyond noise on any core class (ROADMAP, Phase 9), so the kernel is linked 
 What follows for measuring: a single little-core benchmark can move by tens of percent between
 two kernels for no reason in the change itself. Judge a change there by its component over the
 suites, or, where it is small, by instructions executed (PMU event `0x08`) rather than time.
+
+## 8. What has cost time before
+
+Causes found behind a gap, to look for first the next time one opens (ROADMAP, Phase 9):
+
+- **A feature's lock or lookup on every call.** A short system call is some 70 ns, and an
+  uncontended lock taken and dropped is 10 to 15 of them. What a call asks on its way in or out
+  (has the process one thread, a limit, the file's offset, is anything pending) is read from an
+  atomic the owner keeps up to date, and the work behind it is out of line. A single-process
+  benchmark that moved is found by `git bisect run` over `--suite p4 --runs 1 --abyss-only`,
+  about three minutes a step.
+- **Structure copies on x86_64.** The kernel is built without SSE, and LLVM then copies anything
+  over 64 bytes with `rep movsq`, whose start-up is some 30 cycles. `.cargo/config.toml` raises
+  the limit for copies by plain moves to 128 bytes (`-max-store-memcpy=16`).
+- **Wake-ups under a hypervisor.** Waking a halted CPU is an IPI, and in bhyve the sender pays
+  some 5 µs for it, so a benchmark of two processes measures how many wake-ups a transfer
+  takes. A pipe wakes the other side before a large copy, not after; a socket's waiter spins
+  briefly when spinning has lately been answered.
+- **Reading a profile.** Samples gather on the instruction after `sti`: that is the time spent
+  with interrupts masked before it, not that instruction (after a wake-up from idle in bhyve,
+  ticks delivered late and together). `--prof-cpu` names the CPU sampled, so
+  the other process of a pair can be seen.
+- After checking out an older revision for the server (a bisect), touch the tree's files before
+  the next `--remote` run: rsync keeps their times and cargo then builds a mixture.

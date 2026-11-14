@@ -569,6 +569,34 @@ documents named; this section keeps what is done and what is open.
     report as linked: `tests/perf/board/results/2026-11-13-bc14163.txt`, every component
     passing on every class. Until something controls it, a small change is compared on
     the little cores by instructions executed (PMU event `0x08`), not by time;
+  - amd64 in bhyve had slipped since its phases' exits: at `e124112`, ten runs a side, `p6`
+    failed `unix` (1.143) and `event` (1.070), and in `p4` `getpid` took 115 ns to FreeBSD's
+    71 (it was 69 at P5's exit), a byte to `/dev/null` 189 to 108. The causes, fixed in
+    `13afb3d` to `cf4b48c`: without SSE the compiler copied each structure of 64 to 128 bytes
+    with `rep movsq`, some 30 cycles a time (`-max-store-memcpy=16`, x86_64 only); P6.7 and
+    P6.8 had put a lock or a lookup on every call (the thread list's lock to ask whether a
+    process has one thread, a mutex round a device's file offset, the limits' and the wired
+    count's locks, the current thread and address space found through `dyn Any`); the call
+    was decoded twice and found through the slot list. Between two processes a wake-up there
+    is an IPI that costs the sender some 5 µs in the hypervisor: a pipe now wakes its reader
+    before it copies a transfer of a page or more (`pipe.bw` 22.7 µs to 14.9; FreeBSD's
+    19.0), and a socket's waiter spins up to 2 µs for a change, while spinning has lately
+    paid, before it sleeps (`unix.rights` 1405 ns to about 810; FreeBSD's 756 to 842). Three
+    runs a side at `cf4b48c`: every component of `p4` and `p6` passes (`syscall` 0.999, `io`
+    0.964, `pipe` 0.844, `proc` 0.764, `sig` 0.889, `vm` 0.571; `event` 1.008, `unix` 0.978,
+    `thr` 0.882, `exec` 0.888, `pty` 0.846, `boot` 0.522). Behind inside them:
+    `event.kevent.pipe1` and `pipe1000` (1.26, 1.33), `unix.stream.bw4k` (1.17),
+    `thr.mutex.pi` at four and eight threads (about 1.25 and 1.7), `thr.mutex.t2` (1.07),
+    `vm.mmap` (1.03). Still to do there: the ten-run gate, and `p2`, `p3`, `p5`, and `p7`
+    again. The kernel's profiler drops samples taken in user mode (`prof.rs`: `USER` and
+    `OTHER` are the same bit). The same changes on the board, three runs of `p4`, `p5`, and
+    `p6` (`tests/perf/board/results/2026-11-14-cf4b48c.txt`, FreeBSD's side that of the last
+    report): every component passes on every class, overall 0.634, 0.639, 0.632 and 0.630
+    of FreeBSD's time on the big, mid, little, and all cores (0.676, 0.671, 0.684, 0.647
+    before), `syscall` 0.56 from 0.70 on the big cores and 0.70 from 0.93 on the little,
+    `io` 0.24 from 0.34, `unix` 0.51 from 0.72. One thing is slower there: `pipe.bw` on the
+    big and mid cores by 6 and 8% (9431 and 10576 ns; FreeBSD's 9302 and 11160), where a
+    wake-up is cheap and the early one buys nothing;
   - a release kernel built with the tests (`cargo xtask test --tier boot --release`)
     overflows a kernel stack in `detach_stress_nvme` on both architectures
     (`devfs::Registry::insert` under the NVMe driver's start); the boot tier's own (debug)
