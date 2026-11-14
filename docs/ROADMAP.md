@@ -663,7 +663,16 @@ documents named; this section keeps what is done and what is open.
     thread, so its idle spin was already the long one). The little cores' `event`, `sig`,
     and `unix` read 6 to 11% slower (0.645, 0.572, 0.712) with the big and mid cores' level
     or better: the code moved again (the layout item above).
-    Still to do there: the ten-run gate, and `p2`, `p3`, `p5`, and `p7` again; a locker's
+    `vm.mmap` after that (`8b48286`): a lookup in a map's entries was two binary searches
+    every time, and now tries where the last one ended first, as FreeBSD's splay tree keeps
+    the last entry found at its root: 310 ns (324; FreeBSD's 317).
+    The ten-run gate in bhyve at `8b48286`, both suites: every component passes and no
+    benchmark is rated slower. `p4` overall 0.657: `io` 0.975, `pipe` 0.339, `proc` 0.752,
+    `sig` 0.863, `syscall` 0.985, `vm` 0.546 (`vm.mmap` 0.978). `p6` overall 0.508: `boot`
+    0.538, `event` 0.676, `exec` 0.879, `pty` 0.374, `thr` 0.535, `unix` 0.308. One
+    benchmark is behind: `unix.rights`, 803 ns to FreeBSD's 762 (1.055, interval 1.024 to
+    1.084, rated noisy).
+    Still to do there: `unix.rights`, and `p2`, `p3`, `p5`, and `p7` again; a locker's
     hold-off favours the owner as FreeBSD's slow wake-up does, and how the threads share
     a mutex under it has not been measured;
   - a release kernel built with the tests (`cargo xtask test --tier boot --release`)

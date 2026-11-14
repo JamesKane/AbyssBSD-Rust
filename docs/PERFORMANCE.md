@@ -174,5 +174,9 @@ Causes found behind a gap, to look for first the next time one opens (ROADMAP, P
 - **An allocator's per-CPU cache sets how soon a buffer comes back.** One CPU filling
   buffers that another frees gets them back through the cache; a small one returns them
   while they are still in the other CPU's cache.
+- **A search repeated from the top.** A call often looks where the last one did (`mmap`, then
+  `munmap` of the same pages). A sorted array searched afresh pays a cache line a probe;
+  FreeBSD's structures often remember (a splay tree's root), and a remembered position
+  checked against the entries themselves does the same for an array.
 - After checking out an older revision for the server (a bisect), touch the tree's files before
   the next `--remote` run: rsync keeps their times and cargo then builds a mixture.
