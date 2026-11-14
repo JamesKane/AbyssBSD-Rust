@@ -372,7 +372,15 @@ struct ChainState<T: Thread> {
 /// A chain: some keys' queues and the lock over them.
 struct Chain<T: Thread> {
     state: DelayLock<ChainState<T>>,
+    /// `state.busy`, readable without the lock by an operation spinning
+    /// a moment for the chain ([`BUSY_SPINS`]).
+    busy: AtomicBool,
 }
+
+/// How many spins an operation waits for a busy chain before it sleeps
+/// (FreeBSD's `BUSY_SPINS`): a busy period is a few instructions round a
+/// user access, far shorter than a sleep and its wakeup.
+const BUSY_SPINS: u32 = 200;
 
 impl<T: Thread> Chain<T> {
     const fn new() -> Self {
@@ -383,11 +391,29 @@ impl<T: Thread> Chain<T> {
                 queues: Vec::new(),
                 pis: Vec::new(),
             }),
+            busy: AtomicBool::new(false),
         }
     }
 }
 
-type Guard<'a, T> = sync::DelayLockGuard<'a, ChainState<T>>;
+/// A chain's lock, held, and the chain.
+struct Guard<'a, T: Thread> {
+    state: sync::DelayLockGuard<'a, ChainState<T>>,
+    chain: &'a Chain<T>,
+}
+
+impl<T: Thread> core::ops::Deref for Guard<'_, T> {
+    type Target = ChainState<T>;
+    fn deref(&self) -> &ChainState<T> {
+        &self.state
+    }
+}
+
+impl<T: Thread> core::ops::DerefMut for Guard<'_, T> {
+    fn deref_mut(&mut self) -> &mut ChainState<T> {
+        &mut self.state
+    }
+}
 
 impl<T: Thread> ChainState<T> {
     fn queue(&mut self, key: &Key, q: Q) -> Option<&mut Queue<T>> {
@@ -525,7 +551,11 @@ impl<T: Thread> Umtx<T> {
     }
 
     fn lock(&self, key: &Key) -> Guard<'_, T> {
-        self.chain(key).state.lock()
+        let chain = self.chain(key);
+        Guard {
+            state: chain.state.lock(),
+            chain,
+        }
     }
 
     /// Marks `key`'s chain busy, waiting while another operation has it
@@ -533,6 +563,16 @@ impl<T: Thread> Umtx<T> {
     /// again.
     fn busy<'a, E: Env<T = T>>(&'a self, env: &E, key: &Key, mut g: Guard<'a, T>) -> Guard<'a, T> {
         let me = env.me();
+        let chain = g.chain;
+        if g.busy {
+            drop(g);
+            let mut spins = BUSY_SPINS;
+            while chain.busy.load(Ordering::Relaxed) && spins > 1 {
+                core::hint::spin_loop();
+                spins -= 1;
+            }
+            g = self.lock(key);
+        }
         while g.busy {
             me.busy_wait.store(true, Ordering::Release);
             g.busy_waiters.push_back(me.clone());
@@ -543,6 +583,7 @@ impl<T: Thread> Umtx<T> {
             g = self.lock(key);
         }
         g.busy = true;
+        chain.busy.store(true, Ordering::Relaxed);
         g
     }
 
@@ -553,6 +594,7 @@ impl<T: Thread> Umtx<T> {
     fn unbusy(g: &mut Guard<'_, T>) {
         debug_assert!(g.busy);
         g.busy = false;
+        g.chain.busy.store(false, Ordering::Relaxed);
         if let Some(w) = g.busy_waiters.pop_front() {
             w.busy_wait.store(false, Ordering::Release);
             w.thread.unpark();
