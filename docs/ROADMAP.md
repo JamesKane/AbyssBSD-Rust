@@ -597,6 +597,42 @@ documents named; this section keeps what is done and what is open.
     `io` 0.24 from 0.34, `unix` 0.51 from 0.72. One thing is slower there: `pipe.bw` on the
     big and mid cores by 6 and 8% (9431 and 10576 ns; FreeBSD's 9302 and 11160), where a
     wake-up is cheap and the early one buys nothing;
+  - what followed (`d464a51` to `bbddcc3`). The pipe's early wake-up is now only for a
+    sleeper whose CPU has halted, which gave the board back most of it (`pipe.bw` on the big
+    cores 9166 ns, 8767 with no early wake at all) and left bhyve's 15.0 µs. One write,
+    `kevent`, and read of a pipe took some twelve spin locks, each masking interrupts, to
+    FreeBSD's four or five mutexes: a knote already active and queued is now left alone, the
+    scanners are woken only when one sleeps (`KQ_SLEEP`), a scan takes three locks an event
+    for six, a notification passes over a queued knote whose filter answers from the
+    object's state alone (`Filter::level`: a pipe's), and a pipe takes a wait queue's lock
+    only when the other side has said it will sleep (`PIPE_WANTR`, `PIPE_WANTW`). In bhyve,
+    three runs a side: `kevent.pipe1` 1.017 (it was 1.257), `pipe1000` 1.134 (1.333), the
+    `event` component 0.947. A socket's send and receive set the wait message only when
+    they wait: `unix.stream.bw4k` about 1.12 (1.185; one run). On the
+    board at `bbddcc3`, three runs of `p4`, `p5`, and `p6`
+    (`tests/perf/board/results/2026-11-14-bbddcc3.txt`, FreeBSD's side as before): every
+    component passes on every class, overall 0.629, 0.632, 0.635, and 0.622 on the big,
+    mid, little, and all cores; `event` 0.59 from 0.64 on the big cores (`kevent.pipe1` 586
+    ns from 690, `pipe1000` 821 from 909), `pipe` 0.88 from 0.94 (`pipe.bw` 8952 ns, under
+    FreeBSD's 9302 again), `unix` 0.48 from 0.51 (`unix.stream.bw4k` 643 ns from 785). The
+    little cores' `fs.tmpfs` and `fs.ufs` read 7 and 6% slower (0.637, 0.557), which no
+    change here touches: the code moved (the layout item above).
+    Still behind in bhyve, and what is known of each:
+    - `thr.mutex.pi` at four and eight threads (1.22, 1.70): every CPU is in the kernel,
+      nearly half the samples in the backoff spin for a umtx lock. The paths are
+      `do_lock_pi`'s and `do_unlock_pi`'s and the lock is FreeBSD's kind, so the difference
+      is in what is not yet measured (how often each side's threads sleep). Waking the
+      waiters after the chain's lock is released, not under it, was tried and is far
+      worse (138 ns to 3196 at four threads, 251 to 10604 at eight): the waker's slow
+      interrupt under the lock is what keeps the others spinning rather than asleep;
+    - `unix.stream.bw4k`: the sender stalls on its first locked instruction after copying
+      the 4 KiB in, which looks like the copy's stores draining into lines the receiver's
+      CPU last held (it frees each buffer the sender then gets back); not confirmed, and
+      it wants FreeBSD's profile of the same benchmark beside it;
+    - `kevent.pipe1000`: the knote that is not yet queued (each pipe's, once a round) still
+      takes its kqueue's reference, the queue's lock and a search of the kqueue's index;
+      passing the notifier's own reference down to skip the search changed nothing;
+    - `thr.mutex.t2` (1.07 to 1.11), `vm.mmap` (1.03);
   - a release kernel built with the tests (`cargo xtask test --tier boot --release`)
     overflows a kernel stack in `detach_stress_nvme` on both architectures
     (`devfs::Registry::insert` under the NVMe driver's start); the boot tier's own (debug)

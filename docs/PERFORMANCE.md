@@ -149,5 +149,16 @@ Causes found behind a gap, to look for first the next time one opens (ROADMAP, P
   with interrupts masked before it, not that instruction (after a wake-up from idle in bhyve,
   ticks delivered late and together). `--prof-cpu` names the CPU sampled, so
   the other process of a pair can be seen.
+- **Counting the locks.** Where a path is level with FreeBSD's in design and still behind,
+  count the locks it takes against FreeBSD's for the same call. An uncontended spin lock that
+  masks interrupts is some 8 to 10 ns here (`pushfq`, `cli`, a locked exchange, `sti`), and
+  one pipe event took twelve where FreeBSD takes four or five mutexes. The ways out were
+  FreeBSD's own: a flag under a lock already held that says somebody waits (`KQ_SLEEP`,
+  `PIPE_WANTR`), so the common case takes no second lock.
+- **A slow wake-up under a lock is not always a cost.** Contended umtx operations wake their
+  waiter under the chain's lock, and under a hypervisor that holds the lock for microseconds.
+  Moving the wake-up past the unlock made the priority-inheritance mutex twenty to forty
+  times slower: the threads that had been spinning for the lock went to sleep instead, and
+  each then needed a wake-up of its own.
 - After checking out an older revision for the server (a bisect), touch the tree's files before
   the next `--remote` run: rsync keeps their times and cargo then builds a mixture.
