@@ -481,6 +481,7 @@ impl<T: Thread> Umtx<T> {
             if error.is_err() {
                 break error;
             }
+            Self::hold_off(env, m);
             self.busy_unlocked(env, &key);
             // Set the contested bit, so the owner's unlock comes here.
             match env.cas32(m, owner, owner | UMUTEX_CONTESTED) {
@@ -510,6 +511,7 @@ impl<T: Thread> Umtx<T> {
             if error.is_err() {
                 continue;
             }
+            Self::woken(me, m);
             if let Err(e) = env.check_susp(false) {
                 break Err(e);
             }

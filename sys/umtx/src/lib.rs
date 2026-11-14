@@ -44,7 +44,7 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::time::Timespec;
@@ -265,6 +265,10 @@ pub trait Env {
     /// restarts). `done` is checked so that an [`Thread::unpark`] after it
     /// became true is never missed.
     fn sleep(&self, done: &dyn Fn() -> bool, deadline: Option<&Deadline>) -> Result<(), Errno>;
+    /// Passes `ns` nanoseconds on the CPU, without sleeping.
+    fn pause(&self, ns: u64) {
+        let _ = ns;
+    }
 
     /// Sleeps, uninterruptibly, until `done()` holds.
     fn park(&self, done: &dyn Fn() -> bool);
@@ -313,6 +317,8 @@ pub struct Waiter<T: Thread> {
     queued: AtomicBool,
     /// Waiting for a busy chain to be free.
     busy_wait: AtomicBool,
+    /// The mutex it was last woken for, 0 for none ([`Umtx::hold_off`]).
+    woken_for: AtomicU64,
     /// Priority-inheritance state, under [`Umtx::pi_lock`].
     pi: PreemptLock<pi::WaiterPi<T>>,
     /// The robust-mutex lists.
@@ -336,6 +342,7 @@ impl<T: Thread> Waiter<T> {
             tid,
             queued: AtomicBool::new(false),
             busy_wait: AtomicBool::new(false),
+            woken_for: AtomicU64::new(0),
             pi: PreemptLock::new(pi::WaiterPi::new()),
             robust: PreemptLock::new(Robust::default()),
         }
@@ -376,6 +383,11 @@ struct Chain<T: Thread> {
     /// a moment for the chain ([`BUSY_SPINS`]).
     busy: AtomicBool,
 }
+
+/// How long a locker woken to find its mutex retaken holds off before it
+/// queues again ([`Umtx::hold_off`]): about what waking a halted CPU
+/// takes, which is what spaces these rounds where a wakeup needs one.
+const HOLD_OFF_NS: u64 = 4_000;
 
 /// How many spins an operation waits for a busy chain before it sleeps
 /// (FreeBSD's `BUSY_SPINS`): a busy period is a few instructions round a
@@ -599,6 +611,25 @@ impl<T: Thread> Umtx<T> {
             w.busy_wait.store(false, Ordering::Release);
             w.thread.unpark();
         }
+    }
+
+    /// Before a locker queues for mutex `m`: if it was woken for this
+    /// mutex before and is here again, the mutex was retaken before it
+    /// ran, and is being taken and released faster than a sleeper can be
+    /// woken. It holds off a moment before it marks the mutex contested
+    /// again: each such round costs the owner a system call to wake it,
+    /// and with a wakeup that takes no interrupt the rounds would follow
+    /// one another without a pause. (FreeBSD's rounds are spaced by its
+    /// wakeup's latency.)
+    fn hold_off<E: Env<T = T>>(env: &E, m: u64) {
+        if env.me().woken_for.load(Ordering::Relaxed) == m {
+            env.pause(HOLD_OFF_NS);
+        }
+    }
+
+    /// Notes that `me` was woken from a sleep for mutex `m`.
+    fn woken(me: &Waiter<T>, m: u64) {
+        me.woken_for.store(m, Ordering::Relaxed);
     }
 
     fn busy_unlocked<E: Env<T = T>>(&self, env: &E, key: &Key) {

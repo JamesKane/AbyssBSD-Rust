@@ -275,7 +275,11 @@ pub(super) fn umtx_shm(s: &Sleepable, t: &UserThread, addr: u64, flags: u32) -> 
             .any(|w| w.upgrade().is_some_and(|o| Arc::ptr_eq(&o, &object)));
         return if dead { Err(Errno::ENOTTY) } else { Ok(0) };
     }
-    let cx = crate::umtx::Ctx { s, t };
+    let cx = crate::umtx::Ctx {
+        s,
+        t,
+        wmesg: "uwait",
+    };
     let key = cx.key(addr, Type::Shm, Share::Process)?;
     let object = key
         .hold

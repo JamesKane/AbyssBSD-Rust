@@ -118,6 +118,7 @@ impl<T: Thread> Umtx<T> {
             // A signal or timeout came during the last sleep, and we have
             // tried once more.
             error?;
+            Self::hold_off(env, m);
             let key = env.key(m, Type::NormalUmutex, Share::of(flags))?;
             let mut g = self.busy(env, &key, self.lock(&key));
             g.insert(&key, Q::Shared, me);
@@ -138,6 +139,7 @@ impl<T: Thread> Umtx<T> {
             error = Self::sleep(env, deadline);
             self.lock(&key).remove(&key, Q::Shared, me);
             if error.is_ok() {
+                Self::woken(me, m);
                 error = env.check_susp(false);
             }
         }

@@ -374,7 +374,16 @@ pub(super) fn thr_exit(s: &Sleepable, state: u64) -> SysResult {
     if state != 0 {
         let _ = UserPtr::<i64>::new(state).write(&1);
         let _ = UserThread::with_current(|t| {
-            crate::umtx::UMTX.wake(&crate::umtx::Ctx { s, t }, state, usize::MAX, false)
+            crate::umtx::UMTX.wake(
+                &crate::umtx::Ctx {
+                    s,
+                    t,
+                    wmesg: "uwait",
+                },
+                state,
+                usize::MAX,
+                false,
+            )
         });
     }
     // Not the last thread: its exit is a debugger's event with

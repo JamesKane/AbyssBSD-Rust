@@ -172,11 +172,10 @@ pub(super) fn umtx_op(
     };
     let op = op & !(UMTX_OP__I386 | UMTX_OP__32BIT);
     let t = UserThread::current().ok_or(Errno::EINVAL)?;
-    let cx = Ctx { s, t: &t };
     let u = &UMTX;
     // What a sleep in each operation is called (kern_umtx.c's
     // `umtxq_sleep` messages; a mutex's is that of the normal protocol).
-    let _w = sched::wait_message(match op {
+    let wmesg = match op {
         UMTX_OP_LOCK => "umtx",
         UMTX_OP_MUTEX_LOCK | UMTX_OP_MUTEX_WAIT => "umtxn",
         UMTX_OP_CV_WAIT => "ucond",
@@ -184,7 +183,8 @@ pub(super) fn umtx_op(
         UMTX_OP_RW_WRLOCK => "uwrlck",
         UMTX_OP_SEM_WAIT | UMTX_OP_SEM2_WAIT => "usem",
         _ => "uwait",
-    });
+    };
+    let cx = Ctx { s, t: &t, wmesg };
     match op {
         UMTX_OP_LOCK => {
             let to = if uaddr2 == 0 {

@@ -37,7 +37,9 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 
 use abi::errno::Errno;
 use abi::resource::{RLIM_INFINITY, Rlimit, WNOHANG, WNOWAIT, exit_status, rlimit};
@@ -650,6 +652,16 @@ pub(crate) fn default_limits() -> [Rlimit; rlimit::NLIMITS] {
 pub(crate) struct Process {
     pid: i32,
     space: SpinLock<Arc<AddressSpace>>,
+    /// Which space that is, as a number that names it, readable with no
+    /// lock or reference: a private umtx key is made of it on every
+    /// contended lock and unlock (`p_vmspace`, as `umtx_key_get` reads it).
+    space_id: AtomicUsize,
+    /// Whether [`Process::suspension`] may have something to say: set
+    /// when a stop or a single-threading begins, cleared once a look
+    /// under `job` finds neither. A thread's check between its system
+    /// call's steps reads only this (FreeBSD's `thread_check_susp` tests
+    /// the thread's own pending-suspend flag first, as racily).
+    suspending: AtomicBool,
     /// This process borrows its parent's address space (`vfork`) until it
     /// execs or exits; the parent sleeps meanwhile.
     vforked: AtomicBool,
@@ -1006,7 +1018,9 @@ impl Process {
             let pid = alloc_pid(me);
             Self {
                 pid,
+                space_id: AtomicUsize::new(Arc::as_ptr(&space) as usize),
                 space: SpinLock::new(space),
+                suspending: AtomicBool::new(false),
                 vforked: AtomicBool::new(false),
                 layout: SharedLayout::new(parent.map_or(layout, |p| p.layout())),
                 signals: SpinLock::new(signals),
@@ -1339,6 +1353,21 @@ impl Process {
     /// The address space the process runs in now.
     pub(crate) fn space(&self) -> Arc<AddressSpace> {
         Arc::clone(&self.space.lock())
+    }
+
+    /// A number naming the address space the process runs in now (its
+    /// address), for keys that only tell spaces apart.
+    pub(crate) fn space_id(&self) -> usize {
+        self.space_id.load(Ordering::Relaxed)
+    }
+
+    /// Puts `new` in place of the process's address space; returns the
+    /// old one.
+    fn replace_space(&self, new: Arc<AddressSpace>) -> Arc<AddressSpace> {
+        let mut space = self.space.lock();
+        self.space_id
+            .store(Arc::as_ptr(&new) as usize, Ordering::Relaxed);
+        core::mem::replace(&mut *space, new)
     }
 
     pub(crate) const fn pid(&self) -> i32 {
@@ -1996,7 +2025,7 @@ impl Process {
         // The old image's robust mutexes go before its memory does.
         crate::umtx::exec(s, &me);
         // No way back from here.
-        let old = core::mem::replace(&mut *self.space.lock(), Arc::clone(&space));
+        let old = self.replace_space(Arc::clone(&space));
         sched::set_address_space(Some(space as Arc<dyn sched::AddressSpace>));
         if self.vforked.load(Ordering::Acquire) {
             // The old space is the parent's. A child that asked to be
@@ -2197,7 +2226,13 @@ impl Process {
 
     /// What thread `t` must do about suspension now.
     pub(crate) fn suspension(&self, t: &UserThread) -> Suspension {
+        if !self.suspending.load(Ordering::Relaxed) && !t.dbg.has(crate::ptrace::tdb::SUSPEND) {
+            return Suspension::None;
+        }
         let job = self.job.lock();
+        if job.single.is_none() && job.stopped == 0 {
+            self.suspending.store(false, Ordering::Relaxed);
+        }
         match job.single {
             // A thread reporting its exit to its debugger waits for it
             // (`TDB_EXIT` stops even then).
@@ -2276,6 +2311,7 @@ impl Process {
     pub(crate) fn begin_trace_stop(&self, t: Option<&UserThread>, sig: u32) {
         {
             let mut job = self.job.lock();
+            self.suspending.store(true, Ordering::Relaxed);
             job.stopped = sig;
             job.trace = true;
             job.stop_report = true;
@@ -2330,6 +2366,7 @@ impl Process {
     pub(crate) fn begin_stop(&self, t: &UserThread, sig: u32) {
         {
             let mut job = self.job.lock();
+            self.suspending.store(true, Ordering::Relaxed);
             job.stopped = sig;
             job.stop_report = true;
             job.cont_report = false;
@@ -2358,7 +2395,10 @@ impl Process {
             match &mut job.single {
                 Some(x) if x.by != t.tid() => return Err(Errno::ERESTART),
                 Some(x) => x.mode = mode,
-                None => job.single = Some(Single { by: t.tid(), mode }),
+                None => {
+                    self.suspending.store(true, Ordering::Relaxed);
+                    job.single = Some(Single { by: t.tid(), mode });
+                }
             }
         }
         // Parked threads look again (to leave, for `Exit`); the others
@@ -2456,7 +2496,7 @@ impl Process {
         // does not wait for that CPU. (The parent's, after a vfork, stays.)
         match AddressSpace::new() {
             Ok(empty) => {
-                let old = core::mem::replace(&mut *self.space.lock(), empty);
+                let old = self.replace_space(empty);
                 if !vforked && Arc::strong_count(&old) > 1 {
                     old.clear(s);
                 }

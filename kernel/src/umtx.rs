@@ -81,6 +81,9 @@ pub(crate) type Entry = Waiter<Parker>;
 pub(crate) struct Ctx<'a> {
     pub(crate) s: &'a Sleepable,
     pub(crate) t: &'a UserThread,
+    /// What a sleep in this operation is called (kern_umtx.c's
+    /// `umtxq_sleep` messages), set only if it comes to one.
+    pub(crate) wmesg: &'static str,
 }
 
 impl Ctx<'_> {
@@ -129,11 +132,12 @@ impl umtx::Env for Ctx<'_> {
     }
 
     fn key(&self, addr: u64, ty: Type, share: Share) -> Result<Key, Errno> {
-        let space = self.space();
-        let private = || Key::private(ty, Arc::as_ptr(&space) as usize, addr);
+        // The space is only named, not used: no lock, no reference.
+        let private = || Key::private(ty, self.t.process().space_id(), addr);
         if share == Share::Thread {
             return Ok(private());
         }
+        let space = self.space();
         if addr >= crate::mm::space::USER_END {
             return Err(Errno::EFAULT);
         }
@@ -183,10 +187,18 @@ impl umtx::Env for Ctx<'_> {
             }
         };
         let wait = &self.t.umtx().thread.wait;
+        let _w = sched::wait_message(self.wmesg);
         match crate::signal::sleep(self.s, wait, done, limit) {
             Ok(crate::signal::Woke::Done) => Ok(()),
             Ok(crate::signal::Woke::TimedOut) => Err(Errno::ETIMEDOUT),
             Err(e) => Err(e),
+        }
+    }
+
+    fn pause(&self, ns: u64) {
+        let end = crate::time::counter().saturating_add(crate::time::ns_to_ticks(ns));
+        while crate::time::counter() < end {
+            core::hint::spin_loop();
         }
     }
 
@@ -222,7 +234,11 @@ impl umtx::Env for Ctx<'_> {
 /// holds are released as owner dead, and the priority it was lent goes.
 /// Runs in `t`'s context, its address space still loaded.
 pub(crate) fn thread_exit(s: &Sleepable, t: &UserThread) {
-    UMTX.thread_exit(&Ctx { s, t });
+    UMTX.thread_exit(&Ctx {
+        s,
+        t,
+        wmesg: "uwait",
+    });
 }
 
 /// The process is replacing its image (`umtx_exec`), single-threaded:
