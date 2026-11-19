@@ -672,7 +672,22 @@ documents named; this section keeps what is done and what is open.
     0.538, `event` 0.676, `exec` 0.879, `pty` 0.374, `thr` 0.535, `unix` 0.308. One
     benchmark is behind: `unix.rights`, 803 ns to FreeBSD's 762 (1.055, interval 1.024 to
     1.084, rated noisy).
-    Still to do there: `unix.rights`, and `p2`, `p3`, `p5`, and `p7` again; a locker's
+    `unix.rights` after that: 709 ns to FreeBSD's 777 (0.913, interval 0.896 to 0.987,
+    three runs a side; `unix` 0.295). Passing the descriptor was the least of it. With the
+    two halves measured apart on both systems, one process sending to itself was 6 to 8%
+    behind and two processes 39% (a one-byte `sendmsg` to `recvmsg`, no descriptor). Three
+    differences: every send and receive told the other socket's waiters, an `mfence` and a
+    write to the peer's lines each, where FreeBSD keeps `SB_WAIT`, `SB_SEL` and
+    `UXST_PEER_SEL` in the receive buffer under its lock and touches the peer only when
+    something waits (now the same); the socket calls took the descriptor table's lock and
+    a reference to the process a call, where `read` and `write` borrow both (now they do
+    too, and a received descriptor's file is moved into the table, its control message
+    built on the stack); and a writer at a full buffer, spinning, was back for every
+    message's room and took the buffer's lock and lines from the reader each time, where
+    FreeBSD's sleeps and its slow wake-up leaves the reader some fifty messages alone
+    (sleeping was worse for us, 1031 ns, our wake-up being quick: it now stays away 2 us,
+    then twice as long each time the buffer is still full, and sleeps after 30).
+    Still to do there: `p2`, `p3`, `p5`, and `p7` again; a locker's
     hold-off favours the owner as FreeBSD's slow wake-up does, and how the threads share
     a mutex under it has not been measured;
   - a release kernel built with the tests (`cargo xtask test --tier boot --release`)
