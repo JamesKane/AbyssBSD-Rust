@@ -46,7 +46,9 @@ impl core::ops::Deref for PathArg {
     }
 }
 
-/// A path argument.
+/// A path argument. Inlined, so that it is made in its caller's frame
+/// and not copied there.
+#[inline(always)]
 pub(super) fn path(addr: u64) -> Result<PathArg, Errno> {
     let errno = |e| match e {
         uaccess::StrError::Fault => Errno::EFAULT,

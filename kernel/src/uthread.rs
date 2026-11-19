@@ -258,6 +258,12 @@ impl UserThread {
         Arc::clone(&self.cred.lock().1)
     }
 
+    /// Its credential's jail (`td_ucred->cr_prison`; `None` on the host),
+    /// from the thread's own copy: no lock another thread takes.
+    pub(crate) fn jail(&self) -> Option<Arc<dyn security::Jail>> {
+        self.cred.lock().1.jail.clone()
+    }
+
     /// Takes the process's credential if it changed since this thread last
     /// did (`thread_cow_update`, at `syscallenter`). Only the thread
     /// itself calls this.

@@ -284,8 +284,10 @@ impl File {
             OPEN_FILES.fetch_sub(1, Ordering::Relaxed);
             return Err(Errno::ENFILE);
         }
-        // As `falloc` takes the opener's credential.
-        let jail = crate::proc::Process::with_current(crate::proc::Process::jail).flatten();
+        // As `falloc` takes the opener's credential (`td_ucred`): the
+        // thread's own, not the process's behind its lock.
+        let jail =
+            crate::uthread::UserThread::with_current(crate::uthread::UserThread::jail).flatten();
         Ok(Arc::new(Self {
             kind,
             flags: AtomicU32::new(flags),
