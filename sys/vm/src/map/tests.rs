@@ -1231,3 +1231,288 @@ fn icache_synced_bit_follows_the_contents() {
     let q = o2.fill(0).unwrap();
     assert!(!o2.icache_synced(0, q));
 }
+
+/// A file object of `n` pages that take writes back, all read in, and its
+/// pager.
+fn written_file(n: u64) -> (Arc<crate::object::Object>, Arc<WrittenFile>) {
+    let file = Arc::new(WrittenFile {
+        pages: n,
+        written: std::sync::Mutex::new(Vec::new()),
+    });
+    let object = crate::object::Object::with_pager(
+        Pages::new(),
+        Arc::clone(&file) as Arc<dyn crate::object::Pager>,
+    );
+    for i in 0..n {
+        object.fill(i).unwrap();
+    }
+    (object, file)
+}
+
+#[test]
+fn dirty_pages_are_counted_through_mark_sync_and_redirty() {
+    use crate::object::dirty_here;
+    let before = dirty_here();
+    let (object, file) = written_file(8);
+    assert_eq!(object.dirty_pages(), 0);
+    object.mark_dirty(1);
+    object.mark_dirty(1);
+    object.mark_dirty_run(3, 3);
+    // Marked again: counted once.
+    object.mark_dirty_run(4, 3);
+    assert_eq!(object.dirty_pages(), 5);
+    assert_eq!(dirty_here() - before, 5);
+    for i in 0..8 {
+        assert_eq!(object.is_dirty(i), [1, 3, 4, 5, 6].contains(&i), "page {i}");
+    }
+    // Part of them written back.
+    object.sync(4, 6).unwrap();
+    assert_eq!(*file.written.lock().unwrap(), [(4, 1004), (5, 1005)]);
+    assert_eq!(object.dirty_pages(), 3);
+    assert_eq!(dirty_here() - before, 3);
+    // Dirty again, the clean and the dirty alike, each counted once.
+    object.redirty(3, 6);
+    assert_eq!(object.dirty_pages(), 5);
+    assert_eq!(dirty_here() - before, 5);
+    object.redirty(6, 3);
+    assert_eq!(object.dirty_pages(), 5);
+    // All written back: none left, and a second sync writes nothing.
+    file.written.lock().unwrap().clear();
+    object.sync(0, u64::MAX).unwrap();
+    assert_eq!(
+        *file.written.lock().unwrap(),
+        [(1, 1001), (3, 1003), (4, 1004), (5, 1005), (6, 1006)]
+    );
+    assert_eq!(object.dirty_pages(), 0);
+    assert_eq!(dirty_here() - before, 0);
+    object.sync(0, u64::MAX).unwrap();
+    assert_eq!(file.written.lock().unwrap().len(), 5);
+    // A page marked after the count fell to none is found again.
+    object.mark_dirty(7);
+    object.mark_dirty(0);
+    file.written.lock().unwrap().clear();
+    object.sync(0, 8).unwrap();
+    assert_eq!(*file.written.lock().unwrap(), [(0, 1000), (7, 1007)]);
+    assert_eq!(dirty_here() - before, 0);
+}
+
+/// A file whose writes back fail, or are started without waiting.
+struct WriteBehindFile {
+    pages: u64,
+    fail: bool,
+    started: std::sync::Mutex<Vec<(u64, usize)>>,
+}
+
+impl crate::object::Pager for WriteBehindFile {
+    fn size(&self) -> u64 {
+        self.pages
+    }
+
+    fn fill(&self, _index: u64, page: &mut [u8]) -> Result<(), crate::object::PagerError> {
+        page.fill(0);
+        Ok(())
+    }
+
+    fn max_run(&self) -> u64 {
+        4
+    }
+
+    fn writes_back(&self) -> bool {
+        true
+    }
+
+    fn write_back(&self, _index: u64, _page: &[u8]) -> Result<(), crate::object::PagerError> {
+        Err(crate::object::PagerError)
+    }
+
+    fn start_write_back_run(
+        &self,
+        index: u64,
+        buf: crate::object::IoBuf,
+        _object: alloc::sync::Weak<crate::object::Object>,
+    ) -> Result<(), crate::object::IoBuf> {
+        if self.fail {
+            return Err(buf);
+        }
+        self.started.lock().unwrap().push((index, buf.len() / 4096));
+        Ok(())
+    }
+}
+
+#[test]
+fn a_write_back_that_fails_or_does_not_start_leaves_its_pages_dirty() {
+    use crate::object::dirty_here;
+    let before = dirty_here();
+    for fail in [true, false] {
+        let file = Arc::new(WriteBehindFile {
+            pages: 8,
+            fail,
+            started: std::sync::Mutex::new(Vec::new()),
+        });
+        let object = crate::object::Object::with_pager(
+            Pages::new(),
+            Arc::clone(&file) as Arc<dyn crate::object::Pager>,
+        );
+        for i in 0..8 {
+            object.fill(i).unwrap();
+        }
+        object.mark_dirty_run(0, 3);
+        object.mark_dirty(5);
+        object.start_sync(0, 8);
+        if fail {
+            // Not started: dirty as before, and a sync that fails leaves
+            // them so too (runs and single pages alike).
+            assert_eq!(object.dirty_pages(), 4);
+            assert!(object.sync(0, 8).is_err());
+            assert_eq!(object.dirty_pages(), 4);
+            assert!(object.is_dirty(0) && object.is_dirty(2) && object.is_dirty(5));
+            assert!(!object.is_dirty(3));
+            assert_eq!(dirty_here() - before, 4);
+        } else {
+            // Started, a run at a time: clean from then.
+            assert_eq!(*file.started.lock().unwrap(), [(0, 3), (5, 1)]);
+            assert_eq!(object.dirty_pages(), 0);
+            assert_eq!(dirty_here() - before, 0);
+        }
+        drop(object);
+        assert_eq!(dirty_here() - before, 0);
+    }
+}
+
+#[test]
+fn a_page_mapped_writable_stays_dirty_when_written_back() {
+    use crate::object::dirty_here;
+    let before = dirty_here();
+    let (object, file) = written_file(4);
+    object.mark_dirty(0);
+    object.mark_mapped_writable(2);
+    object.mark_mapped_writable(2);
+    assert_eq!(object.dirty_pages(), 2);
+    object.sync(0, 4).unwrap();
+    assert_eq!(*file.written.lock().unwrap(), [(0, 1000), (2, 1002)]);
+    assert!(!object.is_dirty(0));
+    assert!(object.is_dirty(2));
+    assert_eq!(object.dirty_pages(), 1);
+    assert_eq!(dirty_here() - before, 1);
+    // Each later write back takes it again; so does one only started
+    // (this pager starts none, so it is written by the next sync).
+    object.start_sync(0, 4);
+    assert!(object.is_dirty(2));
+    assert_eq!(object.dirty_pages(), 1);
+    object.sync(0, 4).unwrap();
+    assert_eq!(file.written.lock().unwrap().len(), 3);
+    assert!(object.is_dirty(2));
+    assert_eq!(dirty_here() - before, 1);
+    // Dirty, it is never reclaimed.
+    assert_eq!(Arc::clone(&object).drop_clean(usize::MAX), 3);
+    assert_eq!(object.resident(), 1);
+    drop(object);
+    assert_eq!(dirty_here() - before, 0);
+}
+
+#[test]
+fn dirty_pages_that_go_leave_the_count() {
+    use crate::object::dirty_here;
+    let before = dirty_here();
+    // Cut off and freed.
+    let (object, _file) = written_file(8);
+    object.mark_dirty_run(2, 5);
+    object.mark_mapped_writable(7);
+    assert_eq!(dirty_here() - before, 6);
+    object.truncate(4);
+    assert_eq!(object.resident(), 4);
+    assert_eq!(object.dirty_pages(), 2);
+    assert_eq!(dirty_here() - before, 2);
+    assert!(object.is_dirty(3) && !object.is_dirty(4));
+    // Cut off while someone else holds the object: kept, zeroed, clean,
+    // and no longer held dirty by a mapping.
+    let held = Arc::clone(&object);
+    object.mark_mapped_writable(3);
+    held.truncate(3);
+    assert_eq!(object.resident(), 4);
+    assert_eq!(object.dirty_pages(), 1);
+    assert!(!object.is_dirty(3));
+    object.mark_dirty(3);
+    object.sync(3, 4).unwrap();
+    assert!(!object.is_dirty(3));
+    drop(held);
+    assert_eq!(dirty_here() - before, 1);
+    // A range freed.
+    object.mark_dirty_run(0, 2);
+    assert_eq!(dirty_here() - before, 3);
+    object.free_range(1, 3);
+    assert_eq!(object.resident(), 2);
+    assert_eq!(object.dirty_pages(), 1);
+    assert_eq!(dirty_here() - before, 1);
+    // Cut to nothing.
+    object.truncate(0);
+    assert_eq!(object.dirty_pages(), 0);
+    assert_eq!(dirty_here() - before, 0);
+    // An object dropped with dirty pages.
+    let (object, _file) = written_file(8);
+    object.mark_dirty_run(0, 8);
+    assert_eq!(dirty_here() - before, 8);
+    drop(object);
+    assert_eq!(dirty_here() - before, 0);
+}
+
+#[test]
+fn only_pages_held_are_marked_dirty() {
+    use crate::object::dirty_here;
+    let before = dirty_here();
+    let file = Arc::new(WrittenFile {
+        pages: 16,
+        written: std::sync::Mutex::new(Vec::new()),
+    });
+    let object = crate::object::Object::with_pager(
+        Pages::new(),
+        Arc::clone(&file) as Arc<dyn crate::object::Pager>,
+    );
+    for i in [2, 3, 6, 9] {
+        object.fill(i).unwrap();
+    }
+    object.mark_dirty_run(0, 8);
+    object.mark_dirty(12);
+    object.mark_mapped_writable(13);
+    object.redirty(8, 16);
+    assert_eq!(object.dirty_pages(), 4);
+    assert_eq!(dirty_here() - before, 4);
+    for i in 0..16 {
+        assert_eq!(object.is_dirty(i), [2, 3, 6, 9].contains(&i), "page {i}");
+    }
+    // A page that comes later is clean.
+    object.fill(12).unwrap();
+    object.fill(13).unwrap();
+    assert!(!object.is_dirty(12) && !object.is_dirty(13));
+    object.sync(0, 16).unwrap();
+    assert_eq!(
+        *file.written.lock().unwrap(),
+        [(2, 1002), (3, 1003), (6, 1006), (9, 1009)]
+    );
+    assert_eq!(dirty_here() - before, 0);
+}
+
+#[test]
+fn an_object_that_writes_nothing_back_counts_no_dirty_pages() {
+    use crate::object::dirty_here;
+    let before = dirty_here();
+    let pages = Pages::new();
+    let file = Arc::new(File {
+        pages: 4,
+        fills: std::sync::atomic::AtomicU64::new(0),
+    });
+    let object = crate::object::Object::with_pager(pages, file as Arc<dyn crate::object::Pager>);
+    let pfn = object.fill(0).unwrap();
+    object.fill(1).unwrap();
+    object.set_icache_synced(0, pfn);
+    assert!(object.icache_synced(0, pfn));
+    object.mark_dirty(0);
+    object.mark_dirty_run(0, 2);
+    object.mark_mapped_writable(1);
+    // Written all the same: not synced for execution any more.
+    assert!(!object.icache_synced(0, pfn));
+    assert!(!object.is_dirty(0) && !object.is_dirty(1));
+    assert_eq!(object.dirty_pages(), 0);
+    assert_eq!(dirty_here() - before, 0);
+    assert_eq!(Arc::clone(&object).drop_clean(usize::MAX), 2);
+}

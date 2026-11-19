@@ -31,7 +31,8 @@
 //! Behavior reference: sys/vm/vm_object.c (shadow chains and collapse).
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::collections::btree_map::Entry;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -170,8 +171,40 @@ pub type PageIndex = u64;
 
 const PAGE_BYTES: usize = 4096;
 
-/// Pages dirty in every object, for throttling writers.
+/// Pages dirty in every object, for throttling writers: how many pages
+/// have [`Page::dirty`] set, each object's [`Inner::dirty_n`] summed.
 static DIRTY: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+extern crate std;
+
+#[cfg(test)]
+std::thread_local! {
+    /// What this thread has added to [`DIRTY`], less what it has taken
+    /// away: a test's own share of a count every test moves.
+    static DIRTY_HERE: core::cell::Cell<isize> = const { core::cell::Cell::new(0) };
+}
+
+/// What the calling thread has added to the count of dirty pages, less
+/// what it has taken away.
+#[cfg(test)]
+pub(crate) fn dirty_here() -> isize {
+    DIRTY_HERE.with(core::cell::Cell::get)
+}
+
+/// `n` pages became dirty.
+fn dirty_add(n: usize) {
+    DIRTY.fetch_add(n, Ordering::Relaxed);
+    #[cfg(test)]
+    DIRTY_HERE.with(|c| c.set(c.get() + n.cast_signed()));
+}
+
+/// `n` dirty pages became clean, or went.
+fn dirty_sub(n: usize) {
+    DIRTY.fetch_sub(n, Ordering::Relaxed);
+    #[cfg(test)]
+    DIRTY_HERE.with(|c| c.set(c.get() - n.cast_signed()));
+}
 
 /// Every pager object, for reclaiming clean pages. Dead ones are pruned
 /// as reclaiming passes and as the list grows: a `Weak` keeps a dead
@@ -653,26 +686,148 @@ struct Page {
     /// is clean and the object has no writable shared mapping
     /// (ARCHITECTURE.md §5.2). A page that leaves takes it along.
     synced: bool,
+    /// Written since it was last written back (only in objects whose
+    /// pager writes back): the page's own state, as `vm_page`'s dirty
+    /// bits and a buffer's `B_DELWRI` are, counted in [`Inner::dirty_n`]
+    /// and in [`DIRTY`].
+    dirty: bool,
+    /// A shared mapping has mapped it writable: writing it back leaves it
+    /// dirty, since writes through that mapping are not seen (no page
+    /// table is searched to take the write right back). Only ever set on
+    /// a dirty page.
+    mapped_writable: bool,
 }
 
 impl Page {
+    /// A clean page, not synced for execution, that no mapping writes.
     const fn new(pfn: Pfn) -> Self {
-        Self { pfn, synced: false }
+        Self {
+            pfn,
+            synced: false,
+            dirty: false,
+            mapped_writable: false,
+        }
+    }
+
+    /// A page dirty from the start. Whoever puts it in an object counts
+    /// it ([`Inner::dirtied`]).
+    #[expect(dead_code, reason = "every page is put in clean and marked after")]
+    const fn new_dirty(pfn: Pfn) -> Self {
+        Self {
+            pfn,
+            synced: false,
+            dirty: true,
+            mapped_writable: false,
+        }
     }
 }
 
 struct Inner {
     pages: BTreeMap<PageIndex, Page>,
-    /// Pages written since they were last written back (only for pagers
-    /// that write back).
-    dirty: BTreeSet<PageIndex>,
-    /// Pages a shared mapping has mapped writable: writing one back
-    /// leaves it dirty, since writes through that mapping are not seen
-    /// (no page table is searched to take the write right back).
-    mapped_writable: BTreeSet<PageIndex>,
+    /// How many of `pages` are dirty.
+    dirty_n: usize,
+    /// Every dirty page's index lies in `dirty_lo..dirty_hi`, clean ones'
+    /// too: the span only grows while a page is dirty, and is empty again
+    /// when none is. A walk for dirty pages looks no further.
+    dirty_lo: PageIndex,
+    dirty_hi: PageIndex,
     /// The object this one shadows, and where this one's index 0 falls in
     /// it.
     backing: Option<(Arc<Object>, PageIndex)>,
+}
+
+impl Inner {
+    const fn new(backing: Option<(Arc<Object>, PageIndex)>) -> Self {
+        Self {
+            pages: BTreeMap::new(),
+            dirty_n: 0,
+            dirty_lo: 0,
+            dirty_hi: 0,
+            backing,
+        }
+    }
+
+    /// `n` clean pages, all in `lo..hi`, were just flagged dirty.
+    fn dirtied(&mut self, lo: PageIndex, hi: PageIndex, n: usize) {
+        if n == 0 {
+            return;
+        }
+        if self.dirty_n == 0 {
+            self.dirty_lo = lo;
+            self.dirty_hi = hi;
+        } else {
+            self.dirty_lo = self.dirty_lo.min(lo);
+            self.dirty_hi = self.dirty_hi.max(hi);
+        }
+        self.dirty_n += n;
+        dirty_add(n);
+    }
+
+    /// `n` dirty pages were just flagged clean, or taken out of `pages`.
+    fn cleaned(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.dirty_n -= n;
+        if self.dirty_n == 0 {
+            self.dirty_lo = 0;
+            self.dirty_hi = 0;
+        }
+        dirty_sub(n);
+    }
+
+    /// The part of `[start, end)` a dirty page may be in, if any.
+    fn dirty_span(&self, start: PageIndex, end: PageIndex) -> Option<core::ops::Range<PageIndex>> {
+        if self.dirty_n == 0 {
+            return None;
+        }
+        let lo = start.max(self.dirty_lo);
+        let hi = end.min(self.dirty_hi);
+        (lo < hi).then_some(lo..hi)
+    }
+
+    /// The dirty pages in `[start, end)`, to write back: each is clean
+    /// from now, unless a shared mapping maps it writable. One walk of the
+    /// span, as `vm_object_page_clean` walks the object's pages for the
+    /// dirty ones.
+    fn take_dirty(&mut self, start: PageIndex, end: PageIndex) -> Vec<(PageIndex, Pfn)> {
+        let Some(span) = self.dirty_span(start, end) else {
+            return Vec::new();
+        };
+        let most = usize::try_from(span.end - span.start).unwrap_or(usize::MAX);
+        let mut out = Vec::with_capacity(self.dirty_n.min(most));
+        let mut cleaned = 0;
+        for (&i, p) in self.pages.range_mut(span) {
+            if p.dirty {
+                if !p.mapped_writable {
+                    p.dirty = false;
+                    cleaned += 1;
+                }
+                out.push((i, p.pfn));
+            }
+        }
+        self.cleaned(cleaned);
+        out
+    }
+
+    /// Flags the pages held in `[start, end)` dirty.
+    fn redirty(&mut self, start: PageIndex, end: PageIndex) {
+        if start >= end {
+            return;
+        }
+        let (mut lo, mut hi, mut added) = (0, 0, 0);
+        for (&i, p) in self.pages.range_mut(start..end) {
+            if !p.dirty {
+                p.dirty = true;
+                if added == 0 {
+                    lo = i;
+                }
+                hi = i + 1;
+                added += 1;
+            }
+        }
+        self.dirtied(lo, hi, added);
+    }
 }
 
 /// What [`Object::page_filled`] gave.
@@ -703,12 +858,7 @@ impl Object {
     #[must_use]
     pub fn anonymous(ops: &'static dyn PageOps) -> Arc<Self> {
         Arc::new(Self {
-            inner: PreemptLock::new(Inner {
-                pages: BTreeMap::new(),
-                dirty: BTreeSet::new(),
-                mapped_writable: BTreeSet::new(),
-                backing: None,
-            }),
+            inner: PreemptLock::new(Inner::new(None)),
             pages_ops: ops,
             one_mapping: AtomicBool::new(true),
             writemappings: AtomicU64::new(0),
@@ -766,12 +916,7 @@ impl Object {
     pub fn shadow(backing: Arc<Self>, offset: PageIndex) -> Arc<Self> {
         let ops = backing.pages_ops;
         Arc::new(Self {
-            inner: PreemptLock::new(Inner {
-                pages: BTreeMap::new(),
-                dirty: BTreeSet::new(),
-                mapped_writable: BTreeSet::new(),
-                backing: Some((backing, offset)),
-            }),
+            inner: PreemptLock::new(Inner::new(Some((backing, offset)))),
             pages_ops: ops,
             one_mapping: AtomicBool::new(true),
             writemappings: AtomicU64::new(0),
@@ -795,12 +940,7 @@ impl Object {
     #[must_use]
     pub fn with_pager(ops: &'static dyn PageOps, pager: Arc<dyn Pager>) -> Arc<Self> {
         let o = Arc::new(Self {
-            inner: PreemptLock::new(Inner {
-                pages: BTreeMap::new(),
-                dirty: BTreeSet::new(),
-                mapped_writable: BTreeSet::new(),
-                backing: None,
-            }),
+            inner: PreemptLock::new(Inner::new(None)),
             pages_ops: ops,
             one_mapping: AtomicBool::new(false),
             writemappings: AtomicU64::new(0),
@@ -865,11 +1005,11 @@ impl Object {
                 if Arc::strong_count(self) > expected || self.io.load(Ordering::SeqCst) != 0 {
                     break;
                 }
-                let Inner { pages, dirty, .. } = &mut *inner;
+                let pages = &mut inner.pages;
                 let room = DROP_BATCH.min(want - r.freed);
-                for (&i, &Page { pfn, .. }) in pages.range(from..) {
+                for (&i, &Page { pfn, dirty, .. }) in pages.range(from..) {
                     r.scanned += 1;
-                    if !dirty.contains(&i) {
+                    if !dirty {
                         batch[k] = (i, pfn);
                         k += 1;
                     }
@@ -1344,10 +1484,11 @@ impl Object {
         {
             let mut inner = self.inner.lock();
             for &(index, new) in pages {
-                if let Some(&Page { pfn, .. }) = inner.pages.get(&index) {
-                    lost.push((new, pfn));
-                } else {
-                    inner.pages.insert(index, Page::new(new));
+                match inner.pages.entry(index) {
+                    Entry::Occupied(held) => lost.push((new, held.get().pfn)),
+                    Entry::Vacant(slot) => {
+                        slot.insert(Page::new(new));
+                    }
                 }
             }
         }
@@ -1374,6 +1515,11 @@ impl Object {
         let mut doomed = keep.split_off(&end);
         core::mem::swap(&mut doomed, &mut keep);
         inner.pages.append(&mut keep);
+        // A dirty page that goes is no longer counted.
+        if inner.dirty_n != 0 {
+            let gone = doomed.values().filter(|p| p.dirty).count();
+            inner.cleaned(gone);
+        }
         drop(inner);
         for page in doomed.into_values() {
             self.pages_ops.free(page.pfn);
@@ -1475,26 +1621,32 @@ impl Object {
         }
         let tracks = self.tracks_dirty();
         let mut inner = self.inner.lock();
-        for (_, p) in inner.pages.range_mut(first..end) {
+        let (mut lo, mut hi, mut added) = (0, 0, 0);
+        for (&i, p) in inner.pages.range_mut(first..end) {
             p.synced = false;
-        }
-        if tracks {
-            let mut added = 0;
-            for i in first..end {
-                added += usize::from(inner.dirty.insert(i));
+            if tracks && !p.dirty {
+                p.dirty = true;
+                if added == 0 {
+                    lo = i;
+                }
+                hi = i + 1;
+                added += 1;
             }
-            DIRTY.fetch_add(added, Ordering::Relaxed);
         }
+        inner.dirtied(lo, hi, added);
     }
 
-    /// Records that page `index` was written.
+    /// Records that page `index` was written. Only a page the object
+    /// holds is dirty: an index with no page has nothing to write back.
     pub fn mark_dirty(&self, index: PageIndex) {
         let mut inner = self.inner.lock();
-        if let Some(p) = inner.pages.get_mut(&index) {
-            p.synced = false;
-        }
-        if self.tracks_dirty() && inner.dirty.insert(index) {
-            DIRTY.fetch_add(1, Ordering::Relaxed);
+        let Some(p) = inner.pages.get_mut(&index) else {
+            return;
+        };
+        p.synced = false;
+        if !p.dirty && self.tracks_dirty() {
+            p.dirty = true;
+            inner.dirtied(index, index.saturating_add(1), 1);
         }
     }
 
@@ -1540,11 +1692,12 @@ impl Object {
     /// kept only while it is clean and no writable shared mapping exists.
     pub fn set_icache_synced(&self, index: PageIndex, pfn: Pfn) {
         let mut inner = self.inner.lock();
-        if self.writemappings.load(Ordering::Acquire) != 0 || inner.dirty.contains(&index) {
+        if self.writemappings.load(Ordering::Acquire) != 0 {
             return;
         }
         if let Some(p) = inner.pages.get_mut(&index)
             && p.pfn == pfn
+            && !p.dirty
         {
             p.synced = true;
         }
@@ -1555,26 +1708,28 @@ impl Object {
     pub fn mark_mapped_writable(&self, index: PageIndex) {
         if self.tracks_dirty() {
             let mut inner = self.inner.lock();
-            if let Some(p) = inner.pages.get_mut(&index) {
-                p.synced = false;
+            let Some(p) = inner.pages.get_mut(&index) else {
+                return;
+            };
+            p.synced = false;
+            p.mapped_writable = true;
+            if !p.dirty {
+                p.dirty = true;
+                inner.dirtied(index, index.saturating_add(1), 1);
             }
-            if inner.dirty.insert(index) {
-                DIRTY.fetch_add(1, Ordering::Relaxed);
-            }
-            inner.mapped_writable.insert(index);
         }
     }
 
     /// Whether page `index` was written since it was last written back.
     #[must_use]
     pub fn is_dirty(&self, index: PageIndex) -> bool {
-        self.inner.lock().dirty.contains(&index)
+        self.inner.lock().pages.get(&index).is_some_and(|p| p.dirty)
     }
 
     /// How many pages are dirty.
     #[must_use]
     pub fn dirty_pages(&self) -> usize {
-        self.inner.lock().dirty.len()
+        self.inner.lock().dirty_n
     }
 
     /// Writes the dirty pages in `[start, end)` back to the pager (each is
@@ -1585,21 +1740,7 @@ impl Object {
         };
         // The pages are written outside the lock: hold them in place.
         let _io = self.io();
-        let todo: Vec<(PageIndex, Pfn)> = {
-            let mut inner = self.inner.lock();
-            let indexes: Vec<PageIndex> = inner.dirty.range(start..end).copied().collect();
-            let mut out = Vec::with_capacity(indexes.len());
-            for i in indexes {
-                if !inner.mapped_writable.contains(&i) {
-                    inner.dirty.remove(&i);
-                    DIRTY.fetch_sub(1, Ordering::Relaxed);
-                }
-                if let Some(&Page { pfn, .. }) = inner.pages.get(&i) {
-                    out.push((i, pfn));
-                }
-            }
-            out
-        };
+        let todo = self.inner.lock().take_dirty(start, end);
         // Runs of consecutive pages go back together.
         let max_run = usize::try_from(pager.max_run().max(1)).unwrap_or(1);
         let mut result = Ok(());
@@ -1626,12 +1767,9 @@ impl Object {
                 r = pager.write_back_run(first, &buf);
             }
             if r.is_err() {
-                let mut inner = self.inner.lock();
-                for &(i, _) in run {
-                    if inner.dirty.insert(i) {
-                        DIRTY.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
+                // The run is every index from `first` to its last.
+                let last = run.last().map_or(first, |&(i, _)| i);
+                self.inner.lock().redirty(first, last.saturating_add(1));
                 result = r;
             }
         }
@@ -1647,21 +1785,7 @@ impl Object {
         let Some(pager) = &self.pager else {
             return;
         };
-        let todo: Vec<(PageIndex, Pfn)> = {
-            let mut inner = self.inner.lock();
-            let indexes: Vec<PageIndex> = inner.dirty.range(start..end).copied().collect();
-            let mut out = Vec::with_capacity(indexes.len());
-            for i in indexes {
-                if !inner.mapped_writable.contains(&i) {
-                    inner.dirty.remove(&i);
-                    DIRTY.fetch_sub(1, Ordering::Relaxed);
-                }
-                if let Some(&Page { pfn, .. }) = inner.pages.get(&i) {
-                    out.push((i, pfn));
-                }
-            }
-            out
-        };
+        let todo = self.inner.lock().take_dirty(start, end);
         let mut rest = todo.as_slice();
         while let Some(&(first, _)) = rest.first() {
             let len = rest
@@ -1733,13 +1857,7 @@ impl Object {
     /// Marks the pages held in `[start, end)` dirty again (a write of them
     /// failed, or was not started).
     pub fn redirty(&self, start: PageIndex, end: PageIndex) {
-        let mut inner = self.inner.lock();
-        let held: Vec<PageIndex> = inner.pages.range(start..end).map(|(&i, _)| i).collect();
-        for i in held {
-            if inner.dirty.insert(i) {
-                DIRTY.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+        self.inner.lock().redirty(start, end);
     }
 
     /// Cuts the object to `pages` pages: those past it go, if nothing but
@@ -1749,22 +1867,26 @@ impl Object {
     /// here): what was cut off never reads back if the file grows again.
     pub fn truncate(self: &Arc<Self>, pages: PageIndex) {
         let mut inner = self.inner.lock();
-        let cut = inner.dirty.split_off(&pages);
-        DIRTY.fetch_sub(cut.len(), Ordering::Relaxed);
-        let _ = inner.mapped_writable.split_off(&pages);
         if Arc::strong_count(self) > 1 {
             // Kept for whoever still holds the object, but zeroed: should
             // the file grow again, they must read as zeros, not as what
             // was cut off.
-            // Rewritten in place: no longer synced for execution.
+            // Rewritten in place: no longer synced for execution. Past the
+            // end there is nothing to write back: clean, and no mapping's
+            // write keeps one dirty.
+            let mut cleaned = 0;
             let kept: Vec<Pfn> = inner
                 .pages
                 .range_mut(pages..)
                 .map(|(_, p)| {
                     p.synced = false;
+                    cleaned += usize::from(p.dirty);
+                    p.dirty = false;
+                    p.mapped_writable = false;
                     p.pfn
                 })
                 .collect();
+            inner.cleaned(cleaned);
             drop(inner);
             for pfn in kept {
                 self.pages_ops.access(pfn, &mut |p| p.fill(0));
@@ -1772,6 +1894,11 @@ impl Object {
             return;
         }
         let doomed = inner.pages.split_off(&pages);
+        // The dirty ones among them are no longer counted.
+        if inner.dirty_n != 0 {
+            let gone = doomed.values().filter(|p| p.dirty).count();
+            inner.cleaned(gone);
+        }
         drop(inner);
         for page in doomed.into_values() {
             self.pages_ops.free(page.pfn);
@@ -1851,7 +1978,13 @@ impl Object {
             }
             let mut below = backing.inner.lock();
             let mut freed = alloc::vec::Vec::new();
-            for (index, page) in core::mem::take(&mut below.pages) {
+            // A page that moves up arrives clean: neither object writes
+            // pages back (a shadow has no pager, and one with a pager
+            // never folds). What the backing object counted dirty, its
+            // drop takes off the count.
+            for (index, mut page) in core::mem::take(&mut below.pages) {
+                page.dirty = false;
+                page.mapped_writable = false;
                 // Only the window this object sees moves up; the rest of
                 // the backing object is unreachable.
                 let moved = index
@@ -1878,7 +2011,7 @@ impl Object {
 impl Drop for Object {
     fn drop(&mut self) {
         let inner = self.inner.get_mut();
-        DIRTY.fetch_sub(inner.dirty.len(), Ordering::Relaxed);
+        dirty_sub(inner.dirty_n);
         for page in core::mem::take(&mut inner.pages).into_values() {
             self.pages_ops.free(page.pfn);
         }

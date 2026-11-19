@@ -1739,8 +1739,16 @@ impl vfs::RegularNode for UfsNode {
         // as FreeBSD writes a cleared buffer): what the copy filled, a
         // fill's zeros, or zeros now where a short copy stopped. Then the
         // disk under them may be read again.
+        // The pages the copy covered whole are both already (the copy
+        // put them in and marked them, a run at a time): only a block's
+        // pages before the write's start or past where the copy ended are
+        // looked at here, as `ffs_write` marks a block's buffer once.
+        let copied = offset.div_ceil(PAGE)..(offset + done) / PAGE;
         for (at, len) in core::mem::take(&mut st.unwritten) {
             for page in at / PAGE..(at + len).div_ceil(PAGE) {
+                if copied.contains(&page) {
+                    continue;
+                }
                 if object.page_here(page).is_some() || object.page_for_overwrite(page).is_ok() {
                     object.mark_dirty(page);
                 }

@@ -472,7 +472,11 @@ impl RegularNode for TmpNode {
         }
         let n = pagecache::write(object, offset, uio)?;
         let new = (*size).max(offset + n as u64);
-        usage(&self.fs, new, *size);
+        // The mount's count moves only when the file grows (`tmpfs_write`
+        // accounts in `tmpfs_reg_resize` alone).
+        if new != *size {
+            usage(&self.fs, new, *size);
+        }
         *size = new;
         // Under the vnode's exclusive lock: no reader is looking.
         *self.pending.state.get_mut() = DUE;
