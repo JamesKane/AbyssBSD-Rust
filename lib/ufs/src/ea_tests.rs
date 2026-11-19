@@ -466,7 +466,9 @@ fn ea_workload<B: BlockIo<Cx = ()>>(
                     fs.unlink(&(), ROOT_INO, &mut root, &n, ino, &mut ip, NOW)
                         .unwrap();
                 }
-                if !soft {
+                // With soft updates the work frees it, unless its count is
+                // gone already (its name never reached the disk).
+                if !soft || ip.nlink == 0 {
                     fs.free_inode(&(), sum, ino, &mut ip, r).unwrap();
                 }
             }

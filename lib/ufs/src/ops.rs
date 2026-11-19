@@ -10,7 +10,11 @@
 //! Without soft updates the first writes go now; with them everything is
 //! delayed, the entry waiting for the inode, and the count on the disk
 //! dropping as deferred work once the removal is out ([`Inode::effnlink`]
-//! drops at once). The caller holds the vnode locks and has checked
+//! drops at once). What never reached the disk is not waited for: the
+//! link of an entry removed before it was written drops with the entry,
+//! and an inode freed before it was written goes at once, blocks and all
+//! (FreeBSD's `softdep_setup_remove`, `softdep_setup_freeblocks`, and
+//! `softdep_freefile`). The caller holds the vnode locks and has checked
 //! permissions and names; each operation takes the inodes it changes by
 //! `&mut` and leaves them written.
 
@@ -385,8 +389,11 @@ impl<B: BlockIo> Ufs<B> {
     /// Removes entry `name` (for non-directory `ino`) from directory
     /// `dir_ino` (FreeBSD's `ufs_remove`): the entry goes first, then the
     /// count drops (with soft updates, the count on the disk drops once
-    /// the removal is there, and [`Inode::effnlink`] now). At no links,
-    /// the caller frees the inode once nothing uses it
+    /// the removal is there, and [`Inode::effnlink`] now; if the entry
+    /// never reached the disk there is nothing to wait for, and
+    /// [`Inode::nlink`] drops here too, as FreeBSD's
+    /// `softdep_setup_remove` does it in the remover). At no links
+    /// ([`Inode::nlink`]), the caller frees the inode once nothing uses it
     /// ([`Self::free_inode`]).
     #[allow(clippy::too_many_arguments)]
     pub fn unlink(
@@ -399,13 +406,16 @@ impl<B: BlockIo> Ufs<B> {
         ip: &mut Inode,
         now: Timestamp,
     ) -> Result<(), Error> {
-        self.dir_remove(cx, dir_ino, dir, name, false)?;
+        let (_, removal) = self.dir_remove(cx, dir_ino, dir, name, false)?;
         // The directory's new times are the caller's to write later.
         dir.mtime = now;
         dir.ctime = now;
         ip.ctime = now;
         ip.effnlink = ip.effnlink.saturating_sub(1);
         if self.soft {
+            if removal.drops_now() {
+                ip.nlink = ip.nlink.saturating_sub(1);
+            }
             return self.write_inode(cx, ino, ip, Mode::Delayed);
         }
         ip.nlink = ip.nlink.saturating_sub(1);
@@ -454,7 +464,9 @@ impl<B: BlockIo> Ufs<B> {
     /// blocks and its extended attribute area, then the inode itself
     /// (FreeBSD's `ufs_inactive`, truncating with `IO_EXT | IO_NORMAL`).
     /// With soft updates all wait for the inode to be on the disk without
-    /// them.
+    /// them, unless it never reached the disk: then all go now (FreeBSD's
+    /// `softdep_setup_freeblocks` and `softdep_freefile`, with the bitmap
+    /// dependency still there).
     pub fn free_inode(
         &self,
         cx: &B::Cx,
@@ -463,6 +475,40 @@ impl<B: BlockIo> Ufs<B> {
         ip: &mut Inode,
         reserve: Reserve,
     ) -> Result<(), Error> {
+        if let Some(mode) = self.release_inode(cx, sum, ino, ip, reserve)? {
+            self.freefile(cx, sum, ino, mode)?;
+        }
+        Ok(())
+    }
+
+    /// [`Self::free_inode`] but for the inode's free in its group, for a
+    /// caller that keeps inodes in core: `Some` (its mode) if that is the
+    /// caller's to do now ([`Self::freefile`]), once nothing in core can
+    /// find the inode, since the next file made may take its number at
+    /// once. `None` with soft updates if the free waits for the disk, as
+    /// deferred work.
+    pub fn release_inode(
+        &self,
+        cx: &B::Cx,
+        sum: &mut Summary,
+        ino: u32,
+        ip: &mut Inode,
+        reserve: Reserve,
+    ) -> Result<Option<u16>, Error> {
+        self.let_go(cx, sum, ino, ip, reserve, true)
+    }
+
+    /// [`Self::release_inode`]; with soft updates and `now` false, the
+    /// inode's free in its group always waits.
+    fn let_go(
+        &self,
+        cx: &B::Cx,
+        sum: &mut Summary,
+        ino: u32,
+        ip: &mut Inode,
+        reserve: Reserve,
+        now: bool,
+    ) -> Result<Option<u16>, Error> {
         let mode = ip.mode;
         let dir = ip.kind() == Kind::Directory;
         if matches!(ip.kind(), Kind::Regular | Kind::Directory)
@@ -477,17 +523,76 @@ impl<B: BlockIo> Ufs<B> {
         ip.dirhash = None;
         ip.db = [0; 12];
         ip.ib = [0; crate::NIADDR];
-        if let Some(id) = self.soft(cx, |d| {
+        if self.soft {
+            // A directory's free always waits (its removal's work is not
+            // done at once either).
+            let freed = self.write_freed(cx, ino, ip, mode, now && !dir)?;
+            return Ok(freed.then_some(mode));
+        }
+        self.write_inode(cx, ino, ip, Mode::Sync)?;
+        Ok(Some(mode))
+    }
+
+    /// With soft updates: copies inode `ino`, freed (`ip`, which was of
+    /// `mode`), into its block (a delayed write), and with that buffer
+    /// held settles when it is freed in its group. If `now` allows and it
+    /// never reached the disk with nothing waiting on it
+    /// ([`Deps::free_unwritten`]), the tracker forgets it and this returns
+    /// true: the disk holds it zero, a write of the block under way
+    /// carries it zeroed, and any later one finds it without its mode, so
+    /// its number may be given out again (FreeBSD's `softdep_freefile`
+    /// with `check_inode_unwritten`). Otherwise the free waits, as
+    /// deferred work, for this copy to be on the disk.
+    fn write_freed(
+        &self,
+        cx: &B::Cx,
+        ino: u32,
+        ip: &Inode,
+        mode: u16,
+        now: bool,
+    ) -> Result<bool, Error> {
+        let sb = &self.sb;
+        let (block, within) = sb.inode_location(ino);
+        let bytes = ip.encode(sb);
+        let mut settled = false;
+        let mut freed = false;
+        let later = |d: &mut Deps| {
             let id = d.defer(Work::FreeFile { ino, mode });
             d.wait_copy(id, ino);
             id
-        }) {
-            let r = self.write_inode(cx, ino, ip, Mode::Delayed);
-            self.soft(cx, |d| d.arm(id));
-            return r;
+        };
+        let r = self.io.modify(
+            cx,
+            block,
+            crate::idx(sb.bsize),
+            crate::Fill::Read,
+            Mode::Delayed,
+            &mut |b| {
+                b[within..within + crate::inode::SIZE].copy_from_slice(&bytes);
+                self.soft(cx, |d| {
+                    if settled {
+                        return;
+                    }
+                    settled = true;
+                    if now && d.free_unwritten(ino) {
+                        freed = true;
+                    } else {
+                        let id = later(d);
+                        d.inode_copied(ino);
+                        d.arm(id);
+                    }
+                });
+            },
+        );
+        // The block could not be had: the free waits for the next copy.
+        if !settled {
+            self.soft(cx, |d| {
+                let id = later(d);
+                d.arm(id);
+            });
         }
-        self.write_inode(cx, ino, ip, Mode::Sync)?;
-        self.freefile(cx, sum, ino, mode)
+        r?;
+        Ok(freed)
     }
 
     /// Moves `from_name` (inode `ino`) in `from_dir` to `to_name` in
@@ -645,7 +750,9 @@ impl<B: BlockIo> Ufs<B> {
         // whose inode is `from_dir`, already written).
         let (_, removal) = self.dir_remove(cx, from_dir_ino, from_dir, from_name, false)?;
         ip.effnlink -= 1;
-        if !self.soft {
+        // With soft updates the count drops later, unless the old entry
+        // never reached the disk (FreeBSD's `softdep_setup_remove`).
+        if !self.soft || removal.drops_now() {
             ip.nlink -= 1;
         }
         if is_dir && moved {
@@ -691,7 +798,9 @@ impl<B: BlockIo> Ufs<B> {
     /// Links of inode `ino` (`ip`) whose entry is gone from the disk drop
     /// (FreeBSD's `handle_workitem_remove`). A directory removed is
     /// emptied, and its parent's link drops once that is on the disk. At
-    /// no links, with nothing using it (`in_use` false), it is freed.
+    /// no links, with nothing using it (`in_use` false), it is freed; its
+    /// free in its group always waits for the disk here, since whoever
+    /// does the work may hold the inode in core.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_unlink(
         &self,
@@ -728,7 +837,9 @@ impl<B: BlockIo> Ufs<B> {
             r?;
         }
         if ip.nlink == 0 && ip.mode != 0 && !in_use {
-            return self.free_inode(cx, sum, ino, ip, Reserve::Allowed);
+            return self
+                .let_go(cx, sum, ino, ip, Reserve::Allowed, false)
+                .map(|_| ());
         }
         self.write_inode(cx, ino, ip, Mode::Delayed)
     }

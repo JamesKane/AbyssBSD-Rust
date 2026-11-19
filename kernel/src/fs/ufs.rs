@@ -25,8 +25,13 @@
 //! `lib/ufs`'s tracker (docs/VFS.md §10.3): the buffer cache asks it before
 //! each write. What waits for the disk (frees, link counts dropping) is
 //! done by the syncer once a second, through in-core inodes shared with
-//! the vnodes'. Without soft updates, ordered metadata is written
-//! synchronously, as FreeBSD's UFS does without them.
+//! the vnodes'. What never reached the disk is not waited for (FreeBSD's
+//! `softdep_setup_remove`, `softdep_setup_freeblocks`, `softdep_freefile`):
+//! the link of an entry removed before it was written drops in `remove`,
+//! and the file then goes whole when its last use does (`inactive`), its
+//! inode free in its group as its vnode's node is reclaimed. Without soft
+//! updates, ordered metadata is written synchronously, as FreeBSD's UFS
+//! does without them.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
@@ -289,6 +294,13 @@ struct InodeState {
     /// write's own pages take its bytes straight, unzeroed, as FreeBSD's
     /// `ffs_write` skips `BA_CLRBUF` for a block it covers).
     unwritten: Vec<(u64, u64)>,
+    /// Freed, all but in its group (its mode then, for
+    /// [`ufs::Ufs::freefile`]): the group lets the inode go once no node
+    /// holds this and it is out of the table, since the next file made
+    /// may take its number at once and must find nothing of it in core
+    /// (FreeBSD frees it in `ufs_inactive`; whoever is then given the
+    /// number waits in `ffs_vgetf` for the old vnode to be reclaimed).
+    unallocated: Option<u16>,
 }
 
 /// The run of a file's blocks filled one after another and not written
@@ -825,6 +837,7 @@ fn new_cell(ino: u32, ip: ufs::Inode) -> Arc<InodeCell> {
                 data_gen: 0,
                 cluster: Cluster::default(),
                 unwritten: Vec::new(),
+                unallocated: None,
             },
         ),
         size: AtomicU64::new(size),
@@ -1443,11 +1456,14 @@ impl Node for UfsNode {
             self.cell.writing.wait_all(s);
             let mut sum = sum.lock(s);
             let ino = self.cell.ino;
-            if let Err(e) = shared
+            // Its free in its group, if not left to soft updates' work,
+            // is `reclaim`'s.
+            match shared
                 .ufs
-                .free_inode(s, &mut sum, ino, &mut st.ip, Reserve::Allowed)
+                .release_inode(s, &mut sum, ino, &mut st.ip, Reserve::Allowed)
             {
-                kprintln!("ufs: freeing inode {ino}: {e:?}");
+                Ok(mode) => st.unallocated = mode,
+                Err(e) => kprintln!("ufs: freeing inode {ino}: {e:?}"),
             }
             st.dirty = false;
             self.cell.publish(&st);
@@ -1473,38 +1489,58 @@ impl Node for UfsNode {
             // Mappings may outlive the vnode: the object stays theirs.
             o.disown();
         }
-        {
+        let ino = self.cell.ino;
+        let unallocated = {
             let mut st = self.cell.lock(s);
             st.nodes = st.nodes.saturating_sub(1);
             if let Ok(sum) = shared.sum() {
                 // Soft updates' work may have dropped the last link since
                 // `inactive` looked.
                 if st.nodes == 0 && st.ip.nlink == 0 && st.ip.mode != 0 {
+                    // No block goes under a write.
+                    self.cell.writing.wait_all(s);
                     let mut sum = sum.lock(s);
-                    let ino = self.cell.ino;
-                    if let Err(e) =
-                        shared
-                            .ufs
-                            .free_inode(s, &mut sum, ino, &mut st.ip, Reserve::Allowed)
+                    match shared
+                        .ufs
+                        .release_inode(s, &mut sum, ino, &mut st.ip, Reserve::Allowed)
                     {
-                        kprintln!("ufs: freeing inode {ino}: {e:?}");
+                        Ok(mode) => st.unallocated = mode,
+                        Err(e) => kprintln!("ufs: freeing inode {ino}: {e:?}"),
                     }
                     st.dirty = false;
                 }
                 if st.dirty {
-                    let _ = shared
-                        .ufs
-                        .write_inode(s, self.cell.ino, &st.ip, Mode::Delayed);
+                    let _ = shared.ufs.write_inode(s, ino, &st.ip, Mode::Delayed);
                     st.dirty = false;
                 }
             }
-        }
-        let mut t = shared.inodes.lock();
-        if t.get(&self.cell.ino)
-            .is_some_and(|(w, _)| w.as_ptr() == Arc::as_ptr(&self.cell))
+            if st.nodes == 0 {
+                st.unallocated.take()
+            } else {
+                None
+            }
+        };
         {
-            t.remove(&self.cell.ino);
-            shared.changes.fetch_add(1, Ordering::Release);
+            let mut t = shared.inodes.lock();
+            if t.get(&ino)
+                .is_some_and(|(w, _)| w.as_ptr() == Arc::as_ptr(&self.cell))
+            {
+                t.remove(&ino);
+                shared.changes.fetch_add(1, Ordering::Release);
+            }
+        }
+        // Nothing in core finds the inode now: its group lets it go, and
+        // the next file made may take its number (`ffs_freefile` leaves
+        // the group's rotor at it).
+        if let Some(mode) = unallocated
+            && let Ok(sum) = shared.sum()
+        {
+            let mut sum = sum.lock(s);
+            if let Err(e) = shared.ufs.freefile(s, &mut sum, ino, mode)
+                && !shared.is_failing()
+            {
+                kprintln!("ufs: freeing inode {ino}: {e:?}");
+            }
         }
     }
 

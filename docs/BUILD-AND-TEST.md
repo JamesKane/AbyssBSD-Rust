@@ -201,7 +201,9 @@ file system with soft updates, as FreeBSD does.
 in random order, and crash at random points. On FreeBSD (`cargo xtask --remote test --tier
 unit`), `fsck_ffs -p` preens every crash image; `UFS_SOFT_SEEDS` (workloads per case) and
 `UFS_SOFT_CRASHES` (one crash in that many steps, 100) run more. Elsewhere, they check each image
-themselves, on `soft-test.img` from `fetch-base` (or the images `UFS_SOFT_IMG` lists).
+themselves, on `soft-test.img` from `fetch-base` (or the images `UFS_SOFT_IMG` lists), or with
+neither on `ufs-test.img` emptied through the engine. The cache leaves some writes under way, as
+the kernel's does, and both what a crash may then leave are checked.
 
 `ufs-verify` unpacks all of `base.txz`, images it with `makefs` and (through FreeBSD's UFS, on an
 `md` device) with `newfs -U` plus a sparse file. It then walks both images with `lib/ufs` and

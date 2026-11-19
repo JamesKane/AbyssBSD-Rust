@@ -49,9 +49,24 @@ use crate::{EXT_SLOT, NDIRECT, NIADDR, NXADDR, idx, len64};
 const INODE_SLOTS: usize = EXT_SLOT + NXADDR;
 
 /// What a removal waits for to be on the disk (from
-/// [`Deps::remove_entry`]), for something else to wait on too.
+/// [`Deps::remove_entry`]), for something else to wait on too, and whether
+/// the link the entry held is the caller's to drop now.
 #[derive(Clone, Debug, Default)]
-pub struct Removal(Vec<Wait>);
+pub struct Removal {
+    waits: Vec<Wait>,
+    now: bool,
+}
+
+impl Removal {
+    /// The entry never reached the disk and held one link, which no work
+    /// will drop: the caller drops it from the inode now (FreeBSD's
+    /// `softdep_setup_remove` calls `handle_workitem_remove` itself for a
+    /// `dirrem` that is `COMPLETE` at once).
+    #[must_use]
+    pub fn drops_now(&self) -> bool {
+        self.now
+    }
+}
 
 /// An item's number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -978,7 +993,7 @@ impl Deps {
                 Kind::Deferred(Work::Unlink { ino: old, gone }),
                 &[Wait::Arming, Wait::Item(id)],
             );
-            for &w in &also.0 {
+            for &w in &also.waits {
                 self.add_wait(rem, w);
             }
             self.satisfy(rem, Wait::Arming);
@@ -1047,7 +1062,16 @@ impl Deps {
     /// The entry at byte `off` of block `lbn` of directory `dir` (buffer
     /// at `at`, held), naming `ino`, was removed: what it held (`gone`)
     /// drops once the removal is on the disk, or now if the entry never
-    /// got there.
+    /// got there. A link that drops now is the caller's to drop, in the
+    /// inode it holds ([`Removal::drops_now`]; FreeBSD's
+    /// `softdep_setup_remove`, whose `dirrem` for an entry that never
+    /// reached the disk is `COMPLETE` and handled by the remover itself);
+    /// a directory's links are left to the work, due at once.
+    ///
+    /// The entry never reached the disk if its last change is still held
+    /// here and went out with no write: neither one that is done
+    /// (`written`) nor one under way, which carries it unrolled though the
+    /// block was changed since (a write goes out from a copy).
     /// Returns what the removal waits for, for others to wait on.
     #[allow(clippy::too_many_arguments)]
     pub fn remove_entry(
@@ -1068,7 +1092,7 @@ impl Deps {
                     kind: Kind::DirAdd(DirAdd { written: true, .. }),
                     ..
                 })
-            )
+            ) || self.inflight.get(&at).is_some_and(|f| f.out.contains(a))
         });
         let block = self.dir_blocks.get(&(dir, lbn)).and_then(|b| b.alloc);
         let mut removal = alloc::vec![Wait::Buffer { at, stamp }];
@@ -1085,15 +1109,21 @@ impl Deps {
                 self.satisfy(f, Wait::Item(a));
             }
         }
-        self.count_drop(ino, gone);
-        let rem = self.add(Kind::Deferred(Work::Unlink { ino, gone }), &[Wait::Arming]);
-        if on_disk {
-            for &w in &removal {
-                self.add_wait(rem, w);
+        let now = !on_disk && gone == Gone::Link;
+        if !now {
+            self.count_drop(ino, gone);
+            let rem = self.add(Kind::Deferred(Work::Unlink { ino, gone }), &[Wait::Arming]);
+            if on_disk {
+                for &w in &removal {
+                    self.add_wait(rem, w);
+                }
             }
+            self.satisfy(rem, Wait::Arming);
         }
-        self.satisfy(rem, Wait::Arming);
-        Removal(removal)
+        Removal {
+            waits: removal,
+            now,
+        }
     }
 
     /// Forgets the buffer at `at`, of a block of file `owner` that is
@@ -1135,6 +1165,12 @@ impl Deps {
         }
         self.indirects.remove(&at);
         self.empty.remove(&at);
+        // A write of it under way (it lands before the block is used
+        // again) says nothing of the block's next holder: an indirect
+        // block gone out empty must not mark what is there next.
+        if let Some(f) = self.inflight.get_mut(&at) {
+            f.empty = None;
+        }
         out
     }
 
@@ -1152,6 +1188,89 @@ impl Deps {
     /// Item `id`'s waits are all given.
     pub fn arm(&mut self, id: Id) {
         self.satisfy(id, Wait::Arming);
+    }
+
+    /// Whether inode `ino` is still zero on the disk: allocated, and its
+    /// group not written since, so every write of its block has carried it
+    /// zeroed and will until then ([`Self::write_start`]). No pointer in
+    /// it has reached the disk, so nothing there leads to its blocks: with
+    /// the pointers gone from its block's buffer too (the caller holds it,
+    /// the inode just copied in without them), they may be freed now.
+    /// FreeBSD's `softdep_setup_freeblocks` asks the same of the inodedep
+    /// (no `DEPCOMPLETE`: "the inode has never been written to disk, so we
+    /// can free any fragments without delay").
+    #[must_use]
+    pub fn unwritten(&self, ino: u32) -> bool {
+        self.inodes
+            .get(&ino)
+            .and_then(|d| d.born)
+            .is_some_and(|b| self.items.contains_key(&b))
+    }
+
+    /// Inode `ino` is being freed, and its block's buffer (held) has it
+    /// without its mode: if it never reached the disk and nothing waits on
+    /// it, forgets it and returns true, and the inode may be freed in its
+    /// group now (FreeBSD's `check_inode_unwritten`, for
+    /// `softdep_freefile`). Its conditions, and ours:
+    /// - the bitmap dependency is still there (no `DEPCOMPLETE`): the
+    ///   inode is [`Self::unwritten`];
+    /// - no removal is pending (`id_dirremhd`) and no link dropped is
+    ///   still to reach the disk (`id_nlinkdelta`): `delta` is zero, which
+    ///   counts work queued or being done too;
+    /// - no entry names it, written or not (`id_pendinghd`, `id_bufwait`,
+    ///   `id_mkdiradd`): `named` has none;
+    /// - nothing waits for it to be written (`id_inowait`, `id_bufwait`,
+    ///   `id_freeblklst`): no item still held waits for its copy or its
+    ///   write (waits of items gone are left behind, and go with it);
+    /// - no pointer is pending (`id_inoupdt`, `id_newinoupdt`,
+    ///   `id_extupdt`, `id_newextupdt`): it has no slot and owns no
+    ///   allocation.
+    ///
+    /// `UNLINKED` and `id_inoreflst` are the journal's, which we do not
+    /// keep. FreeBSD also refuses while a write of the block is being set
+    /// up (`IOSTARTED` with no `id_savedino1`); ours sets one up whole
+    /// with the tracker locked, and a write under way began with the inode
+    /// unwritten, so carries it zeroed.
+    pub fn free_unwritten(&mut self, ino: u32) -> bool {
+        if !self.unwritten(ino) {
+            return false;
+        }
+        let Some(d) = self.inodes.get(&ino) else {
+            return false;
+        };
+        let held = |id: &Id| self.items.contains_key(id);
+        let slots = self
+            .slots
+            .range(
+                Slot::Inode { ino, index: 0 }..=Slot::Inode {
+                    ino,
+                    index: INODE_SLOTS - 1,
+                },
+            )
+            .next()
+            .is_some();
+        if d.delta != 0
+            || self.named.contains_key(&ino)
+            || d.copy_wait.iter().any(held)
+            || d.watch.iter().any(|(_, id)| held(id))
+            || slots
+            || self.owned.contains_key(&ino)
+        {
+            return false;
+        }
+        let born = d.born;
+        self.inodes.remove(&ino);
+        if let Some(b) = born {
+            self.take_item(&b);
+        }
+        let (at, _) = self.sb.inode_location(ino);
+        if let Some(s) = self.inode_blocks.get_mut(&at) {
+            s.remove(&ino);
+            if s.is_empty() {
+                self.inode_blocks.remove(&at);
+            }
+        }
+        true
     }
 
     /// Links of `ino` that dropped but are not on the disk yet: an inode

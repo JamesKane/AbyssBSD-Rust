@@ -421,7 +421,9 @@ pub(crate) fn maker(_rng: &mut Rng, reserve: Reserve) -> ops::Maker {
 /// Runs `n` random operations on the file system in `img`, mirrored in a
 /// model, calling `after` after each; returns the model. Out of space is
 /// fine. An inode unlinked for good is freed now without soft updates;
-/// with them, the engine's deferred work frees it.
+/// with them, the engine's deferred work frees it, unless its count is
+/// gone already (its names never reached the disk): then it is freed now
+/// too, as the kernel does when the last use of it goes.
 pub(crate) fn workload<B: BlockIo<Cx = ()>>(
     fs: &Ufs<B>,
     sum: &mut Summary,
@@ -585,7 +587,9 @@ pub(crate) fn workload<B: BlockIo<Cx = ()>>(
                     } else {
                         fs.unlink(&(), d, &mut dip, &name, ino, &mut ip, now)?;
                         if ip.effnlink == 0 {
-                            if !soft {
+                            // With soft updates the count is gone already
+                            // only if no name of it reached the disk.
+                            if ip.nlink == 0 {
                                 fs.free_inode(&(), sum, ino, &mut ip, r)?;
                             }
                             m.nodes.remove(&ino);

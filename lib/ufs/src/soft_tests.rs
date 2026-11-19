@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! Soft updates on the host: random workloads over a cache that writes
-//! buffers back in random order and file data late, crashes at random
-//! points, and a check of each crash image. On FreeBSD (the build server)
-//! `fsck_ffs -p` must also repair each one with nothing but what soft
-//! updates allows, and the settled image must be clean.
+//! buffers back in random order (leaving some writes under way, as the
+//! kernel's cache does) and file data late, crashes at random points, and
+//! a check of each crash image. On FreeBSD (the build server) `fsck_ffs
+//! -p` must also repair each one with nothing but what soft updates
+//! allows, and the settled image must be clean.
 
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
@@ -36,14 +37,30 @@ fn trace(what: &str, offset: u64, len: u64) {
 }
 
 /// A disk behind a cache of buffers that go out only when told, through
-/// the tracker's hooks, with file data queued behind it.
+/// the tracker's hooks, with file data queued behind it. A write may be
+/// begun and left under way ([`Sim::begin`]): it goes out from a copy, as
+/// the kernel cache's background writes do, the buffer changing meanwhile,
+/// and lands later ([`Sim::land`]).
 pub(crate) struct Sim {
     pub(crate) disk: RefCell<Vec<u8>>,
     bufs: RefCell<BTreeMap<u64, Vec<u8>>>,
     dirty: RefCell<BTreeSet<u64>>,
+    /// Writes under way: the bytes going out, how often the buffer had
+    /// changed when the write began, and whether the tracker held some
+    /// changes back.
+    flying: RefCell<BTreeMap<u64, Flying>>,
+    /// How often each buffer has changed (the kernel cache's generation).
+    changes: RefCell<BTreeMap<u64, u64>>,
     /// File data not on the disk yet, in order.
     data: RefCell<Vec<(u64, Vec<u8>)>>,
     deps: RefCell<Deps>,
+}
+
+/// A buffer write under way.
+struct Flying {
+    out: Vec<u8>,
+    changes: u64,
+    rolled: bool,
 }
 
 impl Sim {
@@ -53,6 +70,8 @@ impl Sim {
             disk: RefCell::new(image),
             bufs: RefCell::new(BTreeMap::new()),
             dirty: RefCell::new(BTreeSet::new()),
+            flying: RefCell::new(BTreeMap::new()),
+            changes: RefCell::new(BTreeMap::new()),
             data: RefCell::new(Vec::new()),
             deps: RefCell::new(Deps::new(&sb)),
         }
@@ -81,22 +100,74 @@ impl Sim {
         Ok(())
     }
 
-    /// Writes the buffer at `offset` through the tracker.
-    fn write_buf(&self, offset: u64) {
-        let Some(bytes) = self.bufs.borrow().get(&offset).cloned() else {
+    /// Begins a write of the buffer at `offset` through the tracker, and
+    /// leaves it under way; a buffer has one write at a time.
+    pub(crate) fn begin(&self, offset: u64) {
+        if self.flying.borrow().contains_key(&offset) {
+            return;
+        }
+        let Some(held) = self.bufs.borrow().get(&offset).cloned() else {
             self.dirty.borrow_mut().remove(&offset);
             return;
         };
-        let copy = self.deps.borrow_mut().write_start(offset, &bytes);
-        let out = copy.as_ref().unwrap_or(&bytes);
+        let copy = self.deps.borrow_mut().write_start(offset, &held);
+        let rolled = copy.is_some();
+        let out = copy.unwrap_or(held);
+        let changes = self.changed(offset);
+        self.flying.borrow_mut().insert(
+            offset,
+            Flying {
+                out,
+                changes,
+                rolled,
+            },
+        );
+    }
+
+    /// How often the buffer at `offset` has changed.
+    fn changed(&self, offset: u64) -> u64 {
+        self.changes.borrow().get(&offset).copied().unwrap_or(0)
+    }
+
+    /// The write under way of the buffer at `offset`, if any, lands: the
+    /// buffer is clean if all of it went out and it has not changed since.
+    pub(crate) fn land(&self, offset: u64) {
+        let Some(f) = self.flying.borrow_mut().remove(&offset) else {
+            return;
+        };
         let o = offset as usize;
-        self.disk.borrow_mut()[o..o + out.len()].copy_from_slice(out);
+        self.disk.borrow_mut()[o..o + f.out.len()].copy_from_slice(&f.out);
         self.deps.borrow_mut().write_done(offset, true);
-        if copy.is_some() {
-            self.dirty.borrow_mut().insert(offset);
-        } else {
+        let same = self.changed(offset) == f.changes;
+        if same && !f.rolled {
             self.dirty.borrow_mut().remove(&offset);
         }
+    }
+
+    /// Writes the buffer at `offset` through the tracker, after any write
+    /// of it under way.
+    pub(crate) fn write_buf(&self, offset: u64) {
+        self.land(offset);
+        self.begin(offset);
+        self.land(offset);
+    }
+
+    /// Checks the disk as a crash now may leave it ([`check_crash`]): with
+    /// none of the writes under way landed, and with all of them. Returns
+    /// how many images that was.
+    pub(crate) fn check_crashes(&self) -> Result<usize, String> {
+        check_crash(&self.disk.borrow()).map_err(|e| std::format!("nothing landed:\n{e}"))?;
+        let flying = self.flying.borrow();
+        if flying.is_empty() {
+            return Ok(1);
+        }
+        let mut landed = self.disk.borrow().clone();
+        for (at, f) in flying.iter() {
+            let o = *at as usize;
+            landed[o..o + f.out.len()].copy_from_slice(&f.out);
+        }
+        check_crash(&landed).map_err(|e| std::format!("all landed:\n{e}"))?;
+        Ok(2)
     }
 
     /// Writes the first `n` file data writes queued.
@@ -116,22 +187,42 @@ impl Sim {
         }
     }
 
-    /// Writes a random part of what is dirty, in a random order.
+    /// Writes a random part of what is dirty, in a random order; some of
+    /// the writes are left under way, and some of those under way land.
     pub(crate) fn write_some(&self, rng: &mut Rng) {
         let n = self.data.borrow().len();
         self.write_data_out(rng.below(n as u64 + 1) as usize);
+        let flying: Vec<u64> = self.flying.borrow().keys().copied().collect();
+        for at in flying {
+            if rng.below(2) == 0 {
+                self.land(at);
+            }
+        }
         let mut dirty: Vec<u64> = self.dirty.borrow().iter().copied().collect();
         for i in (1..dirty.len()).rev() {
             dirty.swap(i, rng.below(i as u64 + 1) as usize);
         }
         let keep = rng.below(dirty.len() as u64 + 1) as usize;
         for at in &dirty[keep..] {
-            self.write_buf(*at);
+            if rng.below(4) == 0 {
+                self.begin(*at);
+            } else {
+                self.write_buf(*at);
+            }
+        }
+    }
+
+    /// Every write under way lands.
+    pub(crate) fn land_all(&self) {
+        let flying: Vec<u64> = self.flying.borrow().keys().copied().collect();
+        for at in flying {
+            self.land(at);
         }
     }
 
     fn idle(&self) -> bool {
         self.dirty.borrow().is_empty()
+            && self.flying.borrow().is_empty()
             && self.data.borrow().is_empty()
             && self.deps.borrow().is_idle()
     }
@@ -164,6 +255,7 @@ impl BlockIo for Sim {
         let mut b = self.bufs.borrow_mut().remove(&offset).ok_or(Error::Io)?;
         f(&mut b);
         self.bufs.borrow_mut().insert(offset, b);
+        *self.changes.borrow_mut().entry(offset).or_default() += 1;
         self.dirty.borrow_mut().insert(offset);
         if mode == Mode::Sync {
             self.write_buf(offset);
@@ -194,14 +286,18 @@ impl BlockIo for Sim {
     fn forget(&self, _: &(), offset: u64, len: usize) {
         trace("forget", offset, len as u64);
         let end = offset + len as u64;
-        let mut bufs = self.bufs.borrow_mut();
-        let gone: Vec<u64> = bufs
+        let gone: Vec<u64> = self
+            .bufs
+            .borrow()
             .iter()
             .filter(|(o, b)| **o < end && **o + b.len() as u64 > offset)
             .map(|(o, _)| *o)
             .collect();
         for o in gone {
-            bufs.remove(&o);
+            // A write of it under way lands before the blocks are reused
+            // (the kernel cache's `discard` waits for it).
+            self.land(o);
+            self.bufs.borrow_mut().remove(&o);
             self.dirty.borrow_mut().remove(&o);
         }
         // Data for freed fragments never goes out (the kernel drops a
@@ -275,6 +371,7 @@ pub(crate) fn settle(fs: &Ufs<Sim>, sum: &mut Summary) {
     let io = fs.io();
     for _ in 0..200 {
         io.write_data_out(usize::MAX);
+        io.land_all();
         let dirty: Vec<u64> = io.dirty.borrow().iter().copied().collect();
         for at in dirty {
             io.write_buf(at);
@@ -877,7 +974,69 @@ fn local_images() -> Vec<std::path::PathBuf> {
             out.push(p);
         }
     }
+    if out.is_empty() {
+        out.extend(emptied_image());
+    }
     out
+}
+
+/// Where no `soft-test.img` is: the UFS2 test disk `fetch-base` left
+/// (`ufs-test.img`, which `makefs` filled), with everything in it removed
+/// through the engine, without soft updates. Kept in the temporary
+/// directory, and made again when the test disk is newer.
+fn emptied_image() -> Option<std::path::PathBuf> {
+    static MADE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    MADE.get_or_init(|| {
+        let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../build/dist");
+        let src = std::fs::read_dir(&dist)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|r| r.path().join("amd64/ufs-test.img"))
+            .find(|p| p.exists())?;
+        let img = std::env::temp_dir().join("abyss-ufs-emptied.img");
+        let age = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        if age(&img).zip(age(&src)).is_some_and(|(made, of)| made > of) {
+            return Some(img);
+        }
+        let fs = Ufs::open(&(), Mem(RefCell::new(std::fs::read(src).ok()?)), 512).ok()?;
+        let mut sum = fs.load_summary(&()).ok()?;
+        let mut root = fs.inode(&(), ROOT_INO).ok()?;
+        empty_dir(&fs, &mut sum, ROOT_INO, &mut root);
+        fs.write_inode(&(), ROOT_INO, &root, Mode::Sync).ok()?;
+        fs.write_summary(&(), &mut sum, true, 1_760_000_000).ok()?;
+        let bytes = fs.io().0.borrow().clone();
+        check_crash(&bytes).unwrap();
+        // Whole or not at all: other test runs may be reading it.
+        let tmp = img.with_extension(std::format!("{}.tmp", std::process::id()));
+        std::fs::write(&tmp, bytes).ok()?;
+        std::fs::rename(&tmp, &img).ok()?;
+        Some(img)
+    })
+    .clone()
+}
+
+/// Removes everything in directory `dir` (without soft updates).
+fn empty_dir(fs: &Ufs<Mem>, sum: &mut Summary, dir: u32, dip: &mut Inode) {
+    let now = Timestamp {
+        sec: 1_760_000_000,
+        nsec: 0,
+    };
+    let r = Reserve::Allowed;
+    for (name, ino) in fs.names(&(), dip).unwrap() {
+        let mut ip = fs.inode(&(), ino).unwrap();
+        if ip.kind() == Kind::Directory {
+            empty_dir(fs, sum, ino, &mut ip);
+            fs.rmdir(&(), sum, dir, dip, &name, ino, &mut ip, now)
+                .unwrap();
+            fs.free_inode(&(), sum, ino, &mut ip, r).unwrap();
+        } else {
+            fs.unlink(&(), dir, dip, &name, ino, &mut ip, now).unwrap();
+            if ip.nlink == 0 {
+                fs.free_inode(&(), sum, ino, &mut ip, r).unwrap();
+            }
+        }
+    }
 }
 
 /// The crash checks here, on images FreeBSD made, where its tools are not.
@@ -919,17 +1078,18 @@ fn crashes_pass_the_local_checks() {
                     do_work(fs, sum);
                 }
                 if rng.below(20) == 0 {
-                    let image = io.disk.borrow().clone();
-                    if let Err(e) = check_crash(&image) {
-                        if std::env::var("UFS_LOG").is_ok() {
-                            std::eprintln!("{}", io.deps.borrow().describe());
+                    match io.check_crashes() {
+                        Ok(n) => crashes += n,
+                        Err(e) => {
+                            if std::env::var("UFS_LOG").is_ok() {
+                                std::eprintln!("{}", io.deps.borrow().describe());
+                            }
+                            panic!(
+                                "{} seed {seed}: crash after step {step}, {e}",
+                                src.display()
+                            );
                         }
-                        panic!(
-                            "{} seed {seed}: crash after step {step}:\n{e}",
-                            src.display()
-                        );
                     }
-                    crashes += 1;
                 }
             });
             settle(&fs, &mut sum);
@@ -1132,5 +1292,997 @@ fn fragments_moved_before_their_data_is_written_settle() {
         .collect();
     freed.sort_unstable();
     assert_eq!(freed, [(b1, 2 * f), (b2, 4 * f)]);
+    assert!(d.is_idle(), "{}", d.describe());
+}
+
+// ---- What never reached the disk goes at once ----
+
+const NOW: Timestamp = Timestamp {
+    sec: 1_760_000_000,
+    nsec: 0,
+};
+
+/// An image to test on (the first of [`local_images`]), read once.
+fn an_image() -> Option<Vec<u8>> {
+    static IMAGE: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+    IMAGE
+        .get_or_init(|| std::fs::read(local_images().first()?).ok())
+        .clone()
+}
+
+/// A file system with soft updates on image `bytes`, as [`soft_fs`].
+fn soft_on(bytes: Vec<u8>) -> (Ufs<Sim>, Summary) {
+    let mut fs = Ufs::open(&(), Sim::new(bytes), 512).unwrap();
+    assert!(fs.use_soft_updates(&()));
+    let mut sum = fs.load_summary(&()).unwrap();
+    fs.write_summary(&(), &mut sum, false, 1_760_000_000)
+        .unwrap();
+    (fs, sum)
+}
+
+/// Every image a crash now may leave passes [`check_crash`].
+fn crash_ok(fs: &Ufs<Sim>, what: &str) {
+    if let Err(e) = fs.io().check_crashes() {
+        panic!("a crash {what}, {e}\n{}", fs.io().deps.borrow().describe());
+    }
+}
+
+/// The buffers of inode `ino`'s group, of its block, and of the root
+/// directory's first block.
+fn buffers_of(fs: &Ufs<Sim>, ino: u32) -> (u64, u64, u64) {
+    let sb = fs.superblock();
+    let f = u64::from(sb.fsize);
+    let root = fs.inode(&(), ROOT_INO).unwrap();
+    (
+        sb.cgtod(ino / sb.ipg) * f,
+        sb.inode_location(ino).0,
+        fs.bmap(&(), &root, 0).unwrap() * f,
+    )
+}
+
+/// Makes regular file `name` in the root.
+fn make(fs: &Ufs<Sim>, sum: &mut Summary, name: &[u8]) -> (u32, Inode) {
+    let mut root = fs.inode(&(), ROOT_INO).unwrap();
+    let who = maker(&mut Rng(1), Reserve::Allowed);
+    fs.create(
+        &(),
+        sum,
+        ROOT_INO,
+        &mut root,
+        name,
+        ops::NewKind::Regular,
+        &who,
+    )
+    .unwrap()
+}
+
+/// Writes `len` bytes into file `ino` from its start (file data, queued).
+fn fill(fs: &Ufs<Sim>, sum: &mut Summary, ino: u32, ip: &mut Inode, len: usize) {
+    let data: Vec<u8> = (0..len).map(|i| (i % 249) as u8).collect();
+    fs.write_data_range(&(), sum, ino, ip, 0, &data, Reserve::Allowed)
+        .unwrap();
+    fs.write_inode(&(), ino, ip, Mode::Delayed).unwrap();
+}
+
+/// Removes `name` (inode `ino`) from the root, as the kernel does with
+/// nothing else using the file: at no links left it is freed now.
+/// Returns whether it was.
+fn remove(fs: &Ufs<Sim>, sum: &mut Summary, name: &[u8], ino: u32, ip: &mut Inode) -> bool {
+    let mut root = fs.inode(&(), ROOT_INO).unwrap();
+    fs.unlink(&(), ROOT_INO, &mut root, name, ino, ip, NOW)
+        .unwrap();
+    if ip.nlink != 0 {
+        return false;
+    }
+    fs.free_inode(&(), sum, ino, ip, Reserve::Allowed).unwrap();
+    true
+}
+
+/// The tracker holds nothing, no work is due, and nothing waits to be
+/// freed.
+fn nothing_held(fs: &Ufs<Sim>, what: &str) {
+    let d = fs.io().deps.borrow();
+    assert!(
+        d.is_idle() && d.is_empty() && d.most() == 0 && d.pending_free() == 0,
+        "{what}: the tracker still holds\n{}",
+        d.describe()
+    );
+}
+
+/// The groups' own counts add up to the summary's.
+fn groups_agree(fs: &Ufs<Sim>, sum: &Summary, what: &str) {
+    let counted = fs.summary_from_groups(&()).unwrap();
+    assert_eq!(counted.totals, sum.totals, "{what}: the groups' counts");
+}
+
+/// Settles, and checks that the disk then holds what `sum` says and
+/// passes [`check_crash`].
+fn settled(fs: &Ufs<Sim>, sum: &mut Summary, what: &str) {
+    settle(fs, sum);
+    groups_agree(fs, sum, what);
+    crash_ok(fs, what);
+}
+
+/// FreeBSD's `softdep_setup_remove`, `softdep_setup_freeblocks`, and
+/// `softdep_freefile` on a file nothing of which reached the disk: the
+/// link drops with the entry, and the blocks and the inode are free again
+/// at once, with nothing left for the work; the next file made takes the
+/// same inode (`ffs_freefile` keeps the group's rotor at it).
+#[test]
+fn a_file_removed_before_anything_of_it_is_written_goes_at_once() {
+    let Some(image) = an_image() else {
+        std::eprintln!("no soft-test.img or ufs-test.img (run fetch-base): skipped");
+        return;
+    };
+    let bsize = Superblock::find(&(), &image[..], 512).unwrap().bsize as usize;
+    // No data; fragments; whole blocks; an indirect block.
+    for len in [0, 100, bsize + 100, 14 * bsize + 100] {
+        let (fs, mut sum) = soft_on(image.clone());
+        let start = sum.totals;
+        let (ino, mut ip) = make(&fs, &mut sum, b"a");
+        if len != 0 {
+            fill(&fs, &mut sum, ino, &mut ip, len);
+            assert_ne!(
+                sum.totals.nbfree + sum.totals.nffree,
+                start.nbfree + start.nffree
+            );
+        }
+        assert!(fs.io().deps.borrow().unwritten(ino));
+        assert!(remove(&fs, &mut sum, b"a", ino, &mut ip), "{len}: freed");
+        assert_eq!((ip.nlink, ip.effnlink, ip.mode, ip.blocks), (0, 0, 0, 0));
+        assert_eq!(sum.totals, start, "{len}: all is free again");
+        nothing_held(&fs, "after the removal");
+        assert!(
+            fs.io().data.borrow().is_empty(),
+            "{len}: its data is dropped"
+        );
+        groups_agree(&fs, &sum, "after the removal");
+        crash_ok(&fs, "after the removal");
+        // The same inode again, and its blocks.
+        let (again, mut ip) = make(&fs, &mut sum, b"b");
+        assert_eq!(again, ino, "{len}: the inode is taken again");
+        fill(&fs, &mut sum, again, &mut ip, 100);
+        crash_ok(&fs, "after making the next file");
+        settled(&fs, &mut sum, "at the end");
+        let disk = fs.io().disk.borrow().clone();
+        let back = Ufs::open(&(), &disk[..], 512).unwrap();
+        let root = back.inode(&(), ROOT_INO).unwrap();
+        assert_eq!(back.lookup(&(), &root, b"a").unwrap(), None);
+        assert_eq!(back.lookup(&(), &root, b"b").unwrap(), Some(ino));
+        let on_disk = back.inode(&(), ino).unwrap();
+        assert_eq!((on_disk.nlink, on_disk.size), (1, 100));
+    }
+}
+
+/// Once the group claiming the inode is on the disk the inode is no
+/// longer known to be zero there (FreeBSD's `DEPCOMPLETE`), and once the
+/// entry is there its removal must be too: the frees then wait, in order.
+#[test]
+fn a_file_that_reached_the_disk_is_freed_in_order() {
+    let Some(image) = an_image() else {
+        std::eprintln!("no soft-test.img or ufs-test.img (run fetch-base): skipped");
+        return;
+    };
+    // The group written; the group and the inode; everything. With data,
+    // and with none (nothing but the inode itself to wait for).
+    for (wrote, len) in (0..3).flat_map(|w| [(w, 5000), (w, 0)]) {
+        let (fs, mut sum) = soft_on(image.clone());
+        let start = sum.totals;
+        let (ino, mut ip) = make(&fs, &mut sum, b"a");
+        if len != 0 {
+            fill(&fs, &mut sum, ino, &mut ip, len);
+        }
+        let (cg, block, _) = buffers_of(&fs, ino);
+        let io = fs.io();
+        match wrote {
+            0 => io.write_buf(cg),
+            1 => {
+                io.write_buf(cg);
+                io.write_data_out(usize::MAX);
+                io.write_buf(block);
+            }
+            _ => settle(&fs, &mut sum),
+        }
+        crash_ok(&fs, "before the removal");
+        assert!(!io.deps.borrow().unwritten(ino), "{wrote}: written");
+        let freed = remove(&fs, &mut sum, b"a", ino, &mut ip);
+        // The entry on the disk holds its link until its removal is.
+        assert_eq!(freed, wrote < 2, "{wrote}: the link dropped at once");
+        assert_eq!(ip.effnlink, 0);
+        // Nothing is free yet: the inode's free waits for its block, and
+        // so do its blocks'.
+        assert_eq!(sum.totals.nifree, start.nifree - 1, "{wrote}");
+        assert!(!io.deps.borrow().is_idle(), "{wrote}: work is left");
+        if len != 0 {
+            assert_ne!(
+                sum.totals.nbfree + sum.totals.nffree,
+                start.nbfree + start.nffree
+            );
+        }
+        if freed && len != 0 {
+            assert_ne!(io.deps.borrow().pending_free(), 0, "{wrote}");
+        }
+        crash_ok(&fs, "after the removal");
+        // Each write on the way is a crash point.
+        for _ in 0..200 {
+            if io.idle() {
+                break;
+            }
+            io.write_data_out(usize::MAX);
+            let dirty: Vec<u64> = io.dirty.borrow().iter().copied().collect();
+            for at in dirty {
+                io.write_buf(at);
+                crash_ok(&fs, "while settling");
+            }
+            do_work(&fs, &mut sum);
+            crash_ok(&fs, "after the work");
+        }
+        assert_eq!(sum.totals, start, "{wrote}: all is free in the end");
+        nothing_held(&fs, "in the end");
+        settled(&fs, &mut sum, "in the end");
+    }
+}
+
+/// A renamed file: with nothing on the disk, both entries go with their
+/// links and the file at once; with the old name on the disk, the new
+/// one's link drops at once but the old one's waits for its removal, and
+/// the inode with it (FreeBSD's `softdep_setup_remove`: only the entry
+/// that never reached the disk is `COMPLETE`).
+#[test]
+fn a_renamed_file_goes_at_once_only_if_no_name_of_it_is_on_the_disk() {
+    let Some(image) = an_image() else {
+        std::eprintln!("no soft-test.img or ufs-test.img (run fetch-base): skipped");
+        return;
+    };
+    for old_on_disk in [false, true] {
+        let (fs, mut sum) = soft_on(image.clone());
+        let start = sum.totals;
+        let (ino, mut ip) = make(&fs, &mut sum, b"a");
+        fill(&fs, &mut sum, ino, &mut ip, 5000);
+        if old_on_disk {
+            settle(&fs, &mut sum);
+        }
+        let mut root = fs.inode(&(), ROOT_INO).unwrap();
+        fs.rename(
+            &(),
+            &mut sum,
+            ROOT_INO,
+            &mut root,
+            b"a",
+            ino,
+            &mut ip,
+            None,
+            b"b",
+            None,
+            NOW,
+            Reserve::Allowed,
+        )
+        .unwrap();
+        // The old entry's link is gone already if it never was on the
+        // disk.
+        assert_eq!(
+            (ip.effnlink, ip.nlink),
+            (1, if old_on_disk { 2 } else { 1 })
+        );
+        crash_ok(&fs, "after the rename");
+        let freed = remove(&fs, &mut sum, b"b", ino, &mut ip);
+        assert_eq!(freed, !old_on_disk);
+        assert_eq!((ip.effnlink, ip.nlink), (0, u16::from(old_on_disk)));
+        crash_ok(&fs, "after the removal");
+        if old_on_disk {
+            // The disk still names it `a`: nothing of it is free.
+            assert_eq!(sum.totals.nifree, start.nifree - 1);
+            let disk = fs.io().disk.borrow().clone();
+            let back = Ufs::open(&(), &disk[..], 512).unwrap();
+            let root = back.inode(&(), ROOT_INO).unwrap();
+            assert_eq!(back.lookup(&(), &root, b"a").unwrap(), Some(ino));
+            assert_ne!(back.inode(&(), ino).unwrap().mode, 0);
+            // The removal written, the work drops the link and frees it.
+            let (_, _, dir) = buffers_of(&fs, ino);
+            fs.io().write_buf(dir);
+            crash_ok(&fs, "with the removal written");
+            do_work(&fs, &mut sum);
+            crash_ok(&fs, "after the work");
+            assert_eq!(fs.inode(&(), ino).unwrap().mode, 0);
+        } else {
+            assert_eq!(sum.totals, start);
+            nothing_held(&fs, "after the removal");
+        }
+        settled(&fs, &mut sum, "in the end");
+        assert_eq!(sum.totals, start, "all is free in the end");
+    }
+}
+
+/// A file with two names: removing one that never reached the disk drops
+/// its link at once and no more; the file stays, whatever the other name
+/// is (written or not), and goes with it.
+#[test]
+fn one_name_of_two_removed_leaves_the_file() {
+    let Some(image) = an_image() else {
+        std::eprintln!("no soft-test.img or ufs-test.img (run fetch-base): skipped");
+        return;
+    };
+    for first_on_disk in [false, true] {
+        let (fs, mut sum) = soft_on(image.clone());
+        let start = sum.totals;
+        let (ino, mut ip) = make(&fs, &mut sum, b"a");
+        fill(&fs, &mut sum, ino, &mut ip, 5000);
+        if first_on_disk {
+            settle(&fs, &mut sum);
+        }
+        let mut root = fs.inode(&(), ROOT_INO).unwrap();
+        fs.link(
+            &(),
+            &mut sum,
+            ROOT_INO,
+            &mut root,
+            b"b",
+            ino,
+            &mut ip,
+            NOW,
+            Reserve::Allowed,
+        )
+        .unwrap();
+        assert_eq!((ip.effnlink, ip.nlink), (2, 2));
+        crash_ok(&fs, "after the link");
+        // The new name goes: it never reached the disk.
+        assert!(!remove(&fs, &mut sum, b"b", ino, &mut ip));
+        assert_eq!((ip.effnlink, ip.nlink), (1, 1));
+        assert_ne!(ip.mode, 0);
+        crash_ok(&fs, "after removing the new name");
+        settled(&fs, &mut sum, "with one name left");
+        let disk = fs.io().disk.borrow().clone();
+        let back = Ufs::open(&(), &disk[..], 512).unwrap();
+        let root = back.inode(&(), ROOT_INO).unwrap();
+        assert_eq!(back.lookup(&(), &root, b"a").unwrap(), Some(ino));
+        assert_eq!(back.lookup(&(), &root, b"b").unwrap(), None);
+        let on_disk = back.inode(&(), ino).unwrap();
+        assert_eq!((on_disk.nlink, on_disk.size), (1, 5000));
+        let mut got = alloc::vec![0u8; 5000];
+        back.read(&(), &on_disk, 0, &mut got).unwrap();
+        assert!(got.iter().enumerate().all(|(i, b)| *b == (i % 249) as u8));
+        // The last name is on the disk now: its removal waits.
+        let mut ip = fs.inode(&(), ino).unwrap();
+        assert!(!remove(&fs, &mut sum, b"a", ino, &mut ip));
+        assert_eq!((ip.effnlink, ip.nlink), (0, 1));
+        crash_ok(&fs, "after removing the last name");
+        settled(&fs, &mut sum, "in the end");
+        assert_eq!(sum.totals, start, "all is free in the end");
+    }
+}
+
+/// A file unlinked while open: its link drops at once if its name never
+/// reached the disk, but it is whole and usable until its last close
+/// frees it (FreeBSD's `ufs_inactive`), at once if the inode still never
+/// reached the disk and in order if it did meanwhile. The kernel's way is
+/// used: [`Ufs::release_inode`], then the group's free once nothing in
+/// core holds the inode.
+#[test]
+fn an_unlinked_file_still_open_goes_at_its_last_close() {
+    let Some(image) = an_image() else {
+        std::eprintln!("no soft-test.img or ufs-test.img (run fetch-base): skipped");
+        return;
+    };
+    for written_meanwhile in [false, true] {
+        let (fs, mut sum) = soft_on(image.clone());
+        let start = sum.totals;
+        let (ino, mut ip) = make(&fs, &mut sum, b"a");
+        fill(&fs, &mut sum, ino, &mut ip, 3000);
+        let mut root = fs.inode(&(), ROOT_INO).unwrap();
+        fs.unlink(&(), ROOT_INO, &mut root, b"a", ino, &mut ip, NOW)
+            .unwrap();
+        assert_eq!((ip.effnlink, ip.nlink), (0, 0));
+        // Open still: nothing is freed, and it can be written.
+        assert_ne!(ip.mode, 0);
+        assert_eq!(sum.totals.nifree, start.nifree - 1);
+        fill(&fs, &mut sum, ino, &mut ip, 3 * 4096 + 7);
+        crash_ok(&fs, "while unlinked and open");
+        let mut got = alloc::vec![0u8; 3000];
+        fs.io().write_data_out(usize::MAX);
+        assert_eq!(fs.read(&(), &ip, 0, &mut got).unwrap(), 3000);
+        assert!(got.iter().enumerate().all(|(i, b)| *b == (i % 249) as u8));
+        if written_meanwhile {
+            let (cg, block, _) = buffers_of(&fs, ino);
+            fs.io().write_buf(cg);
+            fs.io().write_buf(block);
+            crash_ok(&fs, "with the unlinked inode on the disk");
+        }
+        // The last close.
+        let freed = fs
+            .release_inode(&(), &mut sum, ino, &mut ip, Reserve::Allowed)
+            .unwrap();
+        assert_eq!(freed.is_some(), !written_meanwhile);
+        crash_ok(&fs, "after the last close");
+        if let Some(mode) = freed {
+            // Its blocks are free and the tracker has forgotten it; the
+            // group still holds the inode, until the caller lets it go.
+            assert_eq!(sum.totals.nifree, start.nifree - 1);
+            assert_eq!(
+                (sum.totals.nbfree, sum.totals.nffree),
+                (start.nbfree, start.nffree)
+            );
+            nothing_held(&fs, "after the last close");
+            fs.freefile(&(), &mut sum, ino, mode).unwrap();
+            assert_eq!(sum.totals, start);
+            crash_ok(&fs, "after the group's free");
+        } else {
+            assert!(!fs.io().deps.borrow().is_idle());
+        }
+        settled(&fs, &mut sum, "in the end");
+        assert_eq!(sum.totals, start, "all is free in the end");
+    }
+}
+
+/// A file made, written, removed, and another made in its place, with a
+/// crash at every write: for each point between the operations, and each
+/// order and number of the buffers and data then written there, every
+/// image on the way (and on the way to settling afterwards) passes
+/// [`check_crash`], and in the end the disk holds the second file alone.
+#[test]
+fn a_crash_at_each_write_of_a_create_and_remove_is_consistent() {
+    let Some(image) = an_image() else {
+        std::eprintln!("no soft-test.img or ufs-test.img (run fetch-base): skipped");
+        return;
+    };
+    // What is waiting to go out: file data (`None`), then each buffer.
+    let waiting = |fs: &Ufs<Sim>| {
+        let io = fs.io();
+        let mut v: Vec<Option<u64>> = Vec::new();
+        if !io.data.borrow().is_empty() {
+            v.push(None);
+        }
+        v.extend(io.dirty.borrow().iter().copied().map(Some));
+        v
+    };
+    let write = |fs: &Ufs<Sim>, what: Option<u64>| match what {
+        None => fs.io().write_data_out(usize::MAX),
+        Some(at) => fs.io().write_buf(at),
+    };
+    // The operations, each leaving the file system as the kernel would.
+    type State = (u32, Inode);
+    let step = |fs: &Ufs<Sim>, sum: &mut Summary, n: usize, st: &mut Option<State>| match n {
+        0 => {
+            let (ino, mut ip) = make(fs, sum, b"a");
+            fill(fs, sum, ino, &mut ip, 9000);
+            *st = Some((ino, ip));
+        }
+        1 => {
+            let (ino, mut ip) = st.take().unwrap();
+            // Read again, as the work may have written it since.
+            let mut now = fs.inode(&(), ino).unwrap();
+            now.effnlink = ip.effnlink;
+            ip = now;
+            remove(fs, sum, b"a", ino, &mut ip);
+        }
+        _ => {
+            let (ino, mut ip) = make(fs, sum, b"b");
+            fill(fs, sum, ino, &mut ip, 700);
+        }
+    };
+    let mut runs = 0;
+    for point in 0..=3 {
+        // How many things wait at this point, with nothing written before.
+        let n = {
+            let (fs, mut sum) = soft_on(image.clone());
+            let mut st = None;
+            for k in 0..point {
+                step(&fs, &mut sum, k, &mut st);
+            }
+            waiting(&fs).len()
+        };
+        for first in 0..n.max(1) {
+            for count in 0..=n {
+                if n == 0 && count > 0 {
+                    continue;
+                }
+                let (fs, mut sum) = soft_on(image.clone());
+                let start = sum.totals;
+                let what = std::format!("at point {point}, from {first}, {count} written");
+                let mut st = None;
+                for k in 0..point {
+                    step(&fs, &mut sum, k, &mut st);
+                    crash_ok(&fs, &what);
+                }
+                let mut list = waiting(&fs);
+                assert_eq!(list.len(), n);
+                list.rotate_left(first);
+                for w in list.into_iter().take(count) {
+                    write(&fs, w);
+                    crash_ok(&fs, &what);
+                }
+                // The work, half the time.
+                if (first + count) % 2 == 0 {
+                    do_work(&fs, &mut sum);
+                    crash_ok(&fs, &what);
+                }
+                for k in point..3 {
+                    step(&fs, &mut sum, k, &mut st);
+                    crash_ok(&fs, &what);
+                }
+                // To the end, a write at a time.
+                for _ in 0..100 {
+                    let list = waiting(&fs);
+                    if list.is_empty() && fs.io().deps.borrow().is_idle() {
+                        break;
+                    }
+                    for w in list {
+                        write(&fs, w);
+                        crash_ok(&fs, &what);
+                    }
+                    do_work(&fs, &mut sum);
+                    crash_ok(&fs, &what);
+                }
+                settled(&fs, &mut sum, &what);
+                let disk = fs.io().disk.borrow().clone();
+                let back = Ufs::open(&(), &disk[..], 512).unwrap();
+                let root = back.inode(&(), ROOT_INO).unwrap();
+                assert_eq!(back.lookup(&(), &root, b"a").unwrap(), None, "{what}");
+                let b = back.lookup(&(), &root, b"b").unwrap().expect("b");
+                let on_disk = back.inode(&(), b).unwrap();
+                assert_eq!((on_disk.nlink, on_disk.size), (1, 700), "{what}");
+                // One inode and one fragment or so are in use: the first
+                // file's are all back.
+                assert_eq!(sum.totals.nifree, start.nifree - 1, "{what}");
+                let frags =
+                    |t: &sb::Totals| t.nbfree * i64::from(back.superblock().frag) + t.nffree;
+                let used = frags(&start) - frags(&sum.totals);
+                let one = i64::from(
+                    back.superblock()
+                        .numfrags(700u64.next_multiple_of(u64::from(back.superblock().fsize))),
+                );
+                assert_eq!(used, one, "{what}: fragments in use");
+                runs += 1;
+            }
+        }
+    }
+    std::eprintln!("{runs} schedules of writes around a create and a remove checked");
+}
+
+/// Writes under way when a file goes (the kernel's cache writes a buffer
+/// from a copy, and the buffer changes meanwhile). A directory block on
+/// its way out with the entry in it puts the entry on the disk: the
+/// removal is not of an entry that never got there, and the link waits
+/// for the removal to be written.
+#[test]
+fn an_entry_going_out_as_it_is_removed_is_on_the_disk() {
+    let Some(image) = an_image() else {
+        std::eprintln!("no soft-test.img or ufs-test.img (run fetch-base): skipped");
+        return;
+    };
+    let (fs, mut sum) = soft_on(image);
+    let start = sum.totals;
+    let (ino, mut ip) = make(&fs, &mut sum, b"a");
+    let (cg, block, dir) = buffers_of(&fs, ino);
+    let io = fs.io();
+    // The inode is on the disk, so the entry may go; its block's write
+    // begins.
+    io.write_buf(cg);
+    io.write_buf(block);
+    io.begin(dir);
+    assert!(!remove(&fs, &mut sum, b"a", ino, &mut ip), "the link stays");
+    assert_eq!((ip.effnlink, ip.nlink), (0, 1));
+    crash_ok(&fs, "with the entry going out");
+    io.land(dir);
+    // The entry is on the disk, naming an inode that must stay.
+    let disk = io.disk.borrow().clone();
+    let back = Ufs::open(&(), &disk[..], 512).unwrap();
+    let root = back.inode(&(), ROOT_INO).unwrap();
+    assert_eq!(back.lookup(&(), &root, b"a").unwrap(), Some(ino));
+    do_work(&fs, &mut sum);
+    io.write_buf(block);
+    crash_ok(&fs, "with the entry on the disk");
+    assert_ne!(fs.inode(&(), ino).unwrap().mode, 0);
+    // Its removal written, the link drops and the file goes.
+    io.write_buf(dir);
+    do_work(&fs, &mut sum);
+    crash_ok(&fs, "with the removal on the disk");
+    assert_eq!(fs.inode(&(), ino).unwrap().mode, 0);
+    settled(&fs, &mut sum, "in the end");
+    assert_eq!(sum.totals, start);
+}
+
+/// Writes of the group and of the inode's block under way when a file
+/// that never reached the disk goes: the inode's block carries it zeroed
+/// and the group claims what no inode on the disk holds, which fsck takes
+/// back; the file goes at once all the same, the next one takes its
+/// inode, and when the writes land that one is still unwritten (the group
+/// that went out is older than it).
+#[test]
+fn a_file_goes_at_once_under_writes_of_its_group_and_inode() {
+    let Some(image) = an_image() else {
+        std::eprintln!("no soft-test.img or ufs-test.img (run fetch-base): skipped");
+        return;
+    };
+    let (fs, mut sum) = soft_on(image);
+    let start = sum.totals;
+    let (ino, mut ip) = make(&fs, &mut sum, b"a");
+    fill(&fs, &mut sum, ino, &mut ip, 9000);
+    let (cg, block, dir) = buffers_of(&fs, ino);
+    let io = fs.io();
+    io.begin(cg);
+    io.begin(block);
+    io.begin(dir);
+    assert!(io.deps.borrow().unwritten(ino));
+    assert!(remove(&fs, &mut sum, b"a", ino, &mut ip));
+    assert_eq!(sum.totals, start);
+    assert!(io.deps.borrow().is_empty());
+    crash_ok(&fs, "after the removal, the writes under way");
+    let (again, mut ip) = make(&fs, &mut sum, b"b");
+    assert_eq!(again, ino);
+    fill(&fs, &mut sum, again, &mut ip, 9000);
+    crash_ok(&fs, "after making the next file, the writes under way");
+    io.land(block);
+    crash_ok(&fs, "with the inode's block landed");
+    io.land(cg);
+    crash_ok(&fs, "with the group landed");
+    io.land(dir);
+    crash_ok(&fs, "with the directory landed");
+    assert!(io.deps.borrow().unwritten(ino), "the new file is unwritten");
+    // The new file's inode goes out zeroed still.
+    io.write_data_out(usize::MAX);
+    io.write_buf(block);
+    io.write_buf(dir);
+    crash_ok(&fs, "with the new file's blocks written before its group");
+    let disk = io.disk.borrow().clone();
+    let back = Ufs::open(&(), &disk[..], 512).unwrap();
+    assert_eq!(back.inode(&(), ino).unwrap().mode, 0);
+    settled(&fs, &mut sum, "in the end");
+    let disk = io.disk.borrow().clone();
+    let back = Ufs::open(&(), &disk[..], 512).unwrap();
+    let root = back.inode(&(), ROOT_INO).unwrap();
+    assert_eq!(back.lookup(&(), &root, b"b").unwrap(), Some(ino));
+    assert_eq!(back.inode(&(), ino).unwrap().size, 9000);
+}
+
+/// When the tracker forgets an inode being freed ([`Deps::free_unwritten`],
+/// FreeBSD's `check_inode_unwritten`): only one still zero on the disk,
+/// that nothing names, waits on, or points from, and with no link still
+/// to drop.
+#[test]
+fn an_inode_is_forgotten_only_with_nothing_of_it_left() {
+    let Some(sb) = a_superblock() else {
+        std::eprintln!("no image (not FreeBSD, no fetch-base): skipped");
+        return;
+    };
+    let f = u64::from(sb.fsize);
+    let ino = 5;
+    let cg_at = sb.cgtod(0) * f;
+    let dir_at = (sb.cgdmin(0) + 512) * f;
+    let (at, within) = sb.inode_location(ino);
+    let slot = softdep::Slot::Inode { ino, index: 0 };
+    let bno = sb.cgdmin(0) + 64;
+    let none = softdep::Removal::default();
+    let born = || {
+        let mut d = Deps::new(&sb);
+        d.new_inode(ino, cg_at);
+        d
+    };
+    // Its block, the inode in it with a mode.
+    let mut block = alloc::vec![0u8; idx64(u64::from(sb.bsize))];
+    block[within] = 0o100;
+    let zeroed = |d: &mut Deps| {
+        let out = d.write_start(at, &block);
+        d.write_done(at, true);
+        out.is_some_and(|b| b[within] == 0)
+    };
+
+    // Never allocated here: nothing is known of it.
+    let mut d = Deps::new(&sb);
+    assert!(!d.unwritten(ino) && !d.free_unwritten(ino));
+
+    // Just allocated: it goes out zeroed, and is forgotten whole.
+    let mut d = born();
+    assert!(d.unwritten(ino));
+    assert!(zeroed(&mut d));
+    assert!(d.free_unwritten(ino));
+    assert!(d.is_idle() && d.is_empty() && d.most() == 0);
+    assert!(!d.unwritten(ino) && !d.free_unwritten(ino));
+    assert!(!zeroed(&mut d), "its block goes out as it is from now on");
+
+    // A write of its group under way claims it; it is unwritten still.
+    let mut d = born();
+    let group = alloc::vec![0u8; idx64(u64::from(sb.bsize))];
+    assert!(d.write_start(cg_at, &group).is_none());
+    assert!(d.unwritten(ino));
+    d.write_done(cg_at, true);
+    // The group written: no longer (FreeBSD's `DEPCOMPLETE`).
+    assert!(!d.unwritten(ino) && !d.free_unwritten(ino));
+
+    // An entry names it, not yet written: its removal drops the link
+    // now, and the entry's own wait for the inode is left behind.
+    let mut d = born();
+    let e = d.new_entry(ino);
+    d.wait_copy(e, ino);
+    d.inode_copied(ino);
+    d.place_entry(e, 2, 0, dir_at, 24, (0, 0), softdep::Gone::Link, &none);
+    assert!(!d.free_unwritten(ino), "named");
+    assert!(d.unwritten(ino));
+    let r = d.remove_entry(2, 0, dir_at, 24, ino, softdep::Gone::Link);
+    assert!(r.drops_now());
+    assert_eq!(d.nlink_delta(ino), 0);
+    assert!(d.take_work().is_empty(), "no work for the link");
+    assert!(d.free_unwritten(ino));
+    assert!(d.is_idle());
+
+    // A directory's entry removed unwritten: its links are the work's.
+    let mut d = born();
+    let e = d.new_entry(ino);
+    d.place_entry(e, 2, 0, dir_at, 24, (0, 0), softdep::Gone::Link, &none);
+    let r = d.remove_entry(2, 0, dir_at, 24, ino, softdep::Gone::Dir(2));
+    assert!(!r.drops_now());
+    assert_eq!(d.nlink_delta(ino), 2);
+    assert!(!d.free_unwritten(ino), "links still to drop");
+    assert_eq!(
+        d.take_work(),
+        [softdep::Work::Unlink {
+            ino,
+            gone: softdep::Gone::Dir(2)
+        }]
+    );
+    // The work taken is not done yet.
+    assert!(!d.free_unwritten(ino));
+    d.nlink_applied(ino, 2);
+    assert!(d.free_unwritten(ino));
+
+    // An entry on the disk (nothing held of it) removed: the link waits
+    // for the removal.
+    let mut d = born();
+    let r = d.remove_entry(2, 0, dir_at, 24, ino, softdep::Gone::Link);
+    assert!(!r.drops_now());
+    assert!(!d.free_unwritten(ino), "a link still to drop");
+
+    // A pointer pending.
+    let mut d = born();
+    d.new_block(bno, 0, f, cg_at, ino);
+    d.place(bno, slot, 0, 0, None);
+    assert!(!d.free_unwritten(ino), "a pointer");
+    d.cancel_slot(slot);
+    assert!(d.free_unwritten(ino));
+
+    // Work waiting for its next copy, then for that copy's write.
+    let mut d = born();
+    let w = d.defer(softdep::Work::Free(alloc::vec![(bno, f)]));
+    d.wait_copy(w, ino);
+    d.arm(w);
+    assert!(!d.free_unwritten(ino), "work waits for its copy");
+    d.inode_copied(ino);
+    assert!(!d.free_unwritten(ino), "work waits for its write");
+    // Written zeroed, nothing is on the disk yet: the work waits on.
+    assert!(zeroed(&mut d));
+    assert!(!d.free_unwritten(ino) && d.take_work().is_empty());
+}
+
+/// Short-lived files, as a tree extracted and removed at once makes them:
+/// a few names made, written, linked, renamed, cut, and removed again
+/// (some while still open), with the cache writing back now and then, so
+/// most of them go before anything of them reached the disk and some with
+/// part of it there or on its way. Every so often each image a crash may
+/// leave is checked; in the end the disk holds what is left, and nothing
+/// else is in use.
+#[test]
+fn short_lived_files_pass_the_local_checks() {
+    let Some(image) = an_image() else {
+        std::eprintln!("no soft-test.img or ufs-test.img (run fetch-base): skipped");
+        return;
+    };
+    let r = Reserve::Allowed;
+    // `UFS_SOFT_SEEDS` runs more.
+    let seeds: u64 = std::env::var("UFS_SOFT_SEEDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
+    for seed in (0..seeds).map(|i| 41 + 2 * i) {
+        let (fs, mut sum) = soft_on(image.clone());
+        let start = sum.totals;
+        let bsize = u64::from(fs.superblock().bsize);
+        let mut rng = Rng(seed * 15_485_863);
+        // Names and what they name; each file's contents; files unlinked
+        // and still open.
+        let mut names: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
+        let mut files: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+        let mut open: Vec<u32> = Vec::new();
+        let (mut at_once, mut in_order, mut crashes) = (0, 0, 0);
+        for step in 0..1500 {
+            let name = std::format!("f{}", rng.below(6)).into_bytes();
+            let existing = names.get(&name).copied();
+            let mut root = fs.inode(&(), ROOT_INO).unwrap();
+            let what = std::format!("seed {seed} step {step}");
+            match (rng.below(10), existing) {
+                (0..=3, None) => {
+                    let (ino, mut ip) = make(&fs, &mut sum, &name);
+                    let len = match rng.below(4) {
+                        0 => 0,
+                        1 => 1 + rng.below(bsize),
+                        2 => 1 + rng.below(3 * bsize),
+                        _ => 12 * bsize + rng.below(3 * bsize),
+                    };
+                    let data: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+                    fs.write_data_range(&(), &mut sum, ino, &mut ip, 0, &data, r)
+                        .unwrap();
+                    fs.write_inode(&(), ino, &ip, Mode::Delayed).unwrap();
+                    names.insert(name, ino);
+                    files.insert(ino, data);
+                }
+                (4, Some(ino)) => {
+                    // Cut: to nothing, or somewhere inside.
+                    let mut ip = fs.inode(&(), ino).unwrap();
+                    let to = if rng.below(2) == 0 {
+                        0
+                    } else {
+                        rng.below(ip.size + 1)
+                    };
+                    fs.truncate(&(), &mut sum, ino, &mut ip, to, r, false)
+                        .unwrap();
+                    fs.write_inode(&(), ino, &ip, Mode::Delayed).unwrap();
+                    files.get_mut(&ino).unwrap().truncate(to as usize);
+                }
+                (5, Some(ino)) => {
+                    let to = std::format!("f{}", rng.below(6)).into_bytes();
+                    if names.contains_key(&to) {
+                        continue;
+                    }
+                    let mut ip = fs.inode(&(), ino).unwrap();
+                    if rng.below(2) == 0 {
+                        fs.link(
+                            &(),
+                            &mut sum,
+                            ROOT_INO,
+                            &mut root,
+                            &to,
+                            ino,
+                            &mut ip,
+                            NOW,
+                            r,
+                        )
+                        .unwrap();
+                    } else {
+                        fs.rename(
+                            &(),
+                            &mut sum,
+                            ROOT_INO,
+                            &mut root,
+                            &name,
+                            ino,
+                            &mut ip,
+                            None,
+                            &to,
+                            None,
+                            NOW,
+                            r,
+                        )
+                        .unwrap();
+                        names.remove(&name);
+                    }
+                    names.insert(to, ino);
+                }
+                (6..=9, Some(ino)) => {
+                    let mut ip = fs.inode(&(), ino).unwrap();
+                    fs.unlink(&(), ROOT_INO, &mut root, &name, ino, &mut ip, NOW)
+                        .unwrap();
+                    names.remove(&name);
+                    if ip.effnlink != 0 {
+                        continue;
+                    }
+                    files.remove(&ino);
+                    if ip.nlink != 0 {
+                        // The work frees it, once the removal is written.
+                        in_order += 1;
+                    } else if rng.below(4) == 0 {
+                        open.push(ino);
+                    } else {
+                        let free = sum.totals.nifree;
+                        fs.free_inode(&(), &mut sum, ino, &mut ip, r).unwrap();
+                        if sum.totals.nifree > free {
+                            at_once += 1;
+                        } else {
+                            in_order += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            // A file unlinked and open is closed.
+            if !open.is_empty() && rng.below(3) == 0 {
+                let ino = open.swap_remove(rng.below(open.len() as u64) as usize);
+                let mut ip = fs.inode(&(), ino).unwrap();
+                assert_eq!((ip.nlink, ip.effnlink), (0, 0), "{what}: open, unlinked");
+                assert_ne!(ip.mode, 0, "{what}: open, not freed");
+                fs.free_inode(&(), &mut sum, ino, &mut ip, r).unwrap();
+            }
+            let io = fs.io();
+            if rng.below(4) == 0 {
+                io.write_some(&mut rng);
+            }
+            if rng.below(4) == 0 {
+                do_work(&fs, &mut sum);
+            }
+            if rng.below(8) == 0 {
+                crash_ok(&fs, &what);
+                crashes += 1;
+            }
+        }
+        for ino in open {
+            let mut ip = fs.inode(&(), ino).unwrap();
+            fs.free_inode(&(), &mut sum, ino, &mut ip, r).unwrap();
+        }
+        let what = std::format!("seed {seed} in the end");
+        settled(&fs, &mut sum, &what);
+        nothing_held(&fs, &what);
+        let disk = fs.io().disk.borrow().clone();
+        let back = Ufs::open(&(), &disk[..], 512).unwrap();
+        let root = back.inode(&(), ROOT_INO).unwrap();
+        let on_disk: BTreeMap<Vec<u8>, u32> = back.names(&(), &root).unwrap().into_iter().collect();
+        assert_eq!(on_disk, names, "{what}: names");
+        for (&ino, want) in &files {
+            let ip = back.inode(&(), ino).unwrap();
+            let links = names.values().filter(|i| **i == ino).count();
+            assert_eq!(usize::from(ip.nlink), links, "{what}: links of {ino}");
+            assert_eq!(ip.size, want.len() as u64, "{what}: size of {ino}");
+            let mut got = alloc::vec![0u8; want.len()];
+            back.read(&(), &ip, 0, &mut got).unwrap();
+            assert!(got == *want, "{what}: contents of {ino}");
+        }
+        // Nothing but those files is allocated.
+        assert_eq!(
+            sum.totals.nifree,
+            start.nifree - files.len() as i64,
+            "{what}: inodes in use"
+        );
+        std::eprintln!(
+            "seed {seed}: {at_once} files gone at once, {in_order} in order, \
+             {crashes} crash points checked"
+        );
+        assert!(at_once > 10 && in_order > 5, "{what}: both ways taken");
+    }
+}
+
+/// An indirect block freed while a write of it is under way (the kernel's
+/// cache writes from a copy): that write went out with no pointers, but
+/// says nothing of what the block holds next. A data block there later
+/// has its pointer go out like any other.
+#[test]
+fn an_indirect_block_freed_under_its_write_leaves_no_mark() {
+    let Some(sb) = a_superblock() else {
+        std::eprintln!("no image (not FreeBSD, no fetch-base): skipped");
+        return;
+    };
+    let f = u64::from(sb.fsize);
+    let bsize = u64::from(sb.bsize);
+    let ino = 4;
+    let cg_at = sb.cgtod(0) * f;
+    let (bno, other) = (sb.cgdmin(0) + 64, sb.cgdmin(0) + 128);
+    let (at, other_at) = (bno * f, other * f);
+    let zeros = alloc::vec![0u8; idx64(bsize)];
+    let mut d = Deps::new(&sb);
+    // The indirect block's write begins, empty; the file is cut meanwhile
+    // and the block freed; then the write lands.
+    d.indirect(at);
+    assert!(d.write_start(at, &zeros).is_none());
+    d.forget_buffer(at, ino);
+    d.write_done(at, true);
+    // The block is data now, under another indirect block.
+    d.new_block(bno, 0, bsize, cg_at, ino);
+    d.indirect(other_at);
+    d.place(
+        bno,
+        softdep::Slot::Indirect {
+            at: other_at,
+            index: 0,
+        },
+        0,
+        0,
+        None,
+    );
+    d.data_written(at, bsize);
+    assert!(d.write_start(cg_at, &zeros).is_none());
+    d.write_done(cg_at, true);
+    let mut block = zeros.clone();
+    block[..8].copy_from_slice(&bno.to_le_bytes());
+    assert!(
+        d.write_start(other_at, &block).is_none(),
+        "the pointer is held back:\n{}",
+        d.describe()
+    );
+    d.write_done(other_at, true);
     assert!(d.is_idle(), "{}", d.describe());
 }

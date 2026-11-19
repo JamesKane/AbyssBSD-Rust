@@ -328,6 +328,13 @@ stages, each validated on the build server.
    - Frees and link drops become deferred work, which the syncer does once a second through
      in-core inodes it shares with the vnodes. `Inode::effnlink` is the link count everyone sees
      meanwhile.
+   - What never reached the disk is not waited for, as in FreeBSD (`softdep_setup_remove`,
+     `softdep_setup_freeblocks`, `softdep_freefile` with `check_inode_unwritten`). The link of an
+     entry removed before any write carried it drops in the remover. A file emptied while its
+     inode is still zero on the disk (its group not written since it was allocated) has its
+     blocks freed at once, and the inode is freed at once too if nothing names it or waits on
+     it: in the kernel when its last use goes, its number free again once its vnode is
+     reclaimed. A directory's removal stays deferred work.
 
    `fsync` writes only the buffers the file needs (its pointers' groups and blocks, its indirect
    blocks, its inode, then the entries naming it). `sync` and unmount repeat until nothing

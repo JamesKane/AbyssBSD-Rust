@@ -30,7 +30,7 @@ use alloc::vec::Vec;
 
 use crate::allocate::{Reserve, Summary};
 use crate::inode::{Inode, Timestamp};
-use crate::softdep::{Slot, Work};
+use crate::softdep::Slot;
 use crate::{BlockIo, EXT_SLOT, Error, Fill, Mode, NXADDR, Ufs, idx, idx64, int64, len64};
 
 /// `EXTATTR_NAMESPACE_USER`.
@@ -453,7 +453,8 @@ impl<B: BlockIo> Ufs<B> {
     /// Frees file `ino`'s extended attribute area (FreeBSD's
     /// `ffs_truncate` with `IO_EXT`): the inode loses its pointers and is
     /// written, then the blocks go; with soft updates they go once the
-    /// inode is on the disk without them.
+    /// inode is on the disk without them, or now if it never reached the
+    /// disk ([`Self::drop_pointers`]).
     pub fn ext_truncate(
         &self,
         cx: &B::Cx,
@@ -501,16 +502,9 @@ impl<B: BlockIo> Ufs<B> {
                 self.io.forget(cx, bn * fsize, idx64(n));
             }
             frees.extend(moved);
-            let Some(id) = self.soft(cx, |d| {
-                let id = d.defer(Work::Free(frees));
-                d.wait_copy(id, ino);
-                id
-            }) else {
-                return Err(Error::ReadOnly);
-            };
-            let r = self.write_inode(cx, ino, ip, Mode::Delayed);
-            self.soft(cx, |d| d.arm(id));
-            return r;
+            // A directory's frees always wait, as its blocks' do.
+            let now = ip.kind() != crate::Kind::Directory;
+            return self.drop_pointers(cx, sum, ino, ip, frees, now);
         }
         self.write_inode(cx, ino, ip, Mode::Sync)?;
         for (bn, n) in frees {

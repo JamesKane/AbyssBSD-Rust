@@ -10,7 +10,8 @@
 //!
 //! With them, every new pointer is placed with the tracker (waiting for
 //! the block's group and contents), and a truncation's frees wait for the
-//! inode (and any indirect block kept) to go out with the pointers gone.
+//! inode (and any indirect block kept) to go out with the pointers gone;
+//! a file whose inode never reached the disk is emptied at once.
 
 use alloc::vec::Vec;
 
@@ -573,6 +574,7 @@ impl<B: BlockIo> Ufs<B> {
         if self.soft {
             return self.truncate_soft(
                 cx,
+                sum,
                 ino,
                 ip,
                 length,
@@ -632,11 +634,14 @@ impl<B: BlockIo> Ufs<B> {
     /// The shrinking part of [`Self::truncate`] with soft updates: the
     /// pointers past the end go now, and everything they reached is freed
     /// once the inode, and each indirect block kept, is on the disk without
-    /// them (FreeBSD's `softdep_setup_freeblocks`).
+    /// them (FreeBSD's `softdep_setup_freeblocks`). A file (not a
+    /// directory) emptied whose inode never reached the disk has them
+    /// freed now ([`Self::drop_pointers`]).
     #[allow(clippy::too_many_arguments)]
     fn truncate_soft(
         &self,
         cx: &B::Cx,
+        sum: &mut Summary,
         ino: u32,
         ip: &mut Inode,
         length: u64,
@@ -707,6 +712,13 @@ impl<B: BlockIo> Ufs<B> {
         }
         let released: u64 = frees.iter().map(|(_, n)| n / DEV_BSIZE).sum();
         frees.extend(moved);
+        if length == 0 && !metadata {
+            // Nothing is kept: the inode goes into its block without the
+            // pointers, which settles when what they reached goes.
+            ip.size = 0;
+            ip.blocks = ip.blocks.saturating_sub(released);
+            return self.drop_pointers(cx, sum, ino, ip, frees, true);
+        }
         let Some(id) = self.soft(cx, |d| d.defer(Work::Free(frees))) else {
             return Err(Error::ReadOnly);
         };
@@ -742,6 +754,73 @@ impl<B: BlockIo> Ufs<B> {
         let r = self.write_inode(cx, ino, ip, Mode::Delayed);
         self.soft(cx, |d| d.arm(id));
         r
+    }
+
+    /// With soft updates: copies inode `ino`, which has just lost its
+    /// pointers to the fragments `frees`, into its block (a delayed write),
+    /// and with that buffer held settles when they are freed. If `now`
+    /// allows and the inode has never reached the disk
+    /// ([`crate::softdep::Deps::unwritten`]), they are freed here: no
+    /// pointer to them is on the disk, a write of the inode's block under
+    /// way carries the inode zeroed, and any later one finds the pointers
+    /// gone (FreeBSD's `softdep_setup_freeblocks`: with the bitmap
+    /// dependency still there the `freeblks` is `COMPLETE` at once, and
+    /// `handle_workitem_freeblocks` runs before it returns). Otherwise
+    /// they wait, as deferred work, for this copy to be on the disk.
+    pub(crate) fn drop_pointers(
+        &self,
+        cx: &B::Cx,
+        sum: &mut Summary,
+        ino: u32,
+        ip: &Inode,
+        frees: Vec<(u64, u64)>,
+        now: bool,
+    ) -> Result<(), Error> {
+        let sb = &self.sb;
+        let (block, within) = sb.inode_location(ino);
+        let bytes = ip.encode(sb);
+        let mut frees = Some(frees);
+        let mut free_now = Vec::new();
+        let later = |d: &mut crate::softdep::Deps, list: Vec<(u64, u64)>| {
+            let id = d.defer(Work::Free(list));
+            d.wait_copy(id, ino);
+            id
+        };
+        let r = self.io.modify(
+            cx,
+            block,
+            idx(sb.bsize),
+            Fill::Read,
+            Mode::Delayed,
+            &mut |b| {
+                b[within..within + crate::inode::SIZE].copy_from_slice(&bytes);
+                self.soft(cx, |d| {
+                    let Some(list) = frees.take() else {
+                        return;
+                    };
+                    if now && d.unwritten(ino) {
+                        free_now = list;
+                        d.inode_copied(ino);
+                    } else {
+                        let id = later(d, list);
+                        d.inode_copied(ino);
+                        d.arm(id);
+                    }
+                });
+            },
+        );
+        // The block could not be had: they wait for the inode's next copy.
+        if let Some(list) = frees.take() {
+            self.soft(cx, |d| {
+                let id = later(d, list);
+                d.arm(id);
+            });
+        }
+        r?;
+        for (bno, size) in free_now {
+            self.blkfree(cx, sum, bno, size)?;
+        }
+        Ok(())
     }
 
     /// With soft updates: collects into `frees` what the indirect block at
