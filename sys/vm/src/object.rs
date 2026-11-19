@@ -1326,6 +1326,41 @@ impl Object {
         Ok(Filled::New(new))
     }
 
+    /// A page of this object's kind that `fill` writes all of, not yet in
+    /// the object ([`Self::insert_filled_run`] puts it there).
+    pub fn alloc_filled(&self, fill: &mut dyn FnMut(&mut [u8])) -> Option<Pfn> {
+        self.pages_ops.alloc_filled(fill)
+    }
+
+    /// Puts pages made by [`Self::alloc_filled`] at their indices, under
+    /// one hold of the lock. Where someone put a page meanwhile (a fill or
+    /// a fault), that page gets the bytes and the new one is freed, as
+    /// [`Self::page_filled`] settles the same race.
+    pub fn insert_filled_run(&self, pages: &[(PageIndex, Pfn)]) {
+        if pages.is_empty() {
+            return;
+        }
+        let mut lost: Vec<(Pfn, Pfn)> = Vec::new();
+        {
+            let mut inner = self.inner.lock();
+            for &(index, new) in pages {
+                if let Some(&Page { pfn, .. }) = inner.pages.get(&index) {
+                    lost.push((new, pfn));
+                } else {
+                    inner.pages.insert(index, Page::new(new));
+                }
+            }
+        }
+        for (new, pfn) in lost {
+            let mut bytes = Vec::new();
+            self.pages_ops
+                .access(new, &mut |p| bytes.extend_from_slice(p));
+            self.pages_ops
+                .access(pfn, &mut |p| p.copy_from_slice(&bytes));
+            self.pages_ops.free(new);
+        }
+    }
+
     /// Frees the pages in `[start, end)`, which no page table maps any
     /// more (an unmapped range of an object nothing else shares).
     pub fn free_range(&self, start: PageIndex, end: PageIndex) {
@@ -1397,6 +1432,59 @@ impl Object {
     #[must_use]
     pub fn tracks_dirty(&self) -> bool {
         self.pager.as_ref().is_some_and(|p| p.writes_back())
+    }
+
+    /// The pages of `[first, first + out.len())` this object holds, for a
+    /// write that covers each whole, under one hold of its lock: each is
+    /// no longer synced for execution, as [`Self::forget_synced`] leaves
+    /// it. `None` where it holds none.
+    pub fn pages_for_overwrite(&self, first: PageIndex, out: &mut [Option<Pfn>]) {
+        out.fill(None);
+        let Some(end) = first.checked_add(out.len() as u64) else {
+            return;
+        };
+        let mut inner = self.inner.lock();
+        if let [one] = out {
+            // One page: a lookup, not a walk.
+            *one = inner.pages.get_mut(&first).map(|p| {
+                p.synced = false;
+                p.pfn
+            });
+            return;
+        }
+        for (&i, p) in inner.pages.range_mut(first..end) {
+            p.synced = false;
+            if let Some(slot) = usize::try_from(i - first).ok().and_then(|k| out.get_mut(k)) {
+                *slot = Some(p.pfn);
+            }
+        }
+    }
+
+    /// [`Self::mark_dirty`] for the `n` pages from `first`, under one hold
+    /// of the lock (a write's pages, as `ffs_write` marks a block's buffer
+    /// once).
+    pub fn mark_dirty_run(&self, first: PageIndex, n: u64) {
+        let Some(end) = first.checked_add(n) else {
+            return;
+        };
+        if n == 0 {
+            return;
+        }
+        if n == 1 {
+            return self.mark_dirty(first);
+        }
+        let tracks = self.tracks_dirty();
+        let mut inner = self.inner.lock();
+        for (_, p) in inner.pages.range_mut(first..end) {
+            p.synced = false;
+        }
+        if tracks {
+            let mut added = 0;
+            for i in first..end {
+                added += usize::from(inner.dirty.insert(i));
+            }
+            DIRTY.fetch_add(added, Ordering::Relaxed);
+        }
     }
 
     /// Records that page `index` was written.

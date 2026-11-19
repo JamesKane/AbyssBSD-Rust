@@ -91,6 +91,58 @@ pub fn read(object: &Object, size: u64, offset: u64, uio: &mut dyn Uio) -> Resul
     Ok(done)
 }
 
+/// Whole pages a write looks up at once.
+const RUN: usize = 16;
+
+/// The pages a write has put bytes in and not yet marked dirty: a run of
+/// consecutive ones, marked when another page does not continue it and
+/// when this is dropped.
+struct Written<'a> {
+    object: &'a Object,
+    first: PageIndex,
+    n: u64,
+    /// New pages the write filled, not yet in the object: put there
+    /// together, before any is marked.
+    new: [(PageIndex, vm::Pfn); RUN],
+    new_n: usize,
+}
+
+impl Written<'_> {
+    /// A new page, filled, for `index`.
+    fn made(&mut self, index: PageIndex, pfn: vm::Pfn) {
+        if self.new_n == RUN {
+            self.settle();
+        }
+        self.new[self.new_n] = (index, pfn);
+        self.new_n += 1;
+    }
+
+    /// The new pages into the object.
+    fn settle(&mut self) {
+        self.object.insert_filled_run(&self.new[..self.new_n]);
+        self.new_n = 0;
+    }
+
+    fn add(&mut self, index: PageIndex) {
+        if self.n != 0 && self.first.checked_add(self.n) != Some(index) {
+            self.settle();
+            self.object.mark_dirty_run(self.first, self.n);
+            self.n = 0;
+        }
+        if self.n == 0 {
+            self.first = index;
+        }
+        self.n += 1;
+    }
+}
+
+impl Drop for Written<'_> {
+    fn drop(&mut self) {
+        self.settle();
+        self.object.mark_dirty_run(self.first, self.n);
+    }
+}
+
 /// Writes `uio` at `offset` into the pages; returns the bytes written. The
 /// file system has made room (and will set the size from the result).
 pub fn write(object: &Object, offset: u64, uio: &mut dyn Uio) -> Result<usize, Errno> {
@@ -111,42 +163,71 @@ pub fn write_fresh(
     let io = object.io();
     let mut done = 0;
     let mut at = offset;
-    while uio.resid() > 0 {
+    // The pages written, marked dirty a run at a time: once a call that
+    // writes in order, and on every way out.
+    let mut dirty = Written {
+        object,
+        first: 0,
+        n: 0,
+        new: [(0, vm::Pfn(0)); RUN],
+        new_n: 0,
+    };
+    'pages: while uio.resid() > 0 {
         let index = at / PAGE;
         let within = offset_in_page(at);
         let n = (PAGE_BYTES - within).min(uio.resid());
+        if n == PAGE_BYTES {
+            // Pages covered whole, a run of them at a time: the ones held
+            // are found under one hold of the object's lock.
+            let mut held = [None; RUN];
+            let run = (uio.resid() / PAGE_BYTES).min(RUN);
+            object.pages_for_overwrite(index, &mut held[..run]);
+            for (k, held) in (0u64..).zip(&held[..run]) {
+                let mut r = Ok(0);
+                let moved = if let Some(pfn) = *held {
+                    object.access(pfn, &mut |p| r = uio.copy_in(p));
+                    r?
+                } else {
+                    // A new page takes the bytes straight, with no zeroing
+                    // first (what a fault leaves uncopied reads as zeros).
+                    let new = object
+                        .alloc_filled(&mut |p| {
+                            r = uio.copy_in(p);
+                            let got = *r.as_ref().unwrap_or(&0);
+                            p[got..].fill(0);
+                        })
+                        .ok_or(Errno::ENOMEM)?;
+                    // In the object with the run's others, whatever the
+                    // copy came to.
+                    dirty.made(index + k, new);
+                    r?
+                };
+                dirty.add(index + k);
+                done += moved;
+                at += moved as u64;
+                if moved < PAGE_BYTES {
+                    break 'pages;
+                }
+            }
+            continue;
+        }
         let mut r = Ok(0);
-        let moved = if n == PAGE_BYTES {
-            // Covered whole: a new page takes the bytes straight, with no
-            // zeroing first (what a fault leaves uncopied reads as zeros).
-            let filled = object
-                .page_filled(index, &mut |p| {
-                    r = uio.copy_in(p);
-                    let got = *r.as_ref().unwrap_or(&0);
-                    p[got..].fill(0);
-                })
-                .map_err(errno)?;
-            if let vm::object::Filled::Held(pfn) = filled {
-                object.access(pfn, &mut |p| r = uio.copy_in(p));
-            }
-            r?
+        let pfn = if fresh(index) {
+            object.page_for_overwrite(index)
         } else {
-            let pfn = if fresh(index) {
-                object.page_for_overwrite(index)
-            } else {
-                object.page_for_write(index)
-            }
-            .map_err(errno)?;
-            object.access(pfn, &mut |p| r = uio.copy_in(&mut p[within..within + n]));
-            r?
-        };
-        object.mark_dirty(index);
+            object.page_for_write(index)
+        }
+        .map_err(errno)?;
+        object.access(pfn, &mut |p| r = uio.copy_in(&mut p[within..within + n]));
+        let moved = r?;
+        dirty.add(index);
         done += moved;
         at += moved as u64;
         if moved < n {
             break;
         }
     }
+    drop(dirty);
     drop(io);
     if vm::object::dirty_total() > dirty_limit() {
         // A failure leaves the pages dirty, for fsync or the syncer to
