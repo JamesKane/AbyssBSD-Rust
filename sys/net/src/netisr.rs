@@ -120,7 +120,9 @@ impl Queues {
             w.q.len() == 1
         };
         self.queued.fetch_add(1, Ordering::Relaxed);
-        // The hook runs with no lock held: it may hand packets on at once.
+        // The hook only signals the thread: a caller may hold a socket's
+        // lock (a TCP segment on its way out), under which the packet
+        // must not come back in.
         if was_empty && let Some(k) = KICK.get() {
             k();
         }

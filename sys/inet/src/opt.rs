@@ -545,6 +545,12 @@ impl Socket {
     /// `IPV6_LEAVE_GROUP`): a `struct ipv6_mreq`, its interface 0 for the
     /// one the group's route goes out of.
     fn membership6(&self, join: bool, val: &[u8]) -> Result<(), Errno> {
+        // `in6p_setmoptions`: a socket neither `SOCK_RAW` nor `SOCK_DGRAM`
+        // is refused. (A TCP socket sends under its lock, which this
+        // takes with the interfaces' held.)
+        if self.proto == Proto::Tcp {
+            return Err(Errno::EOPNOTSUPP);
+        }
         if val.len() < 20 {
             return Err(Errno::EINVAL);
         }
@@ -795,6 +801,11 @@ impl Socket {
     /// or (neither) by the route to the group; the interface's
     /// link-layer filter takes the group's address.
     fn membership(&self, join: bool, val: &[u8]) -> Result<(), Errno> {
+        // `inp_setmoptions`: a socket neither `SOCK_RAW` nor `SOCK_DGRAM`
+        // is refused.
+        if self.proto == Proto::Tcp {
+            return Err(Errno::EOPNOTSUPP);
+        }
         if val.len() < 8 {
             return Err(Errno::EINVAL);
         }

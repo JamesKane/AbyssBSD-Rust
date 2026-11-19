@@ -429,6 +429,28 @@ pub struct Seg {
     pub sent: Option<Sent>,
 }
 
+/// Where a connection's segments go, each as `tcp_output` and
+/// `tcp_respond` make it, under the connection's lock (`ip_output`,
+/// `ip6_output`).
+pub trait Wire {
+    /// Sends `seg` between the connection's endpoints `inc`.
+    ///
+    /// # Errors
+    ///
+    /// `ip_output`'s: `ENOBUFS`, an unreachable path, a filter's `EPERM`;
+    /// `tcp_output` takes back what the segment moved.
+    fn send(&mut self, inc: &Inc, seg: Seg) -> Result<(), Errno>;
+}
+
+/// Segments kept, for a caller that makes none or looks at them itself
+/// (tests).
+impl Wire for Vec<Seg> {
+    fn send(&mut self, _: &Inc, seg: Seg) -> Result<(), Errno> {
+        self.push(seg);
+        Ok(())
+    }
+}
+
 /// The sequence space a segment took (`tcp_output`'s `len`, its FIN, and
 /// whether it was a SACK retransmission), as its error path backs it out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -450,8 +472,8 @@ pub struct Ctx<'a> {
     pub stats: &'a Stats,
     /// The random source (`arc4random`).
     pub random: fn() -> u32,
-    /// Segments to send once the connection's lock is let go.
-    pub out: &'a mut Vec<Seg>,
+    /// Where a segment goes as it is made (`ip_output`).
+    pub out: &'a mut dyn Wire,
     /// The VNET's host cache.
     pub hc: &'a hostcache::HostCache,
     /// What the route to a peer allows (`tcp_maxmtu`, `tcp_maxmtu6`).

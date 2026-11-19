@@ -51,16 +51,49 @@ struct Waker {
     /// Bumped by each wakeup, for sleepers to see it.
     wakes: AtomicU64,
     tun: Weak<Tun>,
+    /// Itself, and whether a wakeup waits for a batch's flush
+    /// (`net::defer`).
+    me: Weak<Waker>,
+    owed: AtomicBool,
 }
 
-impl tuntap::Wake for Waker {
-    fn wake(&self) {
+impl Waker {
+    fn wake_now(&self) {
         self.wakes.fetch_add(1, Ordering::Release);
         self.wq.wake_all();
         self.notify.notify(0);
         if self.tun.upgrade().is_some_and(|t| t.async_io()) {
             self.sigio.signal();
         }
+    }
+}
+
+impl tuntap::Wake for Waker {
+    /// At the flush point of the batch on this CPU, if one runs: a packet
+    /// may be queued here under a socket's lock (a TCP segment on its way
+    /// out), where a knote must not be woken; now otherwise.
+    fn wake(&self) {
+        if net::defer::active() {
+            // AcqRel pairs with the swap in `run`.
+            if self.owed.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            if let Some(me) = self.me.upgrade()
+                && net::defer::defer(me as Arc<dyn net::defer::Deferred>).is_ok()
+            {
+                return;
+            }
+            self.owed.store(false, Ordering::Release);
+        }
+        self.wake_now();
+    }
+}
+
+impl net::defer::Deferred for Waker {
+    fn run(&self) {
+        // Cleared first: a wakeup owed after this one is owed anew.
+        self.owed.store(false, Ordering::Release);
+        self.wake_now();
     }
 }
 
@@ -373,12 +406,14 @@ type Node = (Weak<Tun>, Arc<dyn CharDevice>);
 
 /// `tun_create_device`: the node, `crw------- uucp:dialer`.
 fn made(t: &Arc<Tun>) {
-    let w = Arc::new(Waker {
+    let w = Arc::new_cyclic(|me| Waker {
         wq: WaitQueue::new(),
         notify: Notify::new(),
         sigio: Sigio::new(),
         wakes: AtomicU64::new(0),
         tun: Arc::downgrade(t),
+        me: Weak::clone(me),
+        owed: AtomicBool::new(false),
     });
     t.set_wake(Arc::clone(&w) as Arc<dyn tuntap::Wake>);
     let node: Arc<dyn CharDevice> = Arc::new(TunNode {

@@ -14,7 +14,7 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use hal::MAX_CPUS;
 use sync::PreemptLock;
@@ -31,12 +31,16 @@ pub trait Deferred: Send + Sync {
 struct Slot {
     /// A batch runs on this CPU.
     active: AtomicBool,
+    /// Callers in [`defer`] and entries in `owed`: a flush that reads
+    /// none has nothing to run and takes no lock.
+    pending: AtomicUsize,
     owed: PreemptLock<Vec<Arc<dyn Deferred>>>,
 }
 
 static SLOTS: [Slot; MAX_CPUS] = [const {
     Slot {
         active: AtomicBool::new(false),
+        pending: AtomicUsize::new(0),
         owed: PreemptLock::new(Vec::new()),
     }
 }; MAX_CPUS];
@@ -80,12 +84,17 @@ impl Batch {
     /// has moved since).
     pub fn flush(&self) {
         let slot = &SLOTS[self.cpu];
-        loop {
+        // SeqCst, with `defer`'s count before its look at `active`: a
+        // batch that ends sees the caller, or the caller sees it ended.
+        while slot.pending.load(Ordering::SeqCst) != 0 {
             // One at a time, so nothing runs under the lock and the list
-            // keeps its room.
+            // keeps its room. A caller counted but not yet in the list
+            // holds or is about to take the lock: the next look finds it.
             let Some(d) = slot.owed.lock().pop() else {
-                return;
+                core::hint::spin_loop();
+                continue;
             };
+            slot.pending.fetch_sub(1, Ordering::SeqCst);
             d.run();
         }
     }
@@ -94,7 +103,7 @@ impl Batch {
 impl Drop for Batch {
     fn drop(&mut self) {
         if self.outer {
-            SLOTS[self.cpu].active.store(false, Ordering::Relaxed);
+            SLOTS[self.cpu].active.store(false, Ordering::SeqCst);
             self.flush();
         }
     }
@@ -112,10 +121,13 @@ pub fn defer(d: Arc<dyn Deferred>) -> Result<(), Arc<dyn Deferred>> {
     if !slot.active.load(Ordering::Relaxed) {
         return Err(d);
     }
+    // Counted before the look that decides: see `Batch::flush`.
+    slot.pending.fetch_add(1, Ordering::SeqCst);
     let mut owed = slot.owed.lock();
     // Rechecked under the lock: an outer batch that ended since has
     // flushed, and would not see this.
-    if !slot.active.load(Ordering::Relaxed) {
+    if !slot.active.load(Ordering::SeqCst) {
+        slot.pending.fetch_sub(1, Ordering::SeqCst);
         return Err(d);
     }
     owed.push(d);

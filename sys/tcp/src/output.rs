@@ -24,14 +24,12 @@ use crate::{Ctx, Errno, Fate, Seg, Sent, Sock, State, ecn, get, on, tcps};
 const SMALL: u32 = mbuf::MHLEN - mbuf::MAX_LINKHDR;
 
 impl Tcpcb {
-    /// `tcp_output`'s error path, for segments built under the lock that
-    /// could not be sent once it was let go: `failed` (in the order they
-    /// were built, the first the one that met `e`, the rest left unsent
-    /// after it) are taken back as each would have been (`snd_nxt`, or
-    /// the SACK hole's `rxmit` and `sack_bytes_rexmit`, and `prr_out`),
-    /// if nothing has moved past them since; then `ENOBUFS` cuts the
-    /// window to a segment and an unreachable path is a soft error. A
-    /// segment something went out after stays sent, for recovery to find.
+    /// `tcp_output`'s error path: the segments in `failed` (in the order
+    /// they were made; `tcp_output` passes the one that met `e`) are taken
+    /// back as each would have been (`snd_nxt`, or the SACK hole's `rxmit`
+    /// and `sack_bytes_rexmit`, and `prr_out`), if nothing has moved past
+    /// them since; then `ENOBUFS` cuts the window to a segment and an
+    /// unreachable path is a soft error.
     pub fn send_failed(&mut self, failed: &[Sent], e: Errno) {
         if e != Errno::EPERM {
             for s in failed.iter().rev() {
@@ -576,13 +574,19 @@ impl Tcpcb {
             fin: flags & th::FIN != 0,
             sack: sack_rxmit.is_some(),
         });
-        cx.out.push(Seg {
-            pkt,
-            ecn: ipecn,
-            df,
-            tso_segsz,
-            sent,
-        });
+        let error = cx
+            .out
+            .send(
+                &self.inc,
+                Seg {
+                    pkt,
+                    ecn: ipecn,
+                    df,
+                    tso_segsz,
+                    sent,
+                },
+            )
+            .err();
 
         // `out`: the sequence space and the timers.
         if seq::lt(self.snd_nxt, self.snd_max) || sack_rxmit.is_some() {
@@ -650,6 +654,12 @@ impl Tcpcb {
             if seq::gt(self.snd_nxt.wrapping_add(xlen), self.snd_max) {
                 self.snd_max = self.snd_nxt.wrapping_add(xlen);
             }
+        }
+        if let Some(e) = error {
+            // The segment was lost here: what it moved is taken back,
+            // and nothing more goes now.
+            self.send_failed(sent.as_slice(), e);
+            return false;
         }
         if self.rcv_numsacks > 0
             && self.state.have_established()

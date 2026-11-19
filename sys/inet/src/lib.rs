@@ -475,11 +475,6 @@ pub(crate) struct Inner {
     pub(crate) stream: mbuf::Chain,
     pub(crate) sndq: mbuf::Chain,
     pub(crate) tcp: Option<alloc::boxed::Box<tcp::Tcb>>,
-    /// A TCP socket's segments waiting to go, in order.
-    pub(crate) txq: VecDeque<tcp::Tx>,
-    /// Where a TCP call puts the segments it makes, kept for its room
-    /// (empty between calls).
-    pub(crate) segs: Vec<::tcp::Seg>,
     pub(crate) user_cookie: u32,
     pub(crate) ts_clock: i32,
     /// The splice this socket is the source of (`so_splice`), and the
@@ -518,8 +513,6 @@ pub struct Socket {
     pub(crate) spliced: core::sync::atomic::AtomicU8,
     /// Bytes spliced from it since its last splice (`so_splice_sent`).
     pub(crate) splice_sent: AtomicU64,
-    /// Someone is sending its queued segments ([`Inner::txq`]).
-    pub(crate) txbusy: core::sync::atomic::AtomicBool,
     /// When its TCP timer is queued for (ns), `u64::MAX` if not: the
     /// timer queue's entry, written under its lock, read without.
     pub(crate) timer_at: core::sync::atomic::AtomicU64,
@@ -620,8 +613,6 @@ impl Socket {
                 sndq: mbuf::Chain::default(),
                 tcp: (proto == Proto::Tcp)
                     .then(|| alloc::boxed::Box::new(tcp::Tcb::new(vnet, family))),
-                txq: VecDeque::new(),
-                segs: Vec::new(),
                 user_cookie: 0,
                 ts_clock: 0,
                 splice: None,
@@ -635,7 +626,6 @@ impl Socket {
             wr: Notify::new(),
             spliced: core::sync::atomic::AtomicU8::new(0),
             splice_sent: AtomicU64::new(0),
-            txbusy: core::sync::atomic::AtomicBool::new(false),
             timer_at: core::sync::atomic::AtomicU64::new(u64::MAX),
             wake_owed: core::sync::atomic::AtomicU8::new(0),
             tls_tx: sync::PreemptLock::new(None),

@@ -31,17 +31,63 @@ pub(crate) fn setup() -> std::sync::MutexGuard<'static, ()> {
     net::set_uptime(|| {
         crate::DEFAULT_CLOCK.load(core::sync::atomic::Ordering::Relaxed) / 1_000_000_000
     });
-    // The `netisr` thread's work, done as soon as there is some.
+    // A test that failed may have left these set.
+    HELD.store(0, core::sync::atomic::Ordering::Relaxed);
+    OWED.store(false, core::sync::atomic::Ordering::Relaxed);
+    RUNNING.store(false, core::sync::atomic::Ordering::Relaxed);
+    // The `netisr` thread's work, done as soon as there is some and no
+    // connection's lock is held (a segment goes out under its socket's
+    // lock, and its answer must not come back in under it).
     net::netisr::set_kick(|| {
-        while net::Vnet::all()
-            .iter()
-            .map(net::netisr::drain)
-            .sum::<usize>()
-            > 0
-        {}
+        if HELD.load(core::sync::atomic::Ordering::Relaxed) > 0 {
+            OWED.store(true, core::sync::atomic::Ordering::Relaxed);
+        } else {
+            netisr();
+        }
     });
     ifnet::configure_loopback(&mut net().lock(), 0);
     g
+}
+
+/// Connections' locks held now (one test runs at a time), and whether
+/// the `netisr` work waits for them.
+static HELD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static OWED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static RUNNING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The `netisr` thread's loop, one at a time as there is one thread: work
+/// queued by the work it does waits its turn behind what is already
+/// queued, so segments arrive in the order they were sent.
+fn netisr() {
+    use core::sync::atomic::Ordering::Relaxed;
+    if RUNNING.swap(true, Relaxed) {
+        return;
+    }
+    while net::Vnet::all()
+        .iter()
+        .map(net::netisr::drain)
+        .sum::<usize>()
+        > 0
+    {}
+    RUNNING.store(false, Relaxed);
+}
+
+/// A connection's lock is about to be taken; when this is dropped it has
+/// been let go, and the `netisr` work that waited is done.
+pub(crate) struct Held;
+
+pub(crate) fn held() -> Held {
+    HELD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    Held
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        use core::sync::atomic::Ordering::Relaxed;
+        if HELD.fetch_sub(1, Relaxed) == 1 && OWED.swap(false, Relaxed) {
+            netisr();
+        }
+    }
 }
 
 /// The system VNET's interfaces and routes.

@@ -49,16 +49,49 @@ struct Waker {
     sig: AtomicU32,
     /// Bumped by each wakeup, for sleepers to see it.
     wakes: AtomicU64,
+    /// Itself, and whether a wakeup waits for a batch's flush
+    /// (`net::defer`).
+    me: Weak<Waker>,
+    owed: AtomicBool,
 }
 
-impl net::bpf::Notify for Waker {
-    fn wake(&self) {
+impl Waker {
+    fn wake_now(&self) {
         self.wakes.fetch_add(1, Ordering::Release);
         self.wq.wake_all();
         self.notify.notify(0);
         if self.async_on.load(Ordering::Acquire) {
             self.sigio.signal_with(self.sig.load(Ordering::Relaxed));
         }
+    }
+}
+
+impl net::bpf::Notify for Waker {
+    /// At the flush point of the batch on this CPU, if one runs: a tap
+    /// may be offered a packet under a socket's lock (a TCP segment on
+    /// its way out), where a knote must not be woken; now otherwise.
+    fn wake(&self) {
+        if net::defer::active() {
+            // AcqRel pairs with the swap in `run`.
+            if self.owed.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            if let Some(me) = self.me.upgrade()
+                && net::defer::defer(me as Arc<dyn net::defer::Deferred>).is_ok()
+            {
+                return;
+            }
+            self.owed.store(false, Ordering::Release);
+        }
+        self.wake_now();
+    }
+}
+
+impl net::defer::Deferred for Waker {
+    fn run(&self) {
+        // Cleared first: a wakeup owed after this one is owed anew.
+        self.owed.store(false, Ordering::Release);
+        self.wake_now();
     }
 }
 
@@ -75,13 +108,15 @@ impl CharDevice for Bpf {
         read: bool,
         _write: bool,
     ) -> Result<Option<Arc<dyn CharDevice>>, Errno> {
-        let w = Arc::new(Waker {
+        let w = Arc::new_cyclic(|me| Waker {
             wq: WaitQueue::new(),
             notify: Notify::new(),
             sigio: Sigio::new(),
             async_on: AtomicBool::new(false),
             sig: AtomicU32::new(SIGIO),
             wakes: AtomicU64::new(0),
+            me: Weak::clone(me),
+            owed: AtomicBool::new(false),
         });
         let d = Desc::new(Arc::clone(&w) as Arc<dyn net::bpf::Notify>, read);
         Ok(Some(Arc::new(BpfOpen::new(d, w))))

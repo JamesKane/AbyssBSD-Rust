@@ -374,12 +374,27 @@ impl Sock for View<'_> {
     }
 }
 
-/// A segment waiting to go, with what its IP header takes.
-#[derive(Debug)]
-pub(crate) struct Tx {
-    inc: Inc,
+/// Where a connection's segments go: out, each as it is made, under the
+/// socket's lock (as `tcp_output` calls `ip_output` with the PCB locked).
+struct Sender<'a> {
+    vnet: &'a Arc<Vnet>,
     info: TxInfo,
-    seg: Seg,
+    /// From the first segment until the socket's lock is let go: what a
+    /// segment's way out would wake (a tunnel's reader, a packet filter's
+    /// listener) waits for that (`net::defer`). A wakeup takes its
+    /// kqueue's lock, and a kqueue asks a socket for its state, under the
+    /// socket's lock, with its own held.
+    hold: Option<net::defer::Batch>,
+}
+
+impl ::tcp::Wire for Sender<'_> {
+    fn send(&mut self, inc: &Inc, seg: Seg) -> Result<(), Errno> {
+        if self.hold.is_none() {
+            // The lock holds off preemption: the batch is this CPU's.
+            self.hold = Some(net::defer::begin());
+        }
+        transmit_one(self.vnet, inc, &self.info, seg)
+    }
 }
 
 /// What the IP header of a connection's segments takes from its socket.
@@ -809,9 +824,6 @@ fn send_room(i: &Inner, len: usize, least: usize) -> Result<usize, Errno> {
 }
 
 struct Done {
-    /// The queued segments, to send once the lock goes, if this call is
-    /// the one to send them ([`Socket::take_queued`]).
-    batch: Option<VecDeque<Tx>>,
     fate: Fate,
     deadline: Option<u64>,
     wake: bool,
@@ -822,9 +834,10 @@ struct Done {
 }
 
 impl Socket {
-    /// Runs `f` on the connection with its socket locked, then sends what
-    /// it sent, wakes whoever waits, ends the connection if it ended,
-    /// and sets its timer. `None` if it has no connection.
+    /// Runs `f` on the connection with its socket locked, its segments
+    /// going out as it makes them; then wakes whoever waits, ends the
+    /// connection if it ended, and sets its timer. `None` if it has no
+    /// connection.
     fn run_tcp<R>(
         self: &Arc<Self>,
         path: Option<Path>,
@@ -852,7 +865,11 @@ impl Socket {
         let st = state::of(&self.vnet);
         let options = self.so_options();
         let secrets = st.tcp.secrets();
-        let (r, done) = {
+        let (r, done, hold) = {
+            // Tests do the `netisr` thread's work themselves, once the
+            // lock is let go.
+            #[cfg(test)]
+            let _held = crate::tests::held();
             let mut i = self.inner.lock();
             let Some(mut tcb) = i.tcp.take() else {
                 return Ok(None);
@@ -861,8 +878,11 @@ impl Socket {
                 i.tcp = Some(tcb);
                 return Err(g);
             }
-            let mut out = core::mem::take(&mut i.segs);
-            let tx = TxInfo::of(&i, options, tcb.side.flow);
+            let mut out = Sender {
+                vnet: &self.vnet,
+                info: TxInfo::of(&i, options, tcb.side.flow),
+                hold: None,
+            };
             let p = path.unwrap_or(tcb.side.path);
             let pathf = move |_: &Inc| p;
             let Tcb { tp, side, .. } = &mut *tcb;
@@ -888,13 +908,7 @@ impl Socket {
             if fate == Fate::Closed {
                 tcb.dropped = true;
             }
-            // In order: queued under the lock, sent after it.
-            let inc = tcb.tp.inc;
-            i.txq
-                .extend(out.drain(..).map(|seg| Tx { inc, info: tx, seg }));
-            i.segs = out;
             let done = Done {
-                batch: self.take_queued(&mut i),
                 fate,
                 deadline: if fate == Fate::Closed {
                     None
@@ -907,17 +921,17 @@ impl Socket {
                 _freed: core::mem::take(&mut tcb.side.freed),
             };
             i.tcp = Some(tcb);
-            (r, done)
+            (r, done, out.hold)
         };
+        // The lock is gone: what the segments' way out put off runs, and
+        // this socket's own wakeups are not put off with it.
+        drop(hold);
         self.finish(done);
         Ok(Some(r))
     }
 
-    /// After a call: segments out, wakeups, the end, the timer.
+    /// After a call: wakeups, the end, the timer.
     fn finish(self: &Arc<Self>, d: Done) {
-        if let Some(b) = d.batch {
-            self.tcp_send_batch(b);
-        }
         if d.tls {
             crate::tls::enqueue(self);
         }
@@ -928,57 +942,6 @@ impl Socket {
             self.tcp_ended(d.nofdref);
         } else {
             schedule(self, d.deadline);
-        }
-    }
-
-    /// The queued segments, taken to send, if there are any and nobody is
-    /// sending already (then [`Socket::txbusy`] is the caller's until
-    /// [`Socket::tcp_send_batch`] is done). One caller at a time sends; a
-    /// caller that finds another at it (perhaps itself, further up the
-    /// stack, as a looped segment's answer comes back) leaves its own to
-    /// it.
-    fn take_queued(&self, i: &mut Inner) -> Option<VecDeque<Tx>> {
-        if i.txq.is_empty() || self.txbusy.swap(true, Ordering::Acquire) {
-            return None;
-        }
-        Some(core::mem::take(&mut i.txq))
-    }
-
-    /// Sends `batch` (from [`Socket::take_queued`]) in order, and what was
-    /// queued meanwhile.
-    fn tcp_send_batch(self: &Arc<Self>, mut batch: VecDeque<Tx>) {
-        loop {
-            // `tcp_output` stops at the first segment that cannot go
-            // (`ENOBUFS` from a full queue, an unreachable path); the
-            // ones built after it are not sent, and all are taken back.
-            let mut failed: Option<(Errno, Vec<::tcp::Sent>)> = None;
-            for t in batch.drain(..) {
-                let sent = t.seg.sent;
-                if let Some((_, f)) = &mut failed {
-                    f.extend(sent);
-                    continue;
-                }
-                if let Err(e) = transmit_one(&self.vnet, &t.inc, &t.info, t.seg) {
-                    failed = Some((e, sent.into_iter().collect()));
-                }
-            }
-            if let Some((e, f)) = failed {
-                let _ = self.run_tcp(None, |tp, _, _| {
-                    tp.send_failed(&f, e);
-                    ((), Fate::Alive)
-                });
-            }
-            // Release: what was sent before is seen by the next sender.
-            self.txbusy.store(false, Ordering::Release);
-            let mut i = self.inner.lock();
-            let Some(more) = self.take_queued(&mut i) else {
-                if i.txq.is_empty() {
-                    // The queue's room back, for the next segments.
-                    i.txq = batch;
-                }
-                return;
-            };
-            i.txq = core::mem::replace(&mut batch, more);
         }
     }
 

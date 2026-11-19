@@ -701,13 +701,17 @@ impl Tcpcb {
             urp: 0,
         };
         if let Some(pkt) = build(t, &to, None) {
-            cx.out.push(Seg {
-                pkt,
-                ecn: ect,
-                df: self.pmtud,
-                tso_segsz: 0,
-                sent: None,
-            });
+            // `tcp_respond` ignores `ip_output`'s error.
+            let _ = cx.out.send(
+                &self.inc,
+                Seg {
+                    pkt,
+                    ecn: ect,
+                    df: self.pmtud,
+                    tso_segsz: 0,
+                    sent: None,
+                },
+            );
         }
     }
 }
