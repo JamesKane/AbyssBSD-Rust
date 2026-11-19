@@ -1222,6 +1222,20 @@ fn sleepable() -> Sleepable {
 }
 
 impl Node for UfsNode {
+    /// From the inode's [`StatCopy`], taking no lock: the two words an
+    /// access check reads.
+    fn perm(&self, _s: &Sleepable) -> vfs::node::Perm {
+        let [ids, mode_flags, ..] = self.cell.stat.load();
+        let lo = |w: u64| u32::try_from(w & u64::from(u32::MAX)).unwrap_or(0);
+        let hi = |w: u64| u32::try_from(w >> 32).unwrap_or(0);
+        vfs::node::Perm {
+            mode: u16::try_from(lo(mode_flags) & 0o7777).unwrap_or(0),
+            uid: lo(ids),
+            gid: hi(ids),
+            flags: hi(mode_flags),
+        }
+    }
+
     /// From the inode's [`StatCopy`], taking no lock.
     fn attr(&self, _s: &Sleepable) -> Attr {
         let [

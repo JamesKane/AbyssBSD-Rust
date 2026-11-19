@@ -46,6 +46,11 @@ pub const VREAD: u32 = 0o400;
 /// searching a directory, `PRIV_VFS_EXEC` executing a file with some
 /// execute bit, `PRIV_VFS_READ` and `PRIV_VFS_WRITE`.
 pub fn access(a: &Attr, kind: Kind, cred: &Cred, want: u32) -> Result<(), Errno> {
+    access_perm(&crate::node::Perm::from(a), kind, cred, want)
+}
+
+/// [`access`] by what it reads of the attributes.
+pub fn access_perm(a: &crate::node::Perm, kind: Kind, cred: &Cred, want: u32) -> Result<(), Errno> {
     // Nobody writes an immutable node (FreeBSD's `ufs_access`).
     if want & VWRITE != 0 && a.flags & (IMMUTABLE | SF_SNAPSHOT) != 0 {
         return Err(Errno::EPERM);

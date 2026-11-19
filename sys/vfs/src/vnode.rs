@@ -458,6 +458,11 @@ impl Vnode {
         Ok(self.read(s).live()?.node().attr(s))
     }
 
+    /// What an access check reads of it.
+    pub fn perm(&self, s: &Sleepable) -> Result<crate::node::Perm, Errno> {
+        Ok(self.read(s).live()?.node().perm(s))
+    }
+
     /// `struct stat` (FreeBSD's `vn_stat`).
     pub fn stat(&self, s: &Sleepable) -> Result<Stat, Errno> {
         // The node's attributes made in place, not through a result.

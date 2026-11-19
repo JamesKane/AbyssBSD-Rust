@@ -164,9 +164,38 @@ pub struct DirEntry<'a> {
     pub next: u64,
 }
 
+/// What an access check reads of a node (`vaccess`'s `file_mode`,
+/// `file_uid`, `file_gid`, and the flags that forbid writing): a few
+/// words, where [`Attr`] is the whole of `stat`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Perm {
+    pub mode: u16,
+    pub uid: u32,
+    pub gid: u32,
+    pub flags: u32,
+}
+
+impl From<&Attr> for Perm {
+    fn from(a: &Attr) -> Self {
+        Self {
+            mode: a.mode,
+            uid: a.uid,
+            gid: a.gid,
+            flags: a.flags,
+        }
+    }
+}
+
 /// Operations every node has.
 pub trait Node: Send + Sync + Any {
     fn attr(&self, s: &Sleepable) -> Attr;
+
+    /// What an access check reads ([`Perm`]): [`Self::attr`]'s, for a node
+    /// that has nothing cheaper (an open asks on every call, as
+    /// `VOP_ACCESS` reads the node's own fields).
+    fn perm(&self, s: &Sleepable) -> Perm {
+        Perm::from(&self.attr(s))
+    }
 
     /// Applies `a`; the generic layer checked permissions and that a size
     /// change is for a regular file.

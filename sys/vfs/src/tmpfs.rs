@@ -365,6 +365,10 @@ impl Node for TmpNode {
         a
     }
 
+    fn perm(&self, _s: &Sleepable) -> crate::node::Perm {
+        crate::node::Perm::from(&self.attr)
+    }
+
     fn setattr(&mut self, _s: &Sleepable, a: &SetAttr) -> Result<(), Errno> {
         self.settle();
         let t = now();

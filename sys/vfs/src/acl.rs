@@ -406,7 +406,7 @@ pub fn access(s: &Sleepable, v: &Vnode, cred: &Cred, want: u32) -> Result<(), Er
         return access(s, l, cred, want);
     }
     if !enabled(v) {
-        return ops::access(&v.attr(s)?, v.kind(), cred, want);
+        return ops::access_perm(&v.perm(s)?, v.kind(), cred, want);
     }
     let st = v.read(s);
     let node = st.live()?.node();
