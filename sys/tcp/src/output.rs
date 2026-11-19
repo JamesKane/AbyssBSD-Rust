@@ -14,7 +14,7 @@
 use crate::hdr::{MAXWIN, Opts, Th, th, tof};
 use crate::sack::REXMTTHRESH;
 use crate::seq;
-use crate::tcb::{Tcpcb, build, tf, tf2};
+use crate::tcb::{Tcpcb, build_with, tf, tf2};
 use crate::timer::Tt;
 use crate::{Ctx, Errno, Fate, Seg, Sent, Sock, State, ecn, get, on, tcps};
 
@@ -369,8 +369,12 @@ impl Tcpcb {
                 }
             }
         }
+        // Written once (`tcp_addoptions`), for their length here and
+        // for the segment below.
+        let mut optb = [0u8; crate::hdr::MAXOLEN + 4];
+        let optn = to.write(&mut optb);
         let optlen = if self.flags & tf::NOOPT == 0 {
-            to.len() as i32
+            optn as i32
         } else {
             0
         };
@@ -559,7 +563,7 @@ impl Tcpcb {
         } else {
             0
         };
-        let Some(pkt) = build(t, &to, data) else {
+        let Some(pkt) = build_with(t, &optb[..optn], data) else {
             // ENOBUFS: as if sent, with the window cut to a segment.
             self.snd_cwnd = self.maxseg();
             return false;

@@ -96,6 +96,22 @@ unsafe fn forward(dst: *mut u8, src: *const u8, n: usize) {
         }
         let (t0, t1) = (load(src.add(n - 16)), load(src.add(n - 8)));
         let mut off = 0;
+        // Four words a step while there are that many before the tail (as
+        // FreeBSD's `memmove` goes 32 bytes a step below 256): a
+        // structure of a hundred-odd bytes is a few steps, not a dozen.
+        // Each step reads its four before it writes them, below where the
+        // next reads.
+        while off + 32 <= n - 16 {
+            let a = load(src.add(off));
+            let b = load(src.add(off + 8));
+            let c = load(src.add(off + 16));
+            let d = load(src.add(off + 24));
+            store(dst.add(off), a);
+            store(dst.add(off + 8), b);
+            store(dst.add(off + 16), c);
+            store(dst.add(off + 24), d);
+            off += 32;
+        }
         while off < n - 16 {
             store(dst.add(off), load(src.add(off)));
             off += 8;

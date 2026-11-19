@@ -719,15 +719,27 @@ impl Tcpcb {
 /// Builds a segment: header `t` (its offset set here), options `to`,
 /// then `data`. `None` out of buffers.
 #[must_use]
-pub fn build(mut t: Th, to: &Opts, data: Option<mbuf::Chain>) -> Option<mbuf::Packet> {
+pub fn build(t: Th, to: &Opts, data: Option<mbuf::Chain>) -> Option<mbuf::Packet> {
     let mut ob = [0u8; MAXOLEN + 4];
     let olen = to.write(&mut ob);
+    build_with(t, &ob[..olen], data)
+}
+
+/// [`build`] with the options already written (`tcp_output` writes them
+/// once, to know their length before it sizes the segment).
+#[must_use]
+pub(crate) fn build_with(
+    mut t: Th,
+    opts: &[u8],
+    data: Option<mbuf::Chain>,
+) -> Option<mbuf::Packet> {
+    let olen = opts.len().min(MAXOLEN);
     t.off = hdr::HDR_LEN + olen;
     // The header goes in the first mbuf, after the room kept for the IP
     // and link headers; the data follows by reference.
     let mut h = [0u8; hdr::HDR_LEN + MAXOLEN];
     t.write(&mut h[..hdr::HDR_LEN]);
-    h[hdr::HDR_LEN..t.off].copy_from_slice(&ob[..olen]);
+    h[hdr::HDR_LEN..t.off].copy_from_slice(&opts[..olen]);
     let mut p = mbuf::Packet::for_output(t.off).ok()?;
     p.data.extend_from_slice(&h[..t.off]).ok()?;
     if let Some(d) = data {
