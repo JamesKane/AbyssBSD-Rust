@@ -5876,6 +5876,9 @@ mod user_memory {
         let what = if soft { " with soft updates" } else { "" };
         kprintln!("ufs: read-write on {dev}{what}");
         let fsx = read_whole(s, b"/usr/tests/fsx/fsx").is_some();
+        // In both: a program removed while it runs goes on running from
+        // its mappings (they keep the file in use), though its name, the
+        // blocks freed since and its inode's number are taken again.
         // With soft updates: the flag shows, and a tree removed gives
         // its space back (once the syncer has done the frees).
         let soft_checks = if soft {
@@ -5911,6 +5914,11 @@ mod user_memory {
                 has \"$(getfacl -qn acld/f)\" 'user:1001:rwx' && \
                 has \"$(getfacl -qn -d acld/d)\" 'user:1001:rwx' || \
                 { (ls -l acld; getfacl -n acld/f; getfacl -n -d acld/d) > /tmp/fsck.out 2>&1; exit 19; }; \
+                mkdir sr && cp /rescue/rescue sr/rescue && \
+                sr/rescue sh -c 'rm /mnt/sr/rescue && rmdir /mnt/sr && sync && \
+                    dd if=/dev/zero of=/mnt/fill bs=64k count=40 2>/dev/null && sync && \
+                    : > /mnt/reuse && rm /mnt/fill /mnt/reuse && \
+                    x=$(echo mapped | cat) && [ \"$x\" = mapped ]' || exit 20; \
                 if [ -x /usr/tests/fsx/fsx ]; then for seed in 1 2 3; do \
                     /usr/tests/fsx/fsx -q -N OPS -S $seed /mnt/fsx.data > /tmp/fsx.out 2>&1 || exit 9; \
                     rm -f /mnt/fsx.data*; done; fi; \

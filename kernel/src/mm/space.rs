@@ -767,7 +767,8 @@ impl AddressSpace {
 
     /// Maps `object` from page `offset` on, placed as `a` says: shared
     /// (counted among its write mappings if `writecnt`), or privately
-    /// (shared until written, then copied).
+    /// (shared until written, then copied). The mapping keeps `keep` (a
+    /// file in use) until its last piece is unmapped.
     pub(crate) fn map_object(
         &self,
         s: &Sleepable,
@@ -775,16 +776,28 @@ impl AddressSpace {
         object: Arc<vm::object::Object>,
         offset: u64,
         writecnt: bool,
+        keep: Option<vm::map::Keep>,
     ) -> Result<VirtAddr, SpaceError> {
         self.map_entry(s, a, |map, range| {
-            map.insert(if a.inherit == vm::map::Inherit::Share {
+            let e = if a.inherit == vm::map::Inherit::Share {
                 // `MAP_SHARED`: writes reach the file's pages.
                 let e = Entry::shared(range, a.prot, a.max_prot, object, offset);
                 if writecnt { e.counting_writes() } else { e }
             } else {
                 Entry::private(range, a.prot, a.max_prot, object, offset).with_inherit(a.inherit)
-            })
+            };
+            map.insert(e.keeping(keep))
         })
+    }
+
+    /// Unlocks `map`, then lets go of what the entries removed from it
+    /// kept: a file's last use going may sleep and takes the file's lock,
+    /// which comes before the map's (FreeBSD's
+    /// `vm_map_process_deferred`, run as the map is unlocked).
+    fn unlock(mut map: impl core::ops::DerefMut<Target = VmMap>) {
+        let dead = map.take_dead();
+        drop(map);
+        drop(dead);
     }
 
     /// Places a mapping as `a` says and has `insert` put its entry in
@@ -796,26 +809,30 @@ impl AddressSpace {
         insert: impl FnOnce(&mut VmMap, core::ops::Range<VirtAddr>) -> Result<(), MapError>,
     ) -> Result<VirtAddr, SpaceError> {
         let mut map = self.map.lock(s);
-        let start = match a.fixed {
-            Some(at) => {
-                let end = at.checked_add(a.len).ok_or(MapError::OutOfRange)?;
-                // Taken: no space there (FreeBSD's `KERN_NO_SPACE`, so
-                // `mmap` fails with `ENOMEM`).
-                if a.exclusive && !map.is_free(&(at..end)) {
-                    return Err(MapError::NoSpace.into());
+        let r = (|| {
+            let start = match a.fixed {
+                Some(at) => {
+                    let end = at.checked_add(a.len).ok_or(MapError::OutOfRange)?;
+                    // Taken: no space there (FreeBSD's `KERN_NO_SPACE`, so
+                    // `mmap` fails with `ENOMEM`).
+                    if a.exclusive && !map.is_free(&(at..end)) {
+                        return Err(MapError::NoSpace.into());
+                    }
+                    self.unmap_locked(&mut map, at..end)?;
+                    at
                 }
-                self.unmap_locked(&mut map, at..end)?;
-                at
-            }
-            None => match a.below {
-                Some(limit) => map.find_space_below(a.len, a.align, a.hint, limit),
-                None => map.find_space(a.len, a.align, a.hint),
-            }
-            .ok_or(MapError::NoSpace)?,
-        };
-        let end = start.checked_add(a.len).ok_or(MapError::OutOfRange)?;
-        insert(&mut map, start..end)?;
-        Ok(start)
+                None => match a.below {
+                    Some(limit) => map.find_space_below(a.len, a.align, a.hint, limit),
+                    None => map.find_space(a.len, a.align, a.hint),
+                }
+                .ok_or(MapError::NoSpace)?,
+            };
+            let end = start.checked_add(a.len).ok_or(MapError::OutOfRange)?;
+            insert(&mut map, start..end)?;
+            Ok(start)
+        })();
+        Self::unlock(map);
+        r
     }
 
     /// Writes back the dirty pages of the files mapped over `range`
@@ -848,18 +865,19 @@ impl AddressSpace {
 
     /// Maps `object` from page `offset` on over `range`, privately (a
     /// file's text or data: shared until written, then copied), with
-    /// rights `prot` that `mprotect` may raise to `max_prot`.
+    /// rights `prot` that `mprotect` may raise to `max_prot`. With the
+    /// object comes what the mapping keeps (a file in use), if anything.
     pub(crate) fn map_private(
         &self,
         s: &Sleepable,
         range: core::ops::Range<VirtAddr>,
-        object: Arc<vm::object::Object>,
+        (object, keep): (Arc<vm::object::Object>, Option<vm::map::Keep>),
         offset: u64,
         prot: Prot,
         max_prot: Prot,
     ) -> Result<(), SpaceError> {
         let mut map = self.map.lock(s);
-        map.insert(Entry::private(range, prot, max_prot, object, offset))?;
+        map.insert(Entry::private(range, prot, max_prot, object, offset).keeping(keep))?;
         Ok(())
     }
 
@@ -929,7 +947,9 @@ impl AddressSpace {
         range: core::ops::Range<VirtAddr>,
     ) -> Result<(), SpaceError> {
         let mut map = self.map.lock(s);
-        self.unmap_locked(&mut map, range)
+        let r = self.unmap_locked(&mut map, range);
+        Self::unlock(map);
+        r
     }
 
     /// Sets the rights of `range` (`mprotect`).
@@ -1149,6 +1169,7 @@ impl AddressSpace {
     pub(crate) fn clear(&self, s: &Sleepable) {
         let mut map = self.map.lock(s);
         let _ = self.unmap_locked(&mut map, VirtAddr::new(USER_START)..VirtAddr::new(USER_END));
+        Self::unlock(map);
     }
 
     /// How many times the map has changed (`PT_VM_TIMESTAMP`).
@@ -1272,7 +1293,9 @@ impl AddressSpace {
                 let _ = self.wire(s, range);
             }
         } else if new < old {
-            self.unmap_locked(&mut map, range)?;
+            let r = self.unmap_locked(&mut map, range);
+            Self::unlock(map);
+            r?;
         }
         self.data.lock().1 = new - base;
         Ok(())

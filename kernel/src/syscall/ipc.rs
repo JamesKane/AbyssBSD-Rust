@@ -72,7 +72,7 @@ pub(super) fn shmat(s: &Sleepable, id: u64, addr: u64, flg: u64) -> SysResult {
         inherit: Inherit::Share,
         ..Anon::default()
     };
-    match space.map_object(s, &a, object, 0, false) {
+    match space.map_object(s, &a, object, 0, false, None) {
         Ok(at) => {
             space.sysv_shm.lock().push((at.get(), id));
             Ok(at.get())

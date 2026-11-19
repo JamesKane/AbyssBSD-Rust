@@ -843,6 +843,21 @@ pub(crate) fn object(s: &Sleepable, v: &Vnode) -> Option<Arc<vm::object::Object>
     Some(o)
 }
 
+/// What a mapping of a file keeps ([`vm::map::Keep`]): the file in use.
+struct Mapped(#[allow(dead_code)] vfs::VnodeUse);
+
+/// [`object`] for a mapping, with what its entries keep: `v` in use
+/// until the last of them goes, so a file unlinked and closed while
+/// mapped keeps its data and its inode (FreeBSD's vnode object holds a
+/// use of its vnode while referenced, `vm_object_reference`).
+pub(crate) fn mapped(
+    s: &Sleepable,
+    v: &Arc<Vnode>,
+) -> Option<(Arc<vm::object::Object>, vm::map::Keep)> {
+    let o = object(s, v)?;
+    Some((o, Arc::new(Mapped(v.use_ref()))))
+}
+
 /// Descriptors of process `pid` holding `slots` were closed: its POSIX
 /// locks on each file go, as closing any descriptor for a file releases
 /// them (FreeBSD's `closef`).

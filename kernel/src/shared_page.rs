@@ -476,7 +476,7 @@ pub(crate) fn map(s: &Sleepable, space: &AddressSpace, at: u64) -> Result<(), Sp
     space.map_private(
         s,
         VirtAddr::new(at)..VirtAddr::new(at + PAGE_SIZE),
-        Arc::clone(&p.object),
+        (Arc::clone(&p.object), None),
         0,
         Prot::READ.union(Prot::EXEC),
         Prot::READ.union(Prot::EXEC),

@@ -110,6 +110,13 @@ pub enum Role {
     },
 }
 
+/// What a mapping keeps for as long as it lasts: a file's mapping keeps
+/// the file in use, so an unlinked file's data and inode stay until the
+/// last mapping goes (FreeBSD's vnode object holds a use of its vnode
+/// while it is referenced, `vm_object_reference` and
+/// `vm_object_deallocate_vnode`).
+pub type Keep = Arc<dyn core::any::Any + Send + Sync>;
+
 /// One mapped range.
 #[derive(Clone)]
 pub struct Entry {
@@ -132,6 +139,8 @@ pub struct Entry {
     /// (`MAP_ENTRY_COW`): a private file mapping, or an entry `fork`
     /// copied.
     cow: bool,
+    /// Kept while mapped; every piece and every `fork`'s copy keeps it.
+    keep: Option<Keep>,
 }
 
 impl Entry {
@@ -150,6 +159,7 @@ impl Entry {
             role: Role::Normal,
             writecnt: false,
             cow: false,
+            keep: None,
         }
     }
 
@@ -186,6 +196,7 @@ impl Entry {
             role: Role::Normal,
             writecnt: false,
             cow: false,
+            keep: None,
         }
     }
 
@@ -211,7 +222,15 @@ impl Entry {
             role: Role::Normal,
             writecnt: false,
             cow: true,
+            keep: None,
         }
+    }
+
+    /// `self`, keeping `keep` while mapped.
+    #[must_use]
+    pub fn keeping(mut self, keep: Option<Keep>) -> Self {
+        self.keep = keep;
+        self
     }
 
     /// `self`, counted in its object's write mappings while mapped (a
@@ -308,7 +327,8 @@ impl Entry {
     }
 
     /// Releases the pages of a removed entry that nothing else can reach.
-    fn release(self) {
+    /// What it kept is returned, to let go of with the map unlocked.
+    fn release(self) -> Option<Keep> {
         if self.writecnt
             && let Some(object) = &self.object
         {
@@ -319,6 +339,7 @@ impl Entry {
         {
             object.free_range(self.offset, self.offset + self.pages());
         }
+        self.keep
     }
 }
 
@@ -365,6 +386,12 @@ pub struct VmMap {
     stack_limit: u64,
     /// Bumped by each change to the entries (`vm_map`'s `timestamp`).
     stamp: u32,
+    /// What removed entries kept. Letting go of a file may sleep and
+    /// takes the file's lock, which comes before the map's, so whoever
+    /// holds the map takes these ([`VmMap::take_dead`]) and drops them
+    /// once it is unlocked (FreeBSD's `vm_map_entry_deallocate` and
+    /// `vm_map_process_deferred`).
+    dead: Vec<Keep>,
 }
 
 /// The process's main stack (FreeBSD's `vm_maxsaddr`, `vm_stacktop`, and
@@ -401,6 +428,7 @@ impl VmMap {
             stack: None,
             stack_limit: u64::MAX,
             stamp: 0,
+            dead: Vec::new(),
         }
     }
 
@@ -559,14 +587,24 @@ impl VmMap {
         self.stamp = self.stamp.wrapping_add(1);
         self.check(&range)?;
         if let Some(e) = self.entries.take_exact(range.start.get(), range.end.get()) {
-            e.release();
+            self.dead.extend(e.release());
             return Ok(());
         }
         self.clip(range.start);
         self.clip(range.end);
+        let dead = &mut self.dead;
         self.entries
-            .remove_range(range.start.get(), range.end.get(), Entry::release);
+            .remove_range(range.start.get(), range.end.get(), |e| {
+                dead.extend(e.release());
+            });
         Ok(())
+    }
+
+    /// What the entries removed since the last call kept: the caller
+    /// drops it after unlocking the map.
+    #[must_use]
+    pub fn take_dead(&mut self) -> Vec<Keep> {
+        core::mem::take(&mut self.dead)
     }
 
     /// The entries starting in `range` (after clipping at its ends, those
@@ -840,6 +878,7 @@ impl VmMap {
                         offset: 0,
                         needs_copy: false,
                         writecnt: false,
+                        keep: None,
                         ..e.clone()
                     };
                     child.entries.insert(fresh);
@@ -897,7 +936,9 @@ impl VmMap {
 
 impl Drop for VmMap {
     fn drop(&mut self) {
-        self.entries.clear(Entry::release);
+        // Nobody holds a map that is being dropped: what its entries
+        // kept goes here.
+        self.entries.clear(|e| drop(e.release()));
     }
 }
 

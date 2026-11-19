@@ -268,7 +268,7 @@ fn bar_mmap(s: &Sleepable, arg: &mut [u8], fflag: u32) -> Result<(), Errno> {
         inherit: vm::map::Inherit::Share,
         kind: AnonKind::Memory,
     };
-    let va = AddressSpace::with_current(|sp| sp.map_object(s, &a, object, 0, false))
+    let va = AddressSpace::with_current(|sp| sp.map_object(s, &a, object, 0, false, None))
         .ok_or(Errno::EINVAL)?
         .map_err(|e| match e {
             crate::mm::space::SpaceError::OutOfMemory

@@ -86,8 +86,9 @@ enum Backing {
     /// Zero-filled memory (`/dev/zero`), as `MAP_ANON` gives.
     Zeros,
     /// A file's object, from a page on; counted among its write mappings
-    /// if so marked (shared memory a write seal must wait out).
-    Object(Arc<vm::object::Object>, u64, bool),
+    /// if so marked (shared memory a write seal must wait out), and what
+    /// the mapping keeps (a file in use).
+    Object(Arc<vm::object::Object>, u64, bool, Option<vm::map::Keep>),
 }
 
 /// What a descriptor maps as, for `mmap` at page-aligned `pos`, and the
@@ -122,7 +123,10 @@ fn file_object(
         if pos > i64::MAX.cast_unsigned() - size {
             return Err(Errno::EINVAL);
         }
-        return Ok((Backing::Object(object, pos / PAGE_SIZE, writecnt), max));
+        return Ok((
+            Backing::Object(object, pos / PAGE_SIZE, writecnt, None),
+            max,
+        ));
     }
     let FileKind::Vnode(vf) = f.kind() else {
         return Err(Errno::ENODEV);
@@ -149,7 +153,7 @@ fn file_object(
         }
         let page = pos / PAGE_SIZE;
         let object = d.ops.mmap(page, len.div_ceil(PAGE_SIZE))?;
-        return Ok((Backing::Object(object, page, false), max));
+        return Ok((Backing::Object(object, page, false, None), max));
     }
     let v = vf.vnode.vnode();
     match v.kind() {
@@ -171,8 +175,11 @@ fn file_object(
             if pos > i64::MAX.cast_unsigned() - size {
                 return Err(Errno::EINVAL);
             }
-            let object = crate::fs::object(s, v).ok_or(Errno::ENODEV)?;
-            Ok((Backing::Object(object, pos / PAGE_SIZE, false), max))
+            let (object, keep) = crate::fs::mapped(s, v).ok_or(Errno::ENODEV)?;
+            Ok((
+                Backing::Object(object, pos / PAGE_SIZE, false, Some(keep)),
+                max,
+            ))
         }
         vfs::Kind::CharDevice => Err(Errno::ENODEV),
         _ => Err(Errno::EINVAL),
@@ -364,7 +371,9 @@ pub(super) fn mmap(
         }
     }
     let at = in_space(|space| match object {
-        Backing::Object(object, page, writecnt) => space.map_object(s, &a, object, page, writecnt),
+        Backing::Object(object, page, writecnt, keep) => {
+            space.map_object(s, &a, object, page, writecnt, keep)
+        }
         Backing::Zeros => space.map_anon(s, &a),
     })?;
     if future.is_some() {

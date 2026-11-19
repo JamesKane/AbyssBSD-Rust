@@ -225,7 +225,7 @@ pub(crate) type Lookup<'a> = &'a dyn Fn(&[u8]) -> Result<Arc<vfs::Vnode>, Errno>
 pub(crate) fn load(
     s: &Sleepable,
     space: &AddressSpace,
-    file: &vfs::Vnode,
+    file: &Arc<vfs::Vnode>,
     path: &[u8],
     argv: &[&[u8]],
     envp: &[&[u8]],
@@ -581,10 +581,13 @@ pub(crate) fn check_exec(s: &Sleepable, file: &vfs::Vnode) -> Result<(), Errno> 
     vfs::acl::access(s, file, crate::fs::cred(s), vfs::ops::VEXEC)
 }
 
-/// [`check_exec`], then `file`'s memory object.
-fn open(s: &Sleepable, file: &vfs::Vnode) -> Result<Arc<vm::object::Object>, Errno> {
+/// A file's memory object and what its mappings keep (the file in use).
+type Mapped = (Arc<vm::object::Object>, vm::map::Keep);
+
+/// [`check_exec`], then `file`'s memory object, to map.
+fn open(s: &Sleepable, file: &Arc<vfs::Vnode>) -> Result<Mapped, Errno> {
     check_exec(s, file)?;
-    crate::fs::object(s, file).ok_or(Errno::ENOEXEC)
+    crate::fs::mapped(s, file).ok_or(Errno::ENOEXEC)
 }
 
 /// A script's `#!` line (FreeBSD's `exec_shell_imgact`): the interpreter
@@ -781,7 +784,7 @@ impl Notes {
 fn load_interp(
     s: &Sleepable,
     space: &AddressSpace,
-    file: &vfs::Vnode,
+    file: &Arc<vfs::Vnode>,
     addr: u64,
 ) -> Result<(u64, u64), Errno> {
     let object = open(s, file)?;
@@ -807,7 +810,7 @@ fn load_interp(
 fn load_sections(
     s: &Sleepable,
     space: &AddressSpace,
-    object: &Arc<vm::object::Object>,
+    object: &Mapped,
     elf: &Elf<'_>,
     rbase: u64,
 ) -> Result<u64, Errno> {
@@ -865,7 +868,7 @@ const HEAD_MAX: usize = 64 * 1024;
 fn map_segment(
     s: &Sleepable,
     space: &AddressSpace,
-    object: &Arc<vm::object::Object>,
+    object: &Mapped,
     seg: &elf::Segment,
     rbase: u64,
 ) -> Result<(), Errno> {
@@ -887,7 +890,7 @@ fn map_segment(
             .map_private(
                 s,
                 VirtAddr::new(start)..VirtAddr::new(up(file_end)),
-                Arc::clone(object),
+                (Arc::clone(&object.0), Some(Arc::clone(&object.1))),
                 seg.offset / page,
                 prot,
                 Prot::ALL,
