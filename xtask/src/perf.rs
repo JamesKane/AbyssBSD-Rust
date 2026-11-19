@@ -32,7 +32,7 @@ mod p7;
 const VM_IMAGE: &str = "FreeBSD-15.1-RELEASE-amd64-ufs.raw.xz";
 const VM_IMAGE_ARM64: &str = "FreeBSD-15.1-RELEASE-arm64-aarch64-ufs.raw.xz";
 /// Bumped whenever [`prepare_image`] changes what it writes.
-const PREP_VERSION: &str = "17";
+const PREP_VERSION: &str = "18";
 /// The bound on a component's geometric mean of AbyssBSD's medians over
 /// FreeBSD's (ADR-0014); a single benchmark over it is only reported.
 const BOUND: f64 = 1.02;
@@ -654,7 +654,9 @@ fn configure_guest(mnt: &Path) -> Result<()> {
             "#!/bin/sh\n# AbyssBSD cargo xtask perf / freebsd-record: run the second disk's\n\
              # script, or the kbench suite it names; then power off.\n\
              # kbench runs with vtbd1 unmounted: it reads and detaches it.\n\
-             # Device interrupts go to CPU 0, where AbyssBSD puts them.\n\
+             # The virtio devices' interrupts go to CPU 0, where AbyssBSD puts\n\
+             # them. NVMe's stay where FreeBSD binds them, a queue's on its\n\
+             # CPU: AbyssBSD binds them so too.\n\
              sysctl vm.pmap.pti hw.ibrs_active hw.mds_disable_state\n\
              if mount -o ro /dev/vtbd1 /mnt; then\n\
              \tif [ -f /mnt/run.sh ]; then\n\
@@ -664,7 +666,7 @@ fn configure_guest(mnt: &Path) -> Result<()> {
              \t\trm -f /tmp/kbench.ko /tmp/ubench /tmp/tree.tar /tmp/fsx\n\
              \t\tcp /mnt/kbench.ko /mnt/ubench /mnt/suite /mnt/tree.tar /mnt/fsx /tmp/ 2>/dev/null\n\
              \t\tumount /mnt\n\
-             \t\tfor irq in $(vmstat -ai | awk '/virtio_pci|nvme/ { sub(/^irq/, \"\", $1); sub(/:$/, \"\", $1); print $1 }'); do\n\
+             \t\tfor irq in $(vmstat -ai | awk '/virtio_pci/ { sub(/^irq/, \"\", $1); sub(/:$/, \"\", $1); print $1 }'); do\n\
              \t\t\tcpuset -l 0 -x \"$irq\"\n\
              \t\tdone\n\
              \t\tvmstat -ai | grep -E 'virtio_pci|nvme'\n\
@@ -1052,11 +1054,11 @@ fn remake_bench_disk(out: &Path) -> Result<PathBuf> {
 }
 
 /// `perf --freebsd-only --prof`'s script on the FreeBSD guest: the suite
-/// as usual (interrupts on CPU 0), with DTrace watching it (started apart:
+/// as usual (the virtio devices' interrupts on CPU 0), with DTrace watching it (started apart:
 /// `dtrace -c` fails to take control of it).
 const FREEBSD_PROF_RUN: &str = "#!/bin/sh\n\
     cp /mnt/ubench /mnt/suite /mnt/tree.tar /mnt/fsx /mnt/prof.d /tmp/ 2>/dev/null\n\
-    for irq in $(vmstat -ai | awk '/virtio_pci|nvme/ { sub(/^irq/, \"\", $1); sub(/:$/, \"\", $1); print $1 }'); do\n\
+    for irq in $(vmstat -ai | awk '/virtio_pci/ { sub(/^irq/, \"\", $1); sub(/:$/, \"\", $1); print $1 }'); do\n\
     \tcpuset -l 0 -x \"$irq\"\n\
     done\n\
     kldload dtraceall\n\
