@@ -176,7 +176,7 @@ pub(super) fn sock(
     fd: u64,
     need: &abi::capsicum::CapRights,
 ) -> Result<Arc<File>, Errno> {
-    let f = super::io::file(s, &*process()?, fd, need)?;
+    let f = super::io::current_file(s, fd, need)?;
     match f.kind() {
         FileKind::Socket(_) | FileKind::Inet(_) => Ok(f),
         FileKind::Netlink(_) => Ok(f),
@@ -626,7 +626,14 @@ pub(super) fn getsockopt(
 
 /// `unp_internalize`: a send's control messages, in the kernel's form.
 fn internalize(s: &Sleepable, raw: &[u8]) -> Result<Vec<Control>, Errno> {
-    let p = process()?;
+    super::with_process(|p| internalize_in(s, p, raw))
+}
+
+fn internalize_in(
+    s: &Sleepable,
+    p: &crate::proc::Process,
+    raw: &[u8],
+) -> Result<Vec<Control>, Errno> {
     // One message, the usual.
     let mut out = Vec::with_capacity(1);
     let rd = |b: &[u8], i: usize| -> u32 {
@@ -836,26 +843,26 @@ fn externalize(
     s: &Sleepable,
     control: Vec<Control>,
     flags: i32,
-    out: &mut Vec<u8>,
+    out: &mut CtlBuf,
+) -> Result<(), Errno> {
+    super::with_process(|p| externalize_in(s, p, control, flags, out))
+}
+
+fn externalize_in(
+    s: &Sleepable,
+    p: &crate::proc::Process,
+    control: Vec<Control>,
+    flags: i32,
+    out: &mut CtlBuf,
 ) -> Result<(), Errno> {
     let start = out.len();
-    out.reserve_exact(
-        control
-            .iter()
-            .map(|c| match c {
-                Control::Rights(r) => cmsg_space(r.len() * 4),
-                Control::Raw { data, .. } => cmsg_space(data.len()),
-            })
-            .sum(),
-    );
-    let p = process()?;
     let cred = crate::fs::cred();
     let fdf = FdFlags {
         cloexec: flags & MSG_CMSG_CLOEXEC != 0,
         clofork: flags & MSG_CMSG_CLOFORK != 0,
         resolve_beneath: false,
     };
-    let limit = super::io::max_files(&p);
+    let limit = super::io::max_files(p);
     let mut err = Ok(());
     for c in control {
         match c {
@@ -881,23 +888,22 @@ fn externalize(
                     match crate::fs::file::File::from_passable(file) {
                         // A directory from another jail's tree stays
                         // beneath itself here (`restrict_rights`).
-                        Some(file) => match t.alloc_with(
-                            Arc::clone(&file),
-                            FdFlags {
+                        Some(file) => {
+                            let fdf = FdFlags {
                                 resolve_beneath: file.restricted_for(&cred),
                                 ..fdf
-                            },
-                            caps,
-                            0,
-                            limit,
-                        ) {
-                            Ok(fd) => {
-                                let at = CMSG_HDR + got * 4;
-                                m[at..at + 4].copy_from_slice(&fd.to_ne_bytes());
-                                got += 1;
+                            };
+                            // The message's reference becomes the table's
+                            // (`unp_externalize` moves `fde_file`).
+                            match t.alloc_with(file, fdf, caps, 0, limit) {
+                                Ok(fd) => {
+                                    let at = CMSG_HDR + got * 4;
+                                    m[at..at + 4].copy_from_slice(&fd.to_ne_bytes());
+                                    got += 1;
+                                }
+                                Err(e) => err = Err(e),
                             }
-                            Err(e) => err = Err(e),
-                        },
+                        }
                         None => err = Err(Errno::EBADF),
                     }
                 }
@@ -924,12 +930,70 @@ fn externalize(
     err
 }
 
+/// A receive's control messages for the user: the usual few in place, as
+/// an mbuf's own storage holds FreeBSD's, and more on the heap.
+struct CtlBuf {
+    short: [u8; SHORT_CONTROL],
+    len: usize,
+    long: Vec<u8>,
+}
+
+impl CtlBuf {
+    const fn new() -> Self {
+        Self {
+            short: [0; SHORT_CONTROL],
+            len: 0,
+            long: Vec::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        if self.long.is_empty() {
+            self.len
+        } else {
+            self.long.len()
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        if self.long.is_empty() {
+            &self.short[..self.len]
+        } else {
+            &self.long
+        }
+    }
+
+    /// `n` more bytes, zero, at the end; returns them.
+    fn grow(&mut self, n: usize) -> &mut [u8] {
+        if self.long.is_empty() && self.len + n <= SHORT_CONTROL {
+            let at = self.len;
+            self.len += n;
+            let m = &mut self.short[at..at + n];
+            m.fill(0);
+            return m;
+        }
+        if self.long.is_empty() {
+            self.long.extend_from_slice(&self.short[..self.len]);
+            self.len = 0;
+        }
+        let at = self.long.len();
+        self.long.resize(at + n, 0);
+        &mut self.long[at..]
+    }
+
+    fn truncate(&mut self, len: usize) {
+        if self.long.is_empty() {
+            self.len = self.len.min(len);
+        } else {
+            self.long.truncate(len);
+        }
+    }
+}
+
 /// Appends a control message of `len` data bytes to `out`, its header
 /// filled in and its data zero, a whole `CMSG_SPACE`; returns it.
-fn cmsg(out: &mut Vec<u8>, level: i32, ty: i32, len: usize) -> &mut [u8] {
-    let at = out.len();
-    out.resize(at + cmsg_space(len), 0);
-    let m = &mut out[at..];
+fn cmsg(out: &mut CtlBuf, level: i32, ty: i32, len: usize) -> &mut [u8] {
+    let m = out.grow(cmsg_space(len));
     m[0..4].copy_from_slice(&u32::try_from(cmsg_len(len)).unwrap_or(0).to_ne_bytes());
     m[4..8].copy_from_slice(&level.to_ne_bytes());
     m[8..12].copy_from_slice(&ty.to_ne_bytes());
@@ -979,7 +1043,7 @@ fn recvit(
     }
     let so = &so_of(&f).so;
     // The control messages for the user, one after another.
-    let mut msgs: Vec<u8> = Vec::new();
+    let mut msgs = CtlBuf::new();
     let mut ext = |c: Vec<Control>| -> Result<(), Errno> { externalize(s, c, flags, &mut msgs) };
     let ext: Option<&mut dyn FnMut(Vec<Control>) -> Result<(), Errno>> = if control.is_some() {
         Some(&mut ext)
@@ -1019,7 +1083,8 @@ fn recvit(
     if let Some((addr, len)) = control {
         // The whole messages that fit, in one copy.
         let mut at = 0;
-        let mut rest = &msgs[..];
+        let msgs = msgs.bytes();
+        let mut rest = msgs;
         while let Some((m, after)) = first_cmsg(rest) {
             if len as usize - at < m.len() {
                 outflags |= MSG_CTRUNC;
@@ -1031,7 +1096,7 @@ fn recvit(
         }
         if uaccess::copy_out(addr, &msgs[..at]).is_err() {
             // Every received descriptor goes (`m_dispose_extcontrolm`).
-            dispose(s, &msgs);
+            dispose(s, msgs);
             return Err(Errno::EFAULT);
         }
         ctllen = u32::try_from(at).unwrap_or(0);

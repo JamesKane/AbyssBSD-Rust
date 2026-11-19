@@ -56,8 +56,23 @@ pub(super) fn file(
 
 /// The file open on `fd` in the current process (borrowed, so no
 /// reference to the process is taken), with the rights in `need`.
+///
+/// A process with one thread reads its table without the lock, as
+/// [`with_file`] does: the reference taken is then the call's one locked
+/// instruction, as FreeBSD's `fget_unlocked` has.
 pub(super) fn current_file(s: &Sleepable, fd: u64, need: &CapRights) -> Result<Arc<File>, Errno> {
-    Process::with_current(|p| file(s, p, fd, need)).unwrap_or(Err(Errno::EINVAL))
+    Process::with_current(|p| {
+        if p.sole_user_of_files() {
+            // SAFETY: only the process's threads reach its table, this is
+            // the only one, and it does nothing else with the table
+            // before the borrow ends, here.
+            let table = unsafe { p.files.get_unlocked() };
+            table.get_checked(int(fd), need)
+        } else {
+            file(s, p, fd, need)
+        }
+    })
+    .unwrap_or(Err(Errno::EINVAL))
 }
 
 /// Runs `f` on the file open on `fd` in the current process. A process
@@ -328,8 +343,11 @@ enum Dup {
 
 /// Duplicates `old` as `mode` says, with descriptor flags `flags`.
 fn dup_fd(s: &Sleepable, mode: Dup, flags: FdFlags, old: i32, new: i32) -> SysResult {
-    let p = process()?;
-    let limit = max_files(&p);
+    with_process(|p| dup_in(s, p, mode, flags, old, new))
+}
+
+fn dup_in(s: &Sleepable, p: &Process, mode: Dup, flags: FdFlags, old: i32, new: i32) -> SysResult {
+    let limit = max_files(p);
     let out_of_range = if mode == Dup::AtLeast {
         Errno::EINVAL
     } else {
