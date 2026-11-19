@@ -171,6 +171,18 @@ enum Kind {
     Deferred(Work),
 }
 
+impl Kind {
+    /// Its place in [`Deps::counts`].
+    const fn index(&self) -> usize {
+        match self {
+            Self::Born(_) => 0,
+            Self::Alloc(_) => 1,
+            Self::DirAdd(_) => 2,
+            Self::Deferred(_) => 3,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Item {
     waits: Vec<Wait>,
@@ -227,6 +239,8 @@ pub struct Deps {
     seq: u64,
     next: u64,
     items: IntMap<Id, Item>,
+    /// How many of `items` are of each kind ([`Kind::index`]).
+    counts: [usize; 4],
     buf_watch: IntMap<u64, Vec<(Stamp, Id)>>,
     item_watch: IntMap<Id, Vec<Id>>,
     covers: BTreeMap<(u64, Id), Cover>,
@@ -262,6 +276,7 @@ impl Deps {
             seq: 0,
             next: 0,
             items: IntMap::new(),
+            counts: [0; 4],
             buf_watch: IntMap::new(),
             item_watch: IntMap::new(),
             covers: BTreeMap::new(),
@@ -288,9 +303,25 @@ impl Deps {
         Stamp(self.seq)
     }
 
+    /// Takes item `id` out, and out of its kind's count.
+    fn take_item(&mut self, id: &Id) -> Option<Item> {
+        let item = self.items.remove(id)?;
+        self.counts[item.kind.index()] -= 1;
+        Some(item)
+    }
+
+    /// How many items the kind held most has (`softdep_curdeps`, which
+    /// `softdep_excess_items` compares a kind at a time with
+    /// `max_softdeps`).
+    #[must_use]
+    pub fn most(&self) -> usize {
+        self.counts.iter().copied().max().unwrap_or(0)
+    }
+
     fn add(&mut self, kind: Kind, waits: &[Wait]) -> Id {
         self.next += 1;
         let id = Id(self.next);
+        self.counts[kind.index()] += 1;
         self.items.insert(
             id,
             Item {
@@ -380,7 +411,7 @@ impl Deps {
         match self.items.get(&id).map(|i| &i.kind) {
             Some(Kind::Born(ino)) => {
                 let ino = *ino;
-                self.items.remove(&id);
+                self.take_item(&id);
                 if let Some(d) = self.inodes.get_mut(&ino) {
                     d.born = None;
                 }
@@ -390,7 +421,7 @@ impl Deps {
                 if let Some(Item {
                     kind: Kind::Deferred(w),
                     ..
-                }) = self.items.remove(&id)
+                }) = self.take_item(&id)
                 {
                     self.work.push_back(w);
                 }
@@ -491,7 +522,7 @@ impl Deps {
         let id = self.add(Kind::Born(ino), &[Wait::Buffer { at: cg_at, stamp }]);
         let d = self.inode_dep(ino);
         if let Some(old) = d.born.replace(id) {
-            self.items.remove(&old);
+            self.take_item(&old);
         }
     }
 
@@ -771,7 +802,7 @@ impl Deps {
         let Some(Item {
             kind: Kind::Alloc(a),
             ..
-        }) = self.items.remove(&id)
+        }) = self.take_item(&id)
         else {
             return None;
         };
@@ -811,7 +842,7 @@ impl Deps {
         let Some(Item {
             kind: Kind::Alloc(a),
             ..
-        }) = self.items.remove(&id)
+        }) = self.take_item(&id)
         else {
             return;
         };
@@ -969,7 +1000,7 @@ impl Deps {
         let Some(Item {
             kind: Kind::DirAdd(d),
             ..
-        }) = self.items.remove(&id)
+        }) = self.take_item(&id)
         else {
             return Vec::new();
         };
@@ -1002,7 +1033,7 @@ impl Deps {
             for f in self.drop_entry(id) {
                 self.satisfy(f, Wait::Item(id));
             }
-        } else if self.items.remove(&id).is_some() {
+        } else if self.take_item(&id).is_some() {
             self.followers_done(id);
         }
     }

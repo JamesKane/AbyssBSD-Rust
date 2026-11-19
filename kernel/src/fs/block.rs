@@ -26,6 +26,10 @@ pub(crate) struct SoftDeps {
     /// [`Self::with`] does it for them.
     written: PreemptLock<Vec<(u64, u64)>>,
     any_written: AtomicBool,
+    /// The tracker's [`Deps::most`] as its last user left it, for the
+    /// limit's check on every operation to read with no lock
+    /// (`softdep_excess_items` reads its counts so).
+    most: core::sync::atomic::AtomicUsize,
 }
 
 impl SoftDeps {
@@ -34,6 +38,7 @@ impl SoftDeps {
             deps: Mutex::new(&SOFTDEP, Deps::new(sb)),
             written: PreemptLock::new(Vec::new()),
             any_written: AtomicBool::new(false),
+            most: core::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -50,7 +55,14 @@ impl SoftDeps {
                 d.data_written(offset, len);
             }
         }
-        f(&mut d)
+        let r = f(&mut d);
+        self.most.store(d.most(), Ordering::Relaxed);
+        r
+    }
+
+    /// Items of the kind the tracker holds most of, as of its last use.
+    pub(crate) fn most(&self) -> usize {
+        self.most.load(Ordering::Relaxed)
     }
 
     /// File data at `offset` is written: told the tracker at its next use.

@@ -60,16 +60,14 @@ static INODE: LockClass = LockClass::new_dup_ok("ufs inode", 350);
 /// The allocation summary (FreeBSD's `UFS_LOCK`).
 static SUMMARY: LockClass = LockClass::new("ufs summary", 370);
 
-/// Soft-updates items past which a writer waits for them (FreeBSD's
-/// `max_softdeps`, `softdep_slowdown`): four per vnode, as FreeBSD sizes it.
+/// Soft-updates items of one kind past which a writer waits for them and
+/// the syncer writes everything each second (FreeBSD's `max_softdeps`,
+/// which `softdep_excess_items` compares each kind with, and what
+/// `request_cleanup` and `softdep_speedup` then do): four per vnode, as
+/// FreeBSD sizes it. Below it nothing is hurried: a tree extracted and
+/// removed leaves a few items a file, far short of this.
 fn softdep_limit() -> usize {
     super::max_vnodes().saturating_mul(4)
-}
-
-/// Soft-updates items past which the syncer writes everything each second
-/// (FreeBSD's `softdep_speedup`).
-fn softdep_speedup() -> usize {
-    softdep_limit() / 4
 }
 
 /// An in-core inode, shared by its node and its file's pager. In order
@@ -901,23 +899,24 @@ impl Shared {
         true
     }
 
-    /// Soft-updates items held.
-    fn deps_held(&self, s: &Sleepable) -> usize {
-        self.deps.as_ref().map_or(0, |d| d.with(s, |d| d.len()))
+    /// Soft-updates items held, of the kind held most: read with no
+    /// lock, as every operation asks.
+    fn deps_held(&self) -> usize {
+        self.deps.as_ref().map_or(0, |d| d.most())
     }
 
-    /// A writer past [`softdep_limit`] items waits for them to go below
-    /// [`softdep_speedup`], writing (FreeBSD's `softdep_slowdown`). The
-    /// caller holds no inode lock.
+    /// A writer past [`softdep_limit`] items of a kind waits for them to
+    /// go below it, writing (FreeBSD's `request_cleanup`). The caller
+    /// holds no inode lock.
     fn throttle(&self, s: &Sleepable) {
-        if self.deps_held(s) <= softdep_limit() {
+        if self.deps_held() <= softdep_limit() {
             return;
         }
         for _ in 0..8 {
             let _ = self.write_inodes(s, Mode::Delayed);
             let _ = self.ufs.io().cache.sync(s);
             self.process_work(s);
-            if self.deps_held(s) <= softdep_speedup() {
+            if self.deps_held() <= softdep_limit() {
                 break;
             }
         }
@@ -1126,7 +1125,7 @@ impl FileSystem for UfsFs {
         // as it ages, or all of it while soft updates hold too much
         // (FreeBSD's `softdep_speedup`).
         let now = crate::time::now_ns();
-        let speedup = shared.deps_held(s) > softdep_speedup();
+        let speedup = shared.deps_held() > softdep_limit();
         let due = now.saturating_sub(shared.data_synced.load(Ordering::Relaxed)) >= 30_000_000_000;
         if due || speedup {
             if due {
