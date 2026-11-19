@@ -121,6 +121,10 @@ pub struct Table {
     /// Hashed connected PCBs by VNET and both ports (`ipi_hashbase`,
     /// the exact four-tuple hash).
     exact: BTreeSet<(u32, u16, u16, u64)>,
+    /// Hashed unconnected PCBs by VNET and local port (`ipi_hash_wild`):
+    /// where a segment no connection takes finds its listener, however
+    /// many connections share the port.
+    wild: BTreeSet<(u32, u16, u64)>,
     next_id: u64,
     /// `ipi_gencnt`.
     pub gencnt: u64,
@@ -140,6 +144,7 @@ impl Table {
             pcbs: BTreeMap::new(),
             ports: BTreeSet::new(),
             exact: BTreeSet::new(),
+            wild: BTreeSet::new(),
             next_id: 1,
             gencnt: 0,
             last: [0; 3],
@@ -328,6 +333,8 @@ impl Table {
             self.ports.remove(&(i.vnet, i.lport, id));
             if i.connected {
                 self.exact.remove(&(i.vnet, i.lport, i.fport, id));
+            } else {
+                self.wild.remove(&(i.vnet, i.lport, id));
             }
         }
     }
@@ -378,6 +385,8 @@ impl Table {
             self.ports.insert((i.vnet, i.lport, id));
             if i.connected {
                 self.exact.insert((i.vnet, i.lport, i.fport, id));
+            } else {
+                self.wild.insert((i.vnet, i.lport, id));
             }
         }
     }
@@ -387,16 +396,20 @@ impl Table {
     fn check_indices(&self) {
         let mut ports = BTreeSet::new();
         let mut exact = BTreeSet::new();
+        let mut wild = BTreeSet::new();
         for (&id, p) in &self.pcbs {
             if p.hashed {
                 ports.insert((p.vnet.id, p.lport, id));
-                if !p.wild() {
+                if p.wild() {
+                    wild.insert((p.vnet.id, p.lport, id));
+                } else {
                     exact.insert((p.vnet.id, p.lport, p.fport, id));
                 }
             }
         }
         assert_eq!(ports, self.ports, "port index");
         assert_eq!(exact, self.exact, "exact index");
+        assert_eq!(wild, self.wild, "wildcard index");
         // The connected hash has each connected PCB, as it is now.
         if let Some(h) = self.hash {
             for (&id, p) in &self.pcbs {
@@ -415,6 +428,14 @@ impl Table {
         self.ports
             .range((vnet, lport, 0)..=(vnet, lport, u64::MAX))
             .filter_map(|&(_, _, id)| self.pcbs.get(&id).map(|p| (id, p)))
+    }
+
+    /// The hashed unconnected PCBs bound to `lport` in `vnet`, in PCB
+    /// order.
+    fn on_port_wild(&self, vnet: u32, lport: u16) -> impl Iterator<Item = &Pcb> {
+        self.wild
+            .range((vnet, lport, 0)..=(vnet, lport, u64::MAX))
+            .filter_map(|&(_, _, id)| self.pcbs.get(&id))
     }
 
     /// The hashed connected PCBs with ports `lport` and `fport` in
@@ -572,7 +593,7 @@ impl Table {
             return exact;
         }
         let (mut exact_l, mut wild, mut wild_mapped) = (None, None, None);
-        for (_, p) in self.on_port(vnet, lport) {
+        for p in self.on_port_wild(vnet, lport) {
             if p.vnet.id != vnet || !p.hashed || !p.v4() || !p.wild() || p.lport != lport {
                 continue;
             }
@@ -616,7 +637,7 @@ impl Table {
             return exact;
         }
         let (mut exact_l, mut wild) = (None, None);
-        for (_, p) in self.on_port(vnet, lport) {
+        for p in self.on_port_wild(vnet, lport) {
             if p.vnet.id != vnet || !p.hashed || !p.v6() || !p.wild() || p.lport != lport {
                 continue;
             }
