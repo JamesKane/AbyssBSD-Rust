@@ -830,12 +830,37 @@ impl Socket {
         path: Option<Path>,
         f: impl FnOnce(&mut Tcpcb, &mut View, &mut Ctx) -> (R, Fate),
     ) -> Option<R> {
+        match self.run_tcp_if(path, |_| Ok::<(), core::convert::Infallible>(()), f) {
+            Ok(r) => r,
+            Err(e) => match e {},
+        }
+    }
+
+    /// [`Socket::run_tcp`] if `gate` lets the connection through, asked
+    /// under the same hold of the socket's lock (as `tcp_input` looks at
+    /// the PCB it found once it has it locked).
+    ///
+    /// # Errors
+    ///
+    /// `gate`'s, with nothing run.
+    fn run_tcp_if<R, G>(
+        self: &Arc<Self>,
+        path: Option<Path>,
+        gate: impl FnOnce(&Tcb) -> Result<(), G>,
+        f: impl FnOnce(&mut Tcpcb, &mut View, &mut Ctx) -> (R, Fate),
+    ) -> Result<Option<R>, G> {
         let st = state::of(&self.vnet);
         let options = self.so_options();
         let secrets = st.tcp.secrets();
         let (r, done) = {
             let mut i = self.inner.lock();
-            let mut tcb = i.tcp.take()?;
+            let Some(mut tcb) = i.tcp.take() else {
+                return Ok(None);
+            };
+            if let Err(g) = gate(&tcb) {
+                i.tcp = Some(tcb);
+                return Err(g);
+            }
             let mut out = core::mem::take(&mut i.segs);
             let tx = TxInfo::of(&i, options, tcb.side.flow);
             let p = path.unwrap_or(tcb.side.path);
@@ -885,7 +910,7 @@ impl Socket {
             (r, done)
         };
         self.finish(done);
-        Some(r)
+        Ok(Some(r))
     }
 
     /// After a call: segments out, wakeups, the end, the timer.
@@ -2033,23 +2058,11 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
             closed_port(vnet, st, &inc, &t, tlen, a);
             return;
         }
-        // Whether it listens, and its path, under one hold of the lock;
-        // one the hash still showed may have ended since (`INP_FREED`).
-        let (listening, path, dropped) = so
-            .inner
-            .lock()
-            .tcp
-            .as_ref()
-            .map_or((false, Path::default(), true), |x| {
-                (x.listen.is_some(), x.side.path, x.dropped)
-            });
-        if dropped {
-            closed_port(vnet, st, &inc, &t, tlen, a);
-            return;
-        }
-        if listening {
-            listen_input(vnet, st, &so, &inc, &t, opts, data, a);
-            return;
+        // Whether it listens or has ended since the hash showed it
+        // (`INP_FREED`) is asked under the hold that runs the segment.
+        enum Not {
+            Dropped,
+            Listening,
         }
         let mut seg = Some(Segment {
             th: t,
@@ -2060,7 +2073,16 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
         });
         let mut reset = false;
         let mut recycle = false;
-        let ran = so.run_tcp(Some(path), |tp, sk, cx| match tp.state {
+        let gate = |x: &Tcb| {
+            if x.dropped {
+                Err(Not::Dropped)
+            } else if x.listen.is_some() {
+                Err(Not::Listening)
+            } else {
+                Ok(())
+            }
+        };
+        let ran = so.run_tcp_if(None, gate, |tp, sk, cx| match tp.state {
             Tstate::TimeWait => {
                 let v = seg.as_ref().map(|s| tp.twcheck(sk, cx, s));
                 if v == Some(TwVerdict::Recycle) {
@@ -2079,6 +2101,15 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
                 None => ((), Fate::Alive),
             },
         });
+        let ran = match ran {
+            Ok(r) => r,
+            Err(Not::Dropped) => None,
+            Err(Not::Listening) => {
+                let data = seg.take().map(|s| s.data).unwrap_or_default();
+                listen_input(vnet, st, &so, &inc, &t, opts, data, a);
+                return;
+            }
+        };
         if ran.is_none() || reset {
             closed_port(vnet, st, &inc, &t, tlen, a);
             return;
