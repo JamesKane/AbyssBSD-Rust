@@ -173,7 +173,50 @@ pub(crate) fn wait_until_lazy<R>(
     s: &Sleepable,
     notify: &event::Notify,
     timeout: impl FnOnce() -> u64,
+    retry: impl FnMut() -> Result<R, Errno>,
+) -> Result<R, Errno> {
+    wait(s, notify, timeout, retry, Before::Spin)
+}
+
+/// [`wait_until`] for a stream's writer at a full buffer. The reader is
+/// then the slower of the two, so the writer has nothing to gain by
+/// coming back the moment one message's room appears, and the reader
+/// much to lose: the writer takes the buffer's lock and its cache lines
+/// from it for every message. So the writer first stays away, looking at
+/// nothing the reader touches, for [`SPIN_NS`] and then for twice as
+/// long each time the buffer is still full, and what room the reader
+/// made meanwhile it fills in one go; after [`ROOM_PAUSES`] it sleeps
+/// until woken. (FreeBSD's writer sleeps in `sbwait` at once, and the
+/// time its wakeup takes does the same for it; ours spins a moment
+/// before any sleep, a wakeup under a hypervisor costing what it does.)
+pub(crate) fn wait_for_room<R>(
+    s: &Sleepable,
+    notify: &event::Notify,
+    timeout: u64,
+    retry: impl FnMut() -> Result<R, Errno>,
+) -> Result<R, Errno> {
+    wait(s, notify, || timeout, retry, Before::Pause)
+}
+
+/// How many times a writer stays away before it sleeps: 2, 4, 8 and
+/// 16 us, 30 us in all.
+const ROOM_PAUSES: u32 = 4;
+
+/// What a waiter does before it sleeps.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Before {
+    /// Spins for a change, while that has been paying.
+    Spin,
+    /// Stays away and tries again, longer each time.
+    Pause,
+}
+
+fn wait<R>(
+    s: &Sleepable,
+    notify: &event::Notify,
+    timeout: impl FnOnce() -> u64,
     mut retry: impl FnMut() -> Result<R, Errno>,
+    before: Before,
 ) -> Result<R, Errno> {
     // Once without waiting: most calls need not (`sbwait` only when the
     // buffer has no room or nothing to read).
@@ -181,11 +224,30 @@ pub(crate) fn wait_until_lazy<R>(
         Err(Errno::EAGAIN) => {}
         r => return r,
     }
+    // Only while it has been paying, as the spin below: a reader that is
+    // not running (it shares this CPU, or is stopped) makes no room.
+    if before == Before::Pause && notify.may_spin() {
+        let mut pause = SPIN_NS;
+        for _ in 0..ROOM_PAUSES {
+            let end = crate::time::counter().saturating_add(crate::time::ns_to_ticks(pause));
+            while crate::time::counter() < end {
+                core::hint::spin_loop();
+            }
+            match retry() {
+                Err(Errno::EAGAIN) => pause *= 2,
+                r => {
+                    notify.spun(true);
+                    return r;
+                }
+            }
+        }
+        notify.spun(false);
+    }
     // A moment's spin before the sleep, while that has been paying: the
     // other side, at work on another CPU, makes room or data within a
     // microsecond, where putting this thread to sleep costs that side a
     // wakeup (an interrupt to a halted CPU) and this one the way back.
-    if notify.may_spin() {
+    if before == Before::Spin && notify.may_spin() {
         let was = notify.changes();
         let end = crate::time::counter().saturating_add(crate::time::ns_to_ticks(SPIN_NS));
         let mut hit = false;
@@ -325,7 +387,7 @@ fn send_stream(
         let r = match once() {
             Err(Errno::EAGAIN) if !nonblock => {
                 let _w = sched::wait_message("sbwait");
-                wait_until(s, &so.wr, timeo, once)
+                wait_for_room(s, &so.wr, timeo, once)
             }
             r => r,
         };
