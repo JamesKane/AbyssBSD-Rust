@@ -992,6 +992,22 @@ impl<D: Driver> StartCx<'_, D> {
         thread: Option<fn(&D, usize, &Sleepable)>,
         arg: usize,
     ) -> Result<(), ResourceError> {
+        self.interrupt_on(line, filter, thread, arg, None)
+    }
+
+    /// [`StartCx::interrupt`] with the line's interrupt and its thread on
+    /// `cpu` (`bus_bind_intr` on a line just set up): for a device with a
+    /// queue per CPU, whose completion then arrives where its request was
+    /// made. A line that cannot be taken there (no vector free on that
+    /// CPU) is taken on the boot CPU as any other, unbound.
+    pub fn interrupt_on(
+        &mut self,
+        line: IrqLine,
+        filter: Option<fn(&D, usize, &IrqCx) -> Filter>,
+        thread: Option<fn(&D, usize, &Sleepable)>,
+        arg: usize,
+        cpu: Option<hal::CpuId>,
+    ) -> Result<(), ResourceError> {
         let Resource::Irq {
             domain,
             hw,
@@ -1010,14 +1026,24 @@ impl<D: Driver> StartCx<'_, D> {
             arg,
         });
         let arg = core::ptr::from_ref::<IrqShim<D>>(&shim).expose_provenance();
-        let handler = irq::Handler {
+        let handler = || irq::Handler {
             name: D::NAME,
             filter: filter.map(|_| filter_shim::<D> as irq::FilterFn),
             thread: thread.map(|_| thread_shim::<D> as irq::ThreadFn),
             arg,
         };
-        let installed = irq::install(domain, hw, trigger, polarity, hal::CpuId::BOOT, handler)
-            .map_err(ResourceError::Irq)?;
+        let on = cpu
+            .filter(|c| *c != hal::CpuId::BOOT)
+            .and_then(|c| irq::install(domain, hw, trigger, polarity, c, handler()).ok());
+        let installed = match on {
+            Some(i) => {
+                // Its thread with it (`intr_event_bind_ithread`).
+                let _ = irq::bind_ithread(i.number(), cpu);
+                i
+            }
+            None => irq::install(domain, hw, trigger, polarity, hal::CpuId::BOOT, handler())
+                .map_err(ResourceError::Irq)?,
+        };
         // Its line, as FreeBSD's interrupt resource: the line's number in
         // the platform's interrupt rman (`hw.bus.rman`).
         let n = u64::from(installed.number());

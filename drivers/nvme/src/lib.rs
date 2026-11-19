@@ -1823,8 +1823,16 @@ impl Driver for Nvme {
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
         let lines = core::mem::take(&mut *self.lines.lock());
+        // With a vector for each I/O queue, queue `q`'s is bound to CPU
+        // `q`, the CPU whose requests the queue takes (`bus_bind_intr` to
+        // `qpair->cpu` in `nvme_ctrlr_construct_io_qpairs`): a completion
+        // arrives where the thread that waits for it last ran.
+        let per_cpu = self.msix > 0 && lines.len() == self.ctrl.queues.len();
         for (v, line) in lines.into_iter().enumerate() {
-            cx.interrupt(line, Some(filter), Some(completions), v)?;
+            let cpu = (per_cpu && v < sched::online_cpus())
+                .then(|| u32::try_from(v).ok().map(hal::CpuId))
+                .flatten();
+            cx.interrupt_on(line, Some(filter), Some(completions), v, cpu)?;
         }
         let ctrl = Arc::clone(&self.ctrl);
         let t = sched::Builder::new("nvme watchdog")
