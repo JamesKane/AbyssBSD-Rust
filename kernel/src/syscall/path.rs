@@ -124,8 +124,7 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
             beneath: flags & O_RESOLVE_BENEATH != 0,
             create: flags & O_CREAT != 0,
         };
-        let ucred = crate::fs::cred();
-        let cred = &*ucred;
+        let cred = crate::fs::cred(s);
         let mut created = false;
         // What the directory must allow (`flags_to_rights`); through a
         // strict walk the file inherits its limits (`ni_filecaps`).
@@ -286,9 +285,10 @@ pub(super) fn openat(s: &Sleepable, fd: u64, path_ptr: u64, flags: u64, mode: u6
         let vf = if flags & O_PATH != 0 {
             VnodeFile::path_only(&v)
         } else {
-            VnodeFile::open(
+            // The lookup's reference becomes the file's.
+            VnodeFile::open_owned(
                 s,
-                &v,
+                v,
                 fflags & FREAD != 0,
                 fflags & FWRITE != 0,
                 flags & O_NONBLOCK != 0,
@@ -462,7 +462,7 @@ pub(super) fn chdir(s: &Sleepable, path_ptr: u64) -> SysResult {
     if !v.is_dir() {
         return Err(Errno::ENOTDIR);
     }
-    vfs::acl::access(s, &v, &crate::fs::cred(), VEXEC)?;
+    vfs::acl::access(s, &v, crate::fs::cred(s), VEXEC)?;
     let old = core::mem::replace(&mut *p.cwd.lock(), v.use_ref());
     drop(old);
     Ok(0)
@@ -477,7 +477,7 @@ fn change_root(s: &Sleepable, p: &Process, v: &Arc<Vnode>) -> SysResult {
     if !v.is_dir() {
         return Err(Errno::ENOTDIR);
     }
-    vfs::acl::access(s, v, &crate::fs::cred(), VEXEC)?;
+    vfs::acl::access(s, v, crate::fs::cred(s), VEXEC)?;
     if p.root.lock().is_some() {
         let t = p.files.lock(s);
         let open_dir = (0..t.len())
@@ -527,7 +527,7 @@ pub(super) fn fchdir(s: &Sleepable, fd: u64) -> SysResult {
     if !v.is_dir() {
         return Err(Errno::ENOTDIR);
     }
-    vfs::acl::access(s, v, &crate::fs::cred(), VEXEC)?;
+    vfs::acl::access(s, v, crate::fs::cred(s), VEXEC)?;
     let old = core::mem::replace(&mut *p.cwd.lock(), v.use_ref());
     drop(old);
     Ok(0)
@@ -620,10 +620,12 @@ pub(super) fn faccessat(s: &Sleepable, fd: u64, path_ptr: u64, amode: u64, flag:
     };
     // Without AT_EACCESS, the lookup and the check both use the real ids
     // (FreeBSD's `kern_accessat`).
+    let real;
     let cred = if flag & AT_EACCESS != 0 {
-        crate::fs::cred()
+        crate::fs::cred(s)
     } else {
-        Arc::new(crate::fs::cred().as_real())
+        real = crate::fs::cred(s).as_real();
+        &real
     };
     let v = if path.is_empty() && flag & AT_EMPTY_PATH != 0 {
         at_vnode(
@@ -637,7 +639,7 @@ pub(super) fn faccessat(s: &Sleepable, fd: u64, path_ptr: u64, amode: u64, flag:
         )?
     } else {
         let at = At::new(int(fd), crate::capsicum::rights::FSTAT);
-        match crate::fs::resolve_as(s, &p, &cred, at, &path, walk)? {
+        match crate::fs::resolve_as(s, &p, cred, at, &path, walk)? {
             Found::Vnode(v) => v,
             Found::Missing { .. } => return Err(Errno::ENOENT),
         }
@@ -655,7 +657,7 @@ pub(super) fn faccessat(s: &Sleepable, fd: u64, path_ptr: u64, amode: u64, flag:
     if amode & X_OK != 0 {
         want |= VEXEC;
     }
-    vfs::acl::access(s, &v, &cred, want)?;
+    vfs::acl::access(s, &v, cred, want)?;
     Ok(0)
 }
 

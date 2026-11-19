@@ -72,7 +72,7 @@ fn install_caps(
     caps: Option<crate::fs::fdtable::FileCaps>,
 ) -> Result<i32, Errno> {
     let p = process()?;
-    let c = crate::fs::cred();
+    let c = crate::fs::cred(s);
     let status = FREAD
         | FWRITE
         | if flags & SOCK_NONBLOCK != 0 {
@@ -143,7 +143,7 @@ pub(super) fn socketpair(
         return Err(Errno::EPROTONOSUPPORT);
     }
     let (a, b) = (Socket::new(t), Socket::new(t));
-    Socket::pair(&a, &b, &crate::fs::socket::cred())?;
+    Socket::pair(&a, &b, &crate::fs::socket::cred(s))?;
     let fa = install(s, a, flags)?;
     let fb = match install(s, b, flags) {
         Ok(fb) => fb,
@@ -263,8 +263,8 @@ pub(super) fn bindat(s: &Sleepable, fd: u64, sock_fd: u64, addr: u64, len: u64) 
             &parent.dir,
             &parent.name,
             &NewNode::Socket,
-            &super::fsops::create_as(mode & !mask),
-            &crate::fs::cred(),
+            &super::fsops::create_as(s, mode & !mask),
+            crate::fs::cred(s),
             true,
         )
         .map_err(|e| {
@@ -308,7 +308,7 @@ fn peer_by_name(s: &Sleepable, fd: i32, path: &[u8]) -> Result<Arc<Socket>, Errn
     if v.kind() != Kind::Socket {
         return Err(Errno::ENOTSOCK);
     }
-    vfs::acl::access(s, &v, &crate::fs::cred(), vfs::ops::VWRITE)?;
+    vfs::acl::access(s, &v, crate::fs::cred(s), vfs::ops::VWRITE)?;
     crate::fs::socket::bound_to(&v).ok_or(Errno::ECONNREFUSED)
 }
 
@@ -347,7 +347,7 @@ pub(super) fn connectat(s: &Sleepable, fd: u64, sock_fd: u64, addr: u64, len: u6
             return Err(e);
         }
     };
-    so.connect_to(&to, &crate::fs::socket::cred())?;
+    so.connect_to(&to, &crate::fs::socket::cred(s))?;
     Ok(0)
 }
 
@@ -371,7 +371,7 @@ pub(super) fn listen(s: &Sleepable, sock_fd: u64, backlog: u64) -> SysResult {
     }
     so_of(&f)
         .so
-        .listen(int(backlog), &crate::fs::socket::cred())?;
+        .listen(int(backlog), &crate::fs::socket::cred(s))?;
     Ok(0)
 }
 
@@ -652,7 +652,7 @@ fn internalize_in(
         }
         let data = &raw[at + CMSG_HDR..at + len];
         match ty {
-            SCM_CREDS => out.push(socket::cmsgcred(&crate::fs::socket::cred())),
+            SCM_CREDS => out.push(socket::cmsgcred(&crate::fs::socket::cred(s))),
             SCM_RIGHTS => {
                 let n = data.len() / 4;
                 if n > 0 {
@@ -856,7 +856,7 @@ fn externalize_in(
     out: &mut CtlBuf,
 ) -> Result<(), Errno> {
     let start = out.len();
-    let cred = crate::fs::cred();
+    let cred = crate::fs::cred(s);
     let fdf = FdFlags {
         cloexec: flags & MSG_CMSG_CLOEXEC != 0,
         clofork: flags & MSG_CMSG_CLOFORK != 0,
@@ -890,7 +890,7 @@ fn externalize_in(
                         // beneath itself here (`restrict_rights`).
                         Some(file) => {
                             let fdf = FdFlags {
-                                resolve_beneath: file.restricted_for(&cred),
+                                resolve_beneath: file.restricted_for(cred),
                                 ..fdf
                             };
                             // The message's reference becomes the table's

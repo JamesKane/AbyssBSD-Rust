@@ -422,6 +422,15 @@ impl Vnode {
         VnodeUse(Arc::clone(self))
     }
 
+    /// [`Self::use_ref`] that takes the caller's reference for the use
+    /// (as the reference `namei` returns becomes the open file's
+    /// `f_vnode`): no second count taken and the first given back.
+    #[must_use]
+    pub fn into_use(self: Arc<Self>) -> VnodeUse {
+        self.uses.fetch_add(1, Ordering::Relaxed);
+        VnodeUse(self)
+    }
+
     /// The file system mounted here.
     #[must_use]
     pub fn mounted(&self) -> Option<Arc<Mount>> {

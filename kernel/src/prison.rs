@@ -586,7 +586,7 @@ pub(crate) fn of(c: &Ucred) -> Arc<Prison> {
 
 /// The calling process's prison.
 pub(crate) fn current() -> Arc<Prison> {
-    of(&crate::fs::cred())
+    of(&crate::fs::cred_arc())
 }
 
 /// The prison with id `id`, alive or dying.

@@ -118,7 +118,7 @@ pub(super) fn set(s: &Sleepable, by: By, target: u64, t: u64, aclp: u64) -> SysR
     let (raw, t) = ty(t)?;
     let v = file(s, by, target, &R::ACL_SET)?;
     let a = copy_in(aclp, raw)?;
-    acl::set(s, &v, &crate::fs::cred(), t, Some(&a))?;
+    acl::set(s, &v, crate::fs::cred(s), t, Some(&a))?;
     Ok(0)
 }
 
@@ -126,7 +126,7 @@ pub(super) fn set(s: &Sleepable, by: By, target: u64, t: u64, aclp: u64) -> SysR
 pub(super) fn delete(s: &Sleepable, by: By, target: u64, t: u64) -> SysResult {
     let (_, t) = ty(t)?;
     let v = file(s, by, target, &R::ACL_DELETE)?;
-    acl::set(s, &v, &crate::fs::cred(), t, None)?;
+    acl::set(s, &v, crate::fs::cred(s), t, None)?;
     Ok(0)
 }
 

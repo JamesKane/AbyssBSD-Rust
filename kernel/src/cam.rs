@@ -18,7 +18,8 @@ impl cam::Host for Host {
     }
 
     fn securelevel_gt(&self, level: i32) -> Result<(), Errno> {
-        crate::fs::cred().securelevel_gt(level)
+        // No `Sleepable` reaches CAM's host calls: the thread's own, counted.
+        crate::fs::cred_arc().securelevel_gt(level)
     }
 }
 

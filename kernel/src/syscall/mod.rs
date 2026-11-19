@@ -259,7 +259,10 @@ pub(crate) fn entry(frame: &mut TrapFrame) {
     let (ktraced, debugged) = crate::uthread::UserThread::with_current(|t| {
         t.dbg.entered(frame);
         t.set_syscall_code(code);
-        t.update_cred();
+        // SAFETY: the thread's own, straight from user mode: this entry
+        // has borrowed no credential yet (`syscallenter`'s
+        // `thread_cow_update`).
+        unsafe { t.cred_entered() };
         let p = t.process();
         (p.ktrace.flags() != 0, p.is_traced())
     })
@@ -726,6 +729,11 @@ pub(crate) fn remote(s: &Sleepable, code: u32, args: &[u64]) -> abi::ptrace::Ptr
         Some(f) if !f.is_null() => unsafe { *f },
         _ => TrapFrame::default(),
     };
+    // The call runs with the process's credential as it is now
+    // (`ptrace_syscallreq`'s `thread_cow_update`), which an earlier call
+    // of the debugger's may have changed. This is inside a kernel entry,
+    // so the old one stays allocated for whoever up the stack borrowed it.
+    crate::uthread::UserThread::cred_renewed();
     match run(s, &mut frame, &call) {
         Ok(Some(v)) => {
             ret.sr_retval[0] = v;
@@ -848,7 +856,13 @@ pub(crate) fn user_trap(report: &arch::TrapReport, frame: &mut TrapFrame) {
     hal::irq::enable();
     // SAFETY: as for a system call: the thread came from user mode.
     let s = unsafe { Sleepable::assume() };
-    crate::uthread::UserThread::with_current(|t| t.dbg.entered(frame));
+    crate::uthread::UserThread::with_current(|t| {
+        t.dbg.entered(frame);
+        // SAFETY: the thread's own, straight from user mode: this entry
+        // has borrowed no credential yet. amd64's `trap` does this for a
+        // trap from user mode (`trap_update_thread`).
+        unsafe { t.cred_entered() };
+    });
     crate::signal::trap(&s, report, frame);
     let _ = hal::irq::disable();
 }

@@ -160,7 +160,7 @@ fn serve(
     let (kind, writer) = crate::sysctl::read(s, |t| t.access(oid)).unzip();
     let kind = kind.unwrap_or(0);
     let writer = writer.flatten();
-    let cred = crate::fs::cred();
+    let cred = crate::fs::cred(s);
     if new.is_some() && (kind & ctlflag::WR == 0 || writer.is_none()) {
         firstuse::report(
             Kind::Sysctl,

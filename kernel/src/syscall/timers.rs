@@ -501,7 +501,7 @@ static SECURE_TIME: sync::SpinLock<(u64, u64)> = sync::SpinLock::new((0, u64::MA
 /// second at a time, once a second (`EPERM` for a second step).
 fn set_time(unix_ns: u64) -> Result<(), Errno> {
     let mut to = unix_ns;
-    if crate::fs::cred().securelevel_gt(1).is_err() {
+    if crate::fs::cred_arc().securelevel_gt(1).is_err() {
         const SEC: u64 = 1_000_000_000;
         let now = super::clock_ns(clock::REALTIME)?;
         let mut st = SECURE_TIME.lock();

@@ -93,7 +93,7 @@ pub(super) fn set(
     if len > 0 {
         uaccess::copy_in(&mut value, data).map_err(|_| Errno::EFAULT)?;
     }
-    vfs::ops::set_extattr(s, &v, &crate::fs::cred(), ns(namespace), &name, &value)?;
+    vfs::ops::set_extattr(s, &v, crate::fs::cred(s), ns(namespace), &name, &value)?;
     Ok(len as u64)
 }
 
@@ -111,7 +111,7 @@ pub(super) fn get(
 ) -> SysResult {
     let name = name(attrname)?;
     let v = file(s, by, target, &R::EXTATTR_GET)?;
-    let value = vfs::ops::get_extattr(s, &v, &crate::fs::cred(), ns(namespace), &name)?;
+    let value = vfs::ops::get_extattr(s, &v, crate::fs::cred(s), ns(namespace), &name)?;
     out(&value, data, nbytes)
 }
 
@@ -125,7 +125,7 @@ pub(super) fn delete(
 ) -> SysResult {
     let name = name(attrname)?;
     let v = file(s, by, target, &R::EXTATTR_DELETE)?;
-    vfs::ops::delete_extattr(s, &v, &crate::fs::cred(), ns(namespace), &name)?;
+    vfs::ops::delete_extattr(s, &v, crate::fs::cred(s), ns(namespace), &name)?;
     Ok(0)
 }
 
@@ -140,7 +140,7 @@ pub(super) fn list(
     nbytes: u64,
 ) -> SysResult {
     let v = file(s, by, target, &R::EXTATTR_LIST)?;
-    let names = vfs::ops::list_extattr(s, &v, &crate::fs::cred(), ns(namespace))?;
+    let names = vfs::ops::list_extattr(s, &v, crate::fs::cred(s), ns(namespace))?;
     out(&names, data, nbytes)
 }
 

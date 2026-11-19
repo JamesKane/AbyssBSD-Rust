@@ -5376,7 +5376,7 @@ mod user_memory {
                         follow: true,
                         beneath: false,
                         create: false,
-                        cred: &crate::fs::cred(),
+                        cred: crate::fs::cred(&s),
                     },
                     b"/rescue/echo",
                 )
@@ -5515,7 +5515,7 @@ mod user_memory {
                 follow: true,
                 beneath: false,
                 create: false,
-                cred: &crate::fs::cred(),
+                cred: crate::fs::cred(&s),
             };
             if crate::fs::namespace().lookup(&s, &l, FSX).is_err() {
                 kprintln!("fsx: not on the memory disk; skipped");
@@ -5532,7 +5532,7 @@ mod user_memory {
             assert_eq!(p.wait(&s), crate::proc::Exit::Code(0));
             for f in [&b"/tmp/fsx.data"[..], b"/tmp/fsx.data.fsxgood", b"/tmp/fsx.data.fsxlog"] {
                 let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
-                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, &crate::fs::cred(), false));
+                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(&s), false));
             }
         }
     }
@@ -5546,7 +5546,7 @@ mod user_memory {
             follow: true,
             beneath: false,
             create: false,
-            cred: &crate::fs::cred(),
+            cred: crate::fs::cred(s),
         };
         let v = crate::fs::namespace().lookup(s, &l, path).ok()?;
         let size = usize::try_from(v.size(s).ok()?).ok()?;
@@ -5670,7 +5670,7 @@ mod user_memory {
                 kprintln!("ufs: {disk}: the listing and {lines} digests match FreeBSD's");
                 for f in [&b"/tmp/ufs.ls"[..], b"/tmp/ufs.md5"] {
                     let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false).and_then(
-                        |d| vfs::ops::remove(&s, &d.dir, &d.name, &crate::fs::cred(), false),
+                        |d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(&s), false),
                     );
                 }
             }
@@ -5962,7 +5962,7 @@ mod user_memory {
         );
         for f in [&b"/tmp/fsck.out"[..], b"/tmp/fsx.out"] {
             let _ = crate::fs::parent_of(s, &p, crate::fs::At::Cwd, f, false)
-                .and_then(|d| vfs::ops::remove(s, &d.dir, &d.name, &crate::fs::cred(), false));
+                .and_then(|d| vfs::ops::remove(s, &d.dir, &d.name, crate::fs::cred(s), false));
         }
     }
 
@@ -6032,7 +6032,7 @@ mod user_memory {
             kprintln!("msdosfs: read-write on {dev} is fsck clean");
             for f in [&b"/tmp/fsck.out"[..], b"/tmp/fsx.out"] {
                 let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
-                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, &crate::fs::cred(), false));
+                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(&s), false));
             }
         }
     }
@@ -6111,7 +6111,7 @@ mod user_memory {
             kprintln!("msdosfs: the listing and {lines} digests match FreeBSD's");
             for f in [&b"/tmp/fat.ls"[..], b"/tmp/fat.md5"] {
                 let _ = crate::fs::parent_of(&s, &p, crate::fs::At::Cwd, f, false)
-                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, &crate::fs::cred(), false));
+                    .and_then(|d| vfs::ops::remove(&s, &d.dir, &d.name, crate::fs::cred(&s), false));
             }
         }
     }
@@ -6282,7 +6282,7 @@ mod user_memory {
                     follow: true,
                     beneath: false,
                     create: false,
-                    cred: &crate::fs::cred(),
+                    cred: crate::fs::cred(&s),
                 };
                 let v = crate::fs::namespace().lookup(&s, &l, b"/mnt/disk.img").unwrap();
                 let mut sector = [0u8; 512];

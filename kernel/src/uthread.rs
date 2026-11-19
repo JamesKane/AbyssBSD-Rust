@@ -24,13 +24,15 @@
 
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use abi::kinfo::MAXCOMLEN;
 use abi::thr::{RTP_PRIO_FIFO_BIT, RTP_PRIO_IDLE, RTP_PRIO_NORMAL, RTP_PRIO_REALTIME, Rtprio};
-use sched::WaitQueue;
-use sync::{PreemptLock, SpinLock};
+use sched::{Sleepable, WaitQueue};
+use sync::SpinLock;
 
 use crate::cred::Ucred;
 use crate::proc::Process;
@@ -182,15 +184,9 @@ pub(crate) struct UserThread {
     /// The child of a traced `vfork` it still waits for
     /// (`td_rfppwait_p`).
     pub(crate) vfork_child: SpinLock<Option<Arc<Process>>>,
-    /// Its credential (`td_ucred`): its own copy of the process's, of the
-    /// generation paired with it, renewed at system call entry. Taking a
-    /// reference to it touches no line another thread's does, where the
-    /// process's credential, shared across `fork`, would move between
-    /// CPUs on every count.
-    cred: PreemptLock<(u64, Arc<Ucred>)>,
-    /// The generation in `cred`, for the check at every system call
-    /// without the lock (only the thread itself changes either).
-    cred_seen: AtomicU64,
+    /// Its credential (`td_ucred`): its own copy of the process's, read
+    /// with no lock and no count by the thread itself ([`OwnCred`]).
+    cred: OwnCred,
 }
 
 impl UserThread {
@@ -229,8 +225,7 @@ impl UserThread {
                 code: AtomicU32::new(0),
                 dbg: crate::ptrace::ThreadDebug::default(),
                 vfork_child: SpinLock::new(None),
-                cred: PreemptLock::new(own_cred(process)),
-                cred_seen: AtomicU64::new(u64::MAX),
+                cred: OwnCred::new(process),
             }
         });
         tid.map(|_| t)
@@ -253,37 +248,106 @@ impl UserThread {
         &self.process
     }
 
-    /// Its credential (`td_ucred`).
-    pub(crate) fn cred(&self) -> Arc<Ucred> {
-        Arc::clone(&self.cred.lock().1)
+    /// The calling thread's credential (`td_ucred`), borrowed for no
+    /// longer than the caller's `Sleepable`: `None` on a kernel thread.
+    /// No lock is taken and no count changes.
+    ///
+    /// The borrow cannot outlive the kernel entry it is taken in. A
+    /// `Sleepable` is not `Send`, `Sync`, `Clone` or `Copy`, and one only
+    /// ever lives in a stack frame (no structure and no static holds one:
+    /// every `Sleepable::assume()` is a local, or a function's result bound
+    /// to one), so `'s` ends before the frame holding the token does. A
+    /// user thread's kernel stack holds nothing from one kernel entry to
+    /// the next: a system call, trap or interrupt from user mode starts on
+    /// an empty stack and returns through every frame it made, and the
+    /// frames a new thread makes before it first enters user mode
+    /// (`proc`'s `enter`) and those under an exit (`sched::exit`) are
+    /// never returned to. So the token, and with it the borrow, is of the
+    /// current kernel entry, within which the credential stays allocated
+    /// ([`OwnCred`]).
+    #[inline]
+    pub(crate) fn current_cred<'s>(_s: &'s Sleepable) -> Option<&'s Ucred> {
+        // SAFETY: as in `with_current`: the owner, if any, is this
+        // thread's `UserThread`, which it holds until it calls
+        // `sched::set_owner(None)` on its way out (`Process::thread_exit`,
+        // `Process::exit_current`), after which it runs nothing that holds
+        // a credential; `'s` ends before that (above).
+        let t: &'s Self = unsafe { sched::owner_at().cast::<Self>().as_ref() }?;
+        // SAFETY: `t` is the calling thread's own, and `_s` says this is
+        // thread context, not an interrupt handler. The credential read
+        // here is freed only at the thread's next kernel entry
+        // (`OwnCred::entered`) or when the thread is gone, both after `'s`
+        // (above).
+        Some(unsafe { &*t.cred.current() })
     }
 
-    /// Its credential's jail (`td_ucred->cr_prison`; `None` on the host),
-    /// from the thread's own copy: no lock another thread takes.
-    pub(crate) fn jail(&self) -> Option<Arc<dyn security::Jail>> {
-        self.cred.lock().1.jail.clone()
+    /// The calling thread's credential, to keep beyond the call: one count
+    /// taken on the thread's own copy, with no lock. `None` on a kernel
+    /// thread.
+    #[inline]
+    pub(crate) fn current_cred_arc() -> Option<Arc<Ucred>> {
+        Self::with_current(|t| {
+            // SAFETY: `with_current` gives the calling thread's own. The
+            // pointer is used at once, to take a count: only this thread
+            // replaces the credential, and it does not in between. The
+            // pointer came from `Arc::into_raw`, whose count the state
+            // keeps; the new `Arc` owns the one added here.
+            unsafe {
+                let c = t.cred.current();
+                Arc::increment_strong_count(c);
+                Arc::from_raw(c)
+            }
+        })
+    }
+
+    /// The calling thread's credential's jail (`td_ucred->cr_prison`):
+    /// `None` on the host and on a kernel thread. No lock is taken, and
+    /// the credential is not counted.
+    #[inline]
+    pub(crate) fn current_jail() -> Option<Arc<dyn security::Jail>> {
+        Self::with_current(|t| {
+            // SAFETY: `with_current` gives the calling thread's own. The
+            // borrow ends with this statement, and only this thread
+            // replaces or frees the credential, which it does not in
+            // between.
+            unsafe { (*t.cred.current()).jail.clone() }
+        })
+        .flatten()
     }
 
     /// Takes the process's credential if it changed since this thread last
-    /// did (`thread_cow_update`, at `syscallenter`). Only the thread
-    /// itself calls this.
+    /// did (`thread_cow_update`), at a kernel entry: a system call
+    /// (`syscallenter`), a trap from user mode (amd64's
+    /// `trap_update_thread`), or the work before a return to user mode
+    /// (`ast_prep`). The credentials the thread had before are freed.
+    ///
+    /// # Safety
+    ///
+    /// `self` is the calling thread's own (as `with_current` gives it),
+    /// in thread context, and the thread has just come from user mode, or
+    /// is on its way back with every frame of the entry's handler
+    /// returned: nothing holds a borrow [`Self::current_cred`] gave. The
+    /// callers are `syscall::entry`, `syscall::user_trap`,
+    /// `mm::space::page_fault` (for a fault from user mode) and `signal`'s
+    /// `user_return_work`.
     #[inline]
-    pub(crate) fn update_cred(&self) {
-        if self.cred_seen.load(Ordering::Relaxed) != self.process.cred_gen() {
-            self.take_cred();
-        }
+    pub(crate) unsafe fn cred_entered(&self) {
+        // SAFETY: the caller's contract is `OwnCred::entered`'s.
+        unsafe { self.cred.entered(&self.process) }
     }
 
-    /// [`Self::update_cred`] when the credential changed.
-    #[cold]
-    fn take_cred(&self) {
-        if self.cred.lock().0 != self.process.cred_gen() {
-            let new = own_cred(&self.process);
-            let old = core::mem::replace(&mut *self.cred.lock(), new);
-            drop(old);
-        }
-        let seen = self.cred.lock().0;
-        self.cred_seen.store(seen, Ordering::Relaxed);
+    /// Takes the process's credential if it changed, inside a kernel
+    /// entry: where FreeBSD renews `td_ucred` away from the boundary
+    /// (`ptrace_syscallreq`). The credential the thread had stays
+    /// allocated until its next kernel entry, since a caller further up
+    /// the stack may hold a borrow of it.
+    pub(crate) fn cred_renewed() {
+        Self::with_current(|t| {
+            // SAFETY: `with_current` gives the calling thread's own, in
+            // thread context (only a stopped thread serving its debugger
+            // calls this).
+            unsafe { t.cred.renew(&t.process) }
+        });
     }
 
     pub(crate) fn umtx(&self) -> &Arc<crate::umtx::Entry> {
@@ -428,7 +492,159 @@ impl UserThread {
     }
 }
 
-/// A thread's own copy of `p`'s credential, with its generation.
+/// A thread's own copy of its process's credential (`td_ucred`), which
+/// only the thread itself reads or replaces once it runs, so with no lock
+/// and no count; its own copy, so that taking a reference to it touches
+/// no line another thread's does, where the process's, shared across
+/// `fork`, would move between CPUs on every count.
+///
+/// FreeBSD's rule holds here: the credential is replaced only by
+/// `thread_cow_update`, which a thread calls on itself when it enters the
+/// kernel, so code inside one kernel entry uses `td_ucred` without
+/// counting. `proc_set_cred` leaves it alone: a thread that changes its
+/// process's credential finishes the call on the old one. Another thread
+/// that wants this one's credential reads the process's
+/// (`Process::cred`, as FreeBSD reads `p_ucred` under the process lock),
+/// never this.
+struct OwnCred(UnsafeCell<CredState>);
+
+struct CredState {
+    /// The process's generation (`p_cowgen`) `cred` was copied at
+    /// (`td_cowgen`).
+    generation: u64,
+    /// The credential, as `Arc::into_raw` gave it: this holds one count.
+    cred: *const Ucred,
+    /// Credentials replaced inside a kernel entry (`OwnCred::renew`), which
+    /// a borrow may still be of; freed at the next entry.
+    retired: Vec<Arc<Ucred>>,
+}
+
+// SAFETY: the state is the thread's own. Until the thread first runs,
+// only its creator touches it (`OwnCred::new`); from then on only the
+// thread itself (every method but `new` requires it), and whoever drops
+// the `UserThread` last has it exclusively. The credentials it owns are
+// `Arc<Ucred>`, which may be sent and shared (asserted below), so they
+// may be created by one thread and dropped by another.
+unsafe impl Send for OwnCred {}
+// SAFETY: as above: no two threads use the state at once.
+unsafe impl Sync for OwnCred {}
+
+const _: () = {
+    const fn sendable<T: Send + Sync>() {}
+    sendable::<Arc<Ucred>>();
+};
+
+impl OwnCred {
+    /// A new thread's copy of `p`'s credential (`thread_cow_get_proc`).
+    fn new(p: &Process) -> Self {
+        let (generation, cred) = own_cred(p);
+        Self(UnsafeCell::new(CredState {
+            generation,
+            cred: Arc::into_raw(cred),
+            retired: Vec::new(),
+        }))
+    }
+
+    /// The credential. It stays allocated until the thread's next
+    /// [`Self::entered`], or until the thread is dropped.
+    ///
+    /// # Safety
+    ///
+    /// The caller is the thread this belongs to. In an interrupt handler,
+    /// the result may only be used before the handler returns.
+    #[inline]
+    unsafe fn current(&self) -> *const Ucred {
+        // SAFETY: only the thread itself (the caller's contract) writes
+        // the field, in `renew`, with interrupts masked and through a
+        // reference that ends before they are unmasked: this read, by
+        // that thread or by an interrupt handler above it, overlaps no
+        // write and no exclusive reference.
+        unsafe { (*self.0.get()).cred }
+    }
+
+    /// [`UserThread::cred_entered`]: the credential renewed if the
+    /// process's changed, and the ones retired during the last entry
+    /// freed.
+    ///
+    /// # Safety
+    ///
+    /// The caller is the thread this belongs to, in thread context, and
+    /// nothing holds a pointer or borrow [`Self::current`] gave.
+    #[inline]
+    unsafe fn entered(&self, p: &Process) {
+        // SAFETY: the thread's own state, read by the thread; nothing
+        // else writes it.
+        let (generation, idle) = unsafe {
+            let st = &*self.0.get();
+            (st.generation, st.retired.is_empty())
+        };
+        if generation != p.cred_gen() || !idle {
+            // SAFETY: the caller's contract, passed on.
+            unsafe { self.entered_changed(p) }
+        }
+    }
+
+    /// [`Self::entered`] with something to do.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::entered`].
+    #[cold]
+    unsafe fn entered_changed(&self, p: &Process) {
+        // SAFETY: the caller is the owning thread.
+        unsafe { self.renew(p) };
+        // SAFETY: the owning thread, in thread context: nothing else
+        // reads `retired`, and no reference to the state is live.
+        let retired = unsafe { core::mem::take(&mut (*self.0.get()).retired) };
+        // No borrow is live (the caller's contract), so nothing is of
+        // these.
+        drop(retired);
+    }
+
+    /// Copies the process's credential if its generation is not this
+    /// one's, keeping the old one allocated (retired).
+    ///
+    /// # Safety
+    ///
+    /// The caller is the thread this belongs to, in thread context.
+    unsafe fn renew(&self, p: &Process) {
+        // SAFETY: the thread's own state, read by the thread.
+        if unsafe { (*self.0.get()).generation } == p.cred_gen() {
+            return;
+        }
+        // Made, and room for the old one found, before interrupts are
+        // masked: allocation may not happen with them masked.
+        let (generation, new) = own_cred(p);
+        // SAFETY: the owning thread, in thread context; the reference
+        // ends with the statement.
+        unsafe { (*self.0.get()).retired.reserve(1) };
+        let saved = hal::irq::disable();
+        // SAFETY: the owning thread, with interrupts masked: no interrupt
+        // handler on this thread reads the state meanwhile
+        // (`Self::current`), no other thread ever does, and the exclusive
+        // reference ends before interrupts are restored. The old pointer
+        // is the count `Arc::into_raw` gave, taken back exactly once. The
+        // push does not allocate (reserved above).
+        unsafe {
+            let st = &mut *self.0.get();
+            let old = core::mem::replace(&mut st.cred, Arc::into_raw(new));
+            st.generation = generation;
+            st.retired.push(Arc::from_raw(old));
+        }
+        hal::irq::restore(saved);
+    }
+}
+
+impl Drop for OwnCred {
+    fn drop(&mut self) {
+        // SAFETY: the pointer holds the count `Arc::into_raw` gave, and
+        // nothing uses it after this.
+        drop(unsafe { Arc::from_raw(self.0.get_mut().cred) });
+    }
+}
+
+/// A copy of `p`'s credential for one thread, with the generation it is
+/// no newer than.
 fn own_cred(p: &Process) -> (u64, Arc<Ucred>) {
     let (g, c) = p.cred_with_gen();
     (g, Arc::new(Ucred::clone(&c)))

@@ -338,7 +338,7 @@ fn open_backing(
     let p = crate::proc::Process::current().ok_or(Errno::EINVAL)?;
     let v = crate::fs::lookup(s, &p, crate::fs::At::Cwd, &path, crate::fs::Walk::FOLLOW)?;
     let write = options & MD_READONLY == 0;
-    let cred = crate::fs::cred();
+    let cred = crate::fs::cred(s);
     let mut want = vfs::ops::VREAD;
     if write {
         if v.is_dir() {
@@ -349,7 +349,7 @@ fn open_backing(
         }
         want |= vfs::ops::VWRITE;
     }
-    vfs::acl::access(s, &v, &cred, want)?;
+    vfs::acl::access(s, &v, cred, want)?;
     if v.kind() != vfs::Kind::Regular {
         return Err(Errno::EINVAL);
     }

@@ -49,8 +49,8 @@ fn umask(p: &Process) -> u16 {
     p.umask.load(Ordering::Relaxed)
 }
 
-pub(super) fn create_as(mode: u16) -> Create {
-    let c = crate::fs::cred();
+pub(super) fn create_as(s: &Sleepable, mode: u16) -> Create {
+    let c = crate::fs::cred(s);
     Create {
         mode,
         uid: c.uid,
@@ -80,8 +80,8 @@ fn make(s: &Sleepable, fd: u64, path_ptr: u64, node: &NewNode, mode: u16) -> Sys
         &parent.dir,
         &parent.name,
         node,
-        &create_as(mode),
-        &crate::fs::cred(),
+        &create_as(s, mode),
+        crate::fs::cred(s),
         true,
     )?;
     Ok(0)
@@ -179,7 +179,7 @@ pub(super) fn funlinkat(s: &Sleepable, dfd: u64, path_ptr: u64, fd: u64, flag: u
         s,
         &parent.dir,
         &parent.name,
-        &crate::fs::cred(),
+        crate::fs::cred(s),
         flag & AT_REMOVEDIR != 0,
     )?;
     Ok(0)
@@ -249,7 +249,7 @@ pub(super) fn renameat2(
         &f.name,
         &t.dir,
         &t.name,
-        &crate::fs::cred(),
+        crate::fs::cred(s),
         flags & abi::fcntl::AT_RENAME_NOREPLACE != 0,
     )?;
     Ok(0)
@@ -297,7 +297,7 @@ pub(super) fn linkat(
         &to,
         false,
     )?;
-    vfs::ops::link(s, &target, &t.dir, &t.name, &crate::fs::cred())?;
+    vfs::ops::link(s, &target, &t.dir, &t.name, crate::fs::cred(s))?;
     Ok(0)
 }
 
@@ -341,7 +341,7 @@ fn fd_vnode(s: &Sleepable, fd: u64, need: &abi::capsicum::CapRights) -> Result<A
 }
 
 fn setattr(s: &Sleepable, v: &Vnode, a: &SetAttr) -> SysResult {
-    vfs::ops::setattr(s, v, a, &crate::fs::cred(), false)?;
+    vfs::ops::setattr(s, v, a, crate::fs::cred(s), false)?;
     Ok(0)
 }
 
@@ -374,7 +374,7 @@ pub(super) fn fchmod(s: &Sleepable, fd: u64, mode: u64) -> SysResult {
     let f = super::io::current_file(s, fd, &crate::capsicum::rights::FCHMOD)?;
     if let crate::fs::file::FileKind::Shm(m) = f.kind() {
         #[allow(clippy::cast_possible_truncation, reason = "a mode_t")]
-        m.chmod(s, &crate::fs::cred(), mode as u16)?;
+        m.chmod(s, crate::fs::cred(s), mode as u16)?;
         return Ok(0);
     }
     // A socket's mode is what `bind` gives its node (`uipc_chmod`).
@@ -431,7 +431,7 @@ pub(super) fn chown(s: &Sleepable, path: u64, uid: u64, gid: u64, nofollow: bool
 pub(super) fn fchown(s: &Sleepable, fd: u64, uid: u64, gid: u64) -> SysResult {
     let f = super::io::current_file(s, fd, &crate::capsicum::rights::FCHOWN)?;
     if let crate::fs::file::FileKind::Shm(m) = f.kind() {
-        m.chown(s, &crate::fs::cred(), id(uid), id(gid))?;
+        m.chown(s, crate::fs::cred(s), id(uid), id(gid))?;
         return Ok(0);
     }
     setattr(
@@ -488,7 +488,7 @@ fn set_times(s: &Sleepable, v: &Vnode, times: u64) -> SysResult {
     if a.atime.is_none() && a.mtime.is_none() {
         return Ok(0);
     }
-    vfs::ops::setattr(s, v, &a, &crate::fs::cred(), now)?;
+    vfs::ops::setattr(s, v, &a, crate::fs::cred(s), now)?;
     Ok(0)
 }
 
@@ -545,7 +545,7 @@ pub(super) fn utimes(s: &Sleepable, path: u64, tv: u64, nofollow: bool) -> SysRe
     let flag = if nofollow { AT_SYMLINK_NOFOLLOW } else { 0 };
     let v = target(s, &p, cwd(), path, flag, &crate::capsicum::rights::NO)?;
     let (a, now) = timevals(tv)?;
-    vfs::ops::setattr(s, &v, &a, &crate::fs::cred(), now)?;
+    vfs::ops::setattr(s, &v, &a, crate::fs::cred(s), now)?;
     Ok(0)
 }
 
@@ -553,7 +553,7 @@ pub(super) fn utimes(s: &Sleepable, path: u64, tv: u64, nofollow: bool) -> SysRe
 pub(super) fn futimes(s: &Sleepable, fd: u64, tv: u64) -> SysResult {
     let v = fd_vnode(s, fd, &crate::capsicum::rights::FUTIMES)?;
     let (a, now) = timevals(tv)?;
-    vfs::ops::setattr(s, &v, &a, &crate::fs::cred(), now)?;
+    vfs::ops::setattr(s, &v, &a, crate::fs::cred(s), now)?;
     Ok(0)
 }
 
@@ -562,7 +562,7 @@ pub(super) fn futimesat(s: &Sleepable, fd: u64, path: u64, tv: u64) -> SysResult
     let p = process()?;
     let v = target(s, &p, fd, path, 0, &crate::capsicum::rights::FUTIMESAT)?;
     let (a, now) = timevals(tv)?;
-    vfs::ops::setattr(s, &v, &a, &crate::fs::cred(), now)?;
+    vfs::ops::setattr(s, &v, &a, crate::fs::cred(s), now)?;
     Ok(0)
 }
 
@@ -600,7 +600,7 @@ pub(super) fn revoke(s: &Sleepable, path: u64) -> SysResult {
         return Err(Errno::EINVAL);
     }
     let a = v.attr(s)?;
-    if crate::fs::cred().uid != a.uid {
+    if crate::fs::cred(s).uid != a.uid {
         crate::fs::priv_check(crate::cred::Priv::VfsAdmin)?;
     }
     crate::fs::devfs::revoke(s, &v)?;

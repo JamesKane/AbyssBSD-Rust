@@ -430,13 +430,13 @@ impl CharDevice for DevPci {
     /// `pci_open`: writing needs securelevel 0 or below.
     fn instance_open(
         &self,
-        _s: &Sleepable,
+        s: &Sleepable,
         _nonblock: bool,
         _read: bool,
         write: bool,
     ) -> Result<Option<Arc<dyn CharDevice>>, Errno> {
         if write {
-            crate::fs::cred().securelevel_gt(0)?;
+            crate::fs::cred(s).securelevel_gt(0)?;
         }
         Ok(None)
     }

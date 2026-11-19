@@ -578,7 +578,7 @@ pub(crate) fn check_exec(s: &Sleepable, file: &vfs::Vnode) -> Result<(), Errno> 
     {
         return Err(Errno::EACCES);
     }
-    vfs::acl::access(s, file, &crate::fs::cred(), vfs::ops::VEXEC)
+    vfs::acl::access(s, file, crate::fs::cred(s), vfs::ops::VEXEC)
 }
 
 /// [`check_exec`], then `file`'s memory object.

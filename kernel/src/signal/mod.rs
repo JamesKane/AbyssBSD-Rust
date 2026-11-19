@@ -1303,7 +1303,15 @@ fn user_return_work(frame: &mut TrapFrame) -> bool {
     // way out.
     let had_ast = t.ast_pending();
     if had_ast {
-        UserThread::with_current(|u| u.dbg.entered(frame));
+        UserThread::with_current(|u| {
+            u.dbg.entered(frame);
+            // SAFETY: the thread's own, on its way back to user mode:
+            // this runs under the trap or system call exit (or a new
+            // thread's start, which has borrowed none), after the entry's
+            // handler returned, so no borrow of the credential is live
+            // (`ast_prep`'s `thread_cow_update`).
+            unsafe { u.cred_entered() };
+        });
     }
     while t.ast_pending() {
         let bits = t.take_ast();
@@ -1356,7 +1364,7 @@ fn user_return_work(frame: &mut TrapFrame) -> bool {
 /// `EPERM` without `PRIV_IO`, or above securelevel 0.
 pub(crate) fn io_access(on: bool) -> Result<(), Errno> {
     if on {
-        let cred = crate::fs::cred();
+        let cred = crate::fs::cred_arc();
         cred.priv_check(crate::cred::Priv::Io)?;
         cred.securelevel_gt(0)?;
     }

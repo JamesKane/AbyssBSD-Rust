@@ -115,13 +115,24 @@ impl VnodeFile {
         write: bool,
         nonblock: bool,
     ) -> Result<Self, Errno> {
+        Self::open_owned(s, Arc::clone(v), read, write, nonblock)
+    }
+
+    /// [`Self::open`] taking the caller's reference to `v` for the file's.
+    pub(crate) fn open_owned(
+        s: &Sleepable,
+        v: Arc<Vnode>,
+        read: bool,
+        write: bool,
+        nonblock: bool,
+    ) -> Result<Self, Errno> {
         let device = match v.kind() {
             Kind::CharDevice => {
                 let mut d = v.device(s)?;
                 // At securelevel 2, no disk opens for writing
                 // (`g_dev_open`).
                 if write && d.ops.dtype() == vfs::D_DISK {
-                    super::cred().securelevel_ge(2)?;
+                    super::cred(s).securelevel_ge(2)?;
                 }
                 if let Some(ops) = d.ops.instance_open(s, nonblock, read, write)? {
                     d.ops = ops;
@@ -136,9 +147,9 @@ impl VnodeFile {
         }
         // `vop_open_post`.
         v.knote(abi::event::NOTE_OPEN);
-        vfs::inotify::event(v, abi::inotify::IN_OPEN);
+        vfs::inotify::event(&v, abi::inotify::IN_OPEN);
         Ok(Self {
-            vnode: v.use_ref(),
+            vnode: v.into_use(),
             device,
             writer,
             write: true,
@@ -285,9 +296,9 @@ impl File {
             return Err(Errno::ENFILE);
         }
         // As `falloc` takes the opener's credential (`td_ucred`): the
-        // thread's own, not the process's behind its lock.
-        let jail =
-            crate::uthread::UserThread::with_current(crate::uthread::UserThread::jail).flatten();
+        // thread's own, read with no lock, and only its jail counted
+        // (none on the host).
+        let jail = crate::uthread::UserThread::current_jail();
         Ok(Arc::new(Self {
             kind,
             flags: AtomicU32::new(flags),

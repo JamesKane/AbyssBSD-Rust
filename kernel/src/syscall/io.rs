@@ -762,7 +762,7 @@ pub(super) fn posix_openpt(s: &Sleepable, flags: u64) -> SysResult {
     if flags & !(O_RDWR | O_NOCTTY | O_CLOEXEC) != 0 {
         return Err(Errno::EINVAL);
     }
-    let master = Arc::new(crate::tty::pts::alloc()?);
+    let master = Arc::new(crate::tty::pts::alloc(s)?);
     let fflags = (flags & O_ACCMODE) + 1;
     let file = File::new(FileKind::Pts(master), fflags & (FREAD | FWRITE))?;
     install(

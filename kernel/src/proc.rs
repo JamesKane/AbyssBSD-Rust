@@ -1131,17 +1131,15 @@ impl Process {
         self.cred_gen.load(Ordering::Acquire)
     }
 
-    /// Replaces its credential (`proc_set_cred`). The calling thread, if
-    /// one of its own, takes the new one at once; its others at their next
-    /// system call (`thread_cow_update`).
+    /// Replaces its credential (`proc_set_cred`). No thread's own copy
+    /// changes here, the calling thread's included: each takes the new one
+    /// when it next enters the kernel (`thread_cow_update`), so the caller
+    /// finishes its system call on the credential it began with, as in
+    /// FreeBSD. Code after this in the same call that wants the new one
+    /// reads the process's ([`Self::cred`]).
     fn set_cred(&self, c: Ucred) {
         *self.cred.lock() = Arc::new(c);
         self.cred_gen.fetch_add(1, Ordering::Release);
-        UserThread::with_current(|t| {
-            if core::ptr::eq(Arc::as_ptr(t.process()), self) {
-                t.update_cred();
-            }
-        });
     }
 
     /// Its credential's jail (`None` on the host), without taking the
@@ -1623,7 +1621,7 @@ impl Process {
                 follow: true,
                 beneath: false,
                 create: false,
-                cred: &crate::fs::cred(),
+                cred: crate::fs::cred(s),
             },
             path,
         )?;
@@ -1637,7 +1635,7 @@ impl Process {
                     follow: true,
                     beneath: false,
                     create: false,
-                    cred: &crate::fs::cred(),
+                    cred: crate::fs::cred(s),
                 },
                 p,
             )

@@ -1420,6 +1420,14 @@ pub(crate) fn page_fault(f: &arch::PageFault) -> bool {
         // outside interrupt handlers and critical sections), which may
         // sleep as the code it interrupted could have.
         let s = unsafe { Sleepable::assume() };
+        if f.user {
+            // SAFETY: the thread's own, straight from user mode: this
+            // entry has borrowed no credential yet. amd64's `trap` does
+            // this for every trap from user mode, page faults among them
+            // (`trap_update_thread`). A fault in the kernel's copy
+            // routines is inside an entry and leaves the credential be.
+            crate::uthread::UserThread::with_current(|t| unsafe { t.cred_entered() });
+        }
         // A traced process's faults are recorded (`trap_pfault`): the
         // access as `VM_PROT_*`, the result as `KERN_*`.
         let traced = crate::ktrace::point(abi::ktrace::KTR_FAULT)

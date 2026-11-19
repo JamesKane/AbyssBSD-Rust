@@ -131,7 +131,7 @@ pub(crate) struct Master {
 
 /// `posix_openpt` (`pts_alloc`): a new terminal, owned by the caller's
 /// real user, and its master; `EAGAIN` past the caller's `RLIMIT_NPTS`.
-pub(crate) fn alloc() -> Result<Master, abi::errno::Errno> {
+pub(crate) fn alloc(s: &Sleepable) -> Result<Master, abi::errno::Errno> {
     let charge =
         crate::uidinfo::Charge::take(crate::uidinfo::Kind::Ptys, abi::errno::Errno::EAGAIN)?;
     let unit = alloc_unit();
@@ -144,7 +144,7 @@ pub(crate) fn alloc() -> Result<Master, abi::errno::Errno> {
         inwait: WaitQueue::new(),
         notify: event::Notify::new(),
     });
-    let uid = crate::fs::cred().ruid;
+    let uid = crate::fs::cred(s).ruid;
     let tty = super::create(
         &alloc::format!("pts/{unit}"),
         Arc::new(PtsDriver(Arc::clone(&sc))),

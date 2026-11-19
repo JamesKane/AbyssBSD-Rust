@@ -75,12 +75,26 @@ pub(crate) fn priv_check(p: crate::cred::Priv) -> Result<(), Errno> {
     crate::proc::Process::with_current(|me| me.priv_check(p)).unwrap_or(Ok(()))
 }
 
-/// The credential file operations run with: the current process's, or
-/// the superuser's for kernel threads.
-pub(crate) fn cred() -> Arc<Ucred> {
-    // The thread's own (`td_ucred`), whose count no other CPU touches.
-    crate::uthread::UserThread::with_current(crate::uthread::UserThread::cred)
-        .unwrap_or_else(crate::cred::root_shared)
+/// The credential file operations run with: the calling thread's own
+/// (`td_ucred`), or the superuser's for kernel threads. Borrowed for no
+/// longer than the caller's `Sleepable`, which bounds it to the kernel
+/// entry it is taken in (`UserThread::current_cred`); no lock is taken
+/// and no count changes. A thread that changes its process's credential
+/// still has the old one here until its next kernel entry, as FreeBSD's
+/// `td_ucred` after `proc_set_cred`.
+#[inline]
+pub(crate) fn cred(s: &Sleepable) -> &Ucred {
+    match crate::uthread::UserThread::current_cred(s) {
+        Some(c) => c,
+        None => crate::cred::root(),
+    }
+}
+
+/// [`cred`] to keep beyond the call (`crhold(td->td_ucred)`): one count
+/// on the thread's own copy, with no lock.
+#[inline]
+pub(crate) fn cred_arc() -> Arc<Ucred> {
+    crate::uthread::UserThread::current_cred_arc().unwrap_or_else(crate::cred::root_shared)
 }
 
 fn root_info(from: &[u8]) -> MountInfo {
@@ -669,6 +683,25 @@ pub(crate) fn resolve_caps(
     Ok((found, start.caps, start.beneath))
 }
 
+/// The credential a lookup for process `p` runs with: the calling
+/// thread's own when `p` is its process (`namei`'s `td_ucred`), with no
+/// lock and no count; `p`'s otherwise (a kernel thread looking a path up
+/// for a process), kept in `other`.
+#[inline]
+fn cred_of<'a>(
+    s: &'a Sleepable,
+    p: &crate::proc::Process,
+    other: &'a mut Option<Arc<Ucred>>,
+) -> &'a Ucred {
+    let mine =
+        crate::uthread::UserThread::with_current(|t| core::ptr::eq(Arc::as_ptr(t.process()), p));
+    if mine == Some(true) {
+        cred(s)
+    } else {
+        other.insert(p.cred())
+    }
+}
+
 /// The vnode at `path` for process `p`.
 pub(crate) fn lookup(
     s: &Sleepable,
@@ -682,7 +715,8 @@ pub(crate) fn lookup(
         beneath: walk.beneath || start.strict,
         ..walk
     };
-    namespace().lookup(s, &walk.lookup(&start, &p.cred()), path)
+    let mut other = None;
+    namespace().lookup(s, &walk.lookup(&start, cred_of(s, p, &mut other)), path)
 }
 
 /// The directory `path`'s last component is in, and that component, for
@@ -695,6 +729,7 @@ pub(crate) fn parent_of(
     beneath: bool,
 ) -> Result<Parent, Errno> {
     let start = start_of(s, p, at, path)?;
+    let mut other = None;
     namespace().parent_of(
         s,
         &Lookup {
@@ -703,7 +738,7 @@ pub(crate) fn parent_of(
             follow: false,
             beneath: beneath || start.strict,
             create: false,
-            cred: &p.cred(),
+            cred: cred_of(s, p, &mut other),
         },
         path,
     )
@@ -724,7 +759,8 @@ pub(crate) fn found_under(
     path: &[u8],
 ) -> Result<Option<DirName>, Errno> {
     let start = start_of(s, p, at, path)?;
-    let cred = p.cred();
+    let mut other = None;
+    let cred = cred_of(s, p, &mut other);
     let mut dir = Arc::clone(&start.dir);
     let mut path = path.to_vec();
     for _ in 0..=abi::fcntl::MAXSYMLINKS {
@@ -736,7 +772,7 @@ pub(crate) fn found_under(
                 follow: false,
                 beneath: start.strict,
                 create: false,
-                cred: &cred,
+                cred,
             },
             &path,
         )?;
@@ -854,7 +890,7 @@ pub(crate) fn check_std(s: &Sleepable, p: &crate::proc::Process) -> Result<(), E
             follow: true,
             beneath: false,
             create: false,
-            cred: &cred(),
+            cred: cred(s),
         },
         b"/dev/null",
     )?;

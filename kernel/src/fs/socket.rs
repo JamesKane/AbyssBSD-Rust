@@ -288,11 +288,11 @@ fn wait<R>(
 }
 
 /// The caller's credential as messages carry it.
-pub(crate) fn cred() -> Cred {
+pub(crate) fn cred(s: &Sleepable) -> Cred {
     let Some(p) = crate::proc::Process::current() else {
         return Cred::default();
     };
-    let c = crate::fs::cred();
+    let c = crate::fs::cred(s);
     let mut groups = Vec::with_capacity(c.groups().len() + 1);
     groups.push(c.egid());
     groups.extend(c.groups().iter().copied().filter(|&g| g != c.egid()));
@@ -324,7 +324,7 @@ pub(crate) fn send(
     }
     let nonblock = nonblock || flags & (MSG_DONTWAIT | MSG_NBIO) != 0;
     // Built only if the receiver wants it (`LOCAL_CREDS`).
-    let cred: &dyn Fn() -> Cred = &cred;
+    let cred: &dyn Fn() -> Cred = &|| cred(s);
     let r = if so.ty == Type::Dgram {
         let len = uio.resid();
         if len as u64 > socket::space::DGRAM_MAX.load(Ordering::Relaxed) {
