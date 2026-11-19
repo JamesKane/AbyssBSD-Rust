@@ -591,9 +591,13 @@ impl Socket {
             let (mut ga, gb) = lock2(a, b);
             ga.peer = Some(Arc::clone(b));
             ga.state = (ga.state & !state::ISDISCONNECTED) | state::ISCONNECTED;
+            // What registered on either before now is found by the first
+            // send and receive.
+            (ga.rcv.rd_wait, ga.rcv.wr_wait) = (true, true);
             if let Some(mut gb) = gb {
                 gb.peer = Some(Arc::clone(a));
                 gb.state = (gb.state & !state::ISDISCONNECTED) | state::ISCONNECTED;
+                (gb.rcv.rd_wait, gb.rcv.wr_wait) = (true, true);
             }
         }
         a.wake();
@@ -887,6 +891,8 @@ impl Socket {
         }
         let space = p.rcv.stream_space();
         if space < p.rcv.lowat || space < clen {
+            // The caller waits, or says so (`sbwait`'s `SB_WAIT`).
+            p.rcv.wr_wait = true;
             return Err(Errno::EAGAIN);
         }
         let space = space - clen;
@@ -902,8 +908,15 @@ impl Socket {
         let sent = now.len();
         p.rcv.push_data(now);
         let left = p.rcv.stream_space();
+        // `sorwakeup_locked`: only if something waits for it.
+        let wake = p.rcv.rd_wait;
+        if wake && !peer.rd.is_armed() {
+            p.rcv.rd_wait = false;
+        }
         drop(p);
-        peer.rd.notify(0);
+        if wake {
+            peer.rd.notify(0);
+        }
         Ok((sent, left))
     }
 
@@ -970,6 +983,8 @@ impl Socket {
                 if i.rcv.cant {
                     return Ok(out);
                 }
+                // The caller waits, or says so (`sbwait`'s `SB_WAIT`).
+                i.rcv.rd_wait = true;
                 return Err(Errno::EAGAIN);
             }
             let rcv = &mut i.rcv;
@@ -1056,12 +1071,22 @@ impl Socket {
                 // A peek shows the control too, copied.
                 out.control = Vec::new();
             }
-            i.peer.clone()
+            // `uipc_wakeup_writer`: the peer is touched only if something
+            // of its waits for room.
+            if !peek && i.rcv.wr_wait {
+                let p = i.peer.clone();
+                if p.as_ref().is_some_and(|p| !p.wr.is_armed()) {
+                    i.rcv.wr_wait = false;
+                }
+                p
+            } else {
+                None
+            }
         };
         if !want_control {
             out.control.clear();
         }
-        if !peek && let Some(p) = peer {
+        if let Some(p) = peer {
             p.wr.notify(0);
         }
         Ok(out)

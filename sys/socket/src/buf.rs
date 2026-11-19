@@ -42,6 +42,17 @@ pub(crate) struct Sockbuf {
     pub(crate) mbcnt: u32,
     /// `SBS_CANTRCVMORE` (receive buffer), `SBS_CANTSENDMORE` (send).
     pub(crate) cant: bool,
+    /// A stream receive buffer: something may wait for its data (a
+    /// reader, a poller, a knote: `SB_WAIT`, `SB_SEL`, `SB_KNOTE`), and
+    /// something of the peer's may wait for its room (`SB_WAIT` set by
+    /// the writer, `UXST_PEER_SEL`). Both are under the buffer's lock,
+    /// as FreeBSD's are, so a send or a receive that nobody waits for
+    /// touches no notifier, and a receive not its peer. Set by whoever
+    /// is about to wait, after it registers; cleared by a wakeup that
+    /// finds nothing registered. A new buffer's are set: what registered
+    /// before the sockets were connected is then found.
+    pub(crate) rd_wait: bool,
+    pub(crate) wr_wait: bool,
     /// A stream receive buffer's records.
     pub(crate) items: VecDeque<Item>,
 }
@@ -65,6 +76,8 @@ impl Sockbuf {
             ctl: 0,
             mbcnt: 0,
             cant: false,
+            rd_wait: true,
+            wr_wait: true,
             items: VecDeque::new(),
         }
     }

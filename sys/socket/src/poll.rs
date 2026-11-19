@@ -30,7 +30,11 @@ impl Socket {
                 self.wr.record(w);
             }
         }
-        let i = self.inner.lock();
+        let mut i = self.inner.lock();
+        // `SB_SEL`: a send wakes the poller just registered.
+        if w.is_some() && events & (POLLIN | POLLRDNORM | POLLRDHUP) != 0 {
+            i.rcv.rd_wait = true;
+        }
         if let Some(l) = &i.listen {
             return if events & (POLLIN | POLLRDNORM) == 0 {
                 0
@@ -78,7 +82,11 @@ impl Socket {
         if events & (POLLOUT | POLLWRNORM) != 0
             && let Some(p) = peer
         {
-            let p = p.inner.lock();
+            let mut p = p.inner.lock();
+            // `UXST_PEER_SEL`: the peer's receives wake the poller.
+            if w.is_some() {
+                p.rcv.wr_wait = true;
+            }
             if p.rcv.stream_space() >= p.rcv.lowat {
                 revents |= events & (POLLOUT | POLLWRNORM);
             }
@@ -222,6 +230,17 @@ impl SockFilter {
 impl Filter for SockFilter {
     fn attach(&self, kn: &Arc<Knote>) -> Result<(), Errno> {
         self.notify().add(kn);
+        // `SB_KNOTE`, and `UXST_PEER_SEL` on the peer's buffer
+        // (`uipc_kqfilter_stream_or_seqpacket`): the sends, or the peer's
+        // receives, tell the knote from now on.
+        if self.which == Which::Read {
+            self.so.inner.lock().rcv.rd_wait = true;
+        } else {
+            let peer = self.so.inner.lock().peer.clone();
+            if let Some(p) = peer {
+                p.inner.lock().rcv.wr_wait = true;
+            }
+        }
         Ok(())
     }
 
