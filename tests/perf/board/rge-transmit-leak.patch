@@ -1,0 +1,28 @@
+# The one change to the board's FreeBSD baseline (docs/BUILD-AND-TEST.md,
+# "Performance on the Orange Pi 6 Plus"), 2026-11-21: rge_transmit_if kept
+# the mbuf when it refused it, though if_transmit consumes it either way,
+# so every frame dropped at a full software queue leaked its cluster
+# (udp.tx.bulk leaked ~270k a run and reached kern.ipc.nmbclusters inside
+# one core class, after which the receive ring starved). Only if_rge.ko is
+# rebuilt; it replaces the module in /boot/kernel.nodebug (the original is
+# /boot/if_rge.ko.nodebug-orig). Apply with `patch -p0` in the source tree.
+--- sys/dev/rge/if_rge.c
++++ sys/dev/rge/if_rge.c
+@@ -1050,13 +1050,16 @@
+ 	if (sc->sc_stopped == true) {
+ 		sc->sc_drv_stats.transmit_stopped_cnt++;
+ 		RGE_UNLOCK(sc);
++		m_freem(m);
+ 		return (ENETDOWN);	/* TODO: better error? */
+ 	}
+ 
+ 	/* XXX again should be a per-TXQ thing */
+ 	ret = mbufq_enqueue(&sc->sc_txq, m);
+ 	if (ret != 0) {
+ 		sc->sc_drv_stats.transmit_full_cnt++;
+ 		RGE_UNLOCK(sc);
++		if_inc_counter(ifp, IFCOUNTER_OQDROPS, 1);
++		m_freem(m);
+ 		return (ret);
+ 	}
+ 	RGE_UNLOCK(sc);

@@ -421,7 +421,9 @@ The userland suites (`p4`, `p5`, `p6`) compare AbyssBSD's release kernel with th
 (`tests/perf/board/`, the branch's `f12c9f4ee6` with `std.nodebug`), installed on the Crucial disk
 as `/boot/kernel.nodebug` and booted one boot at a time with `nextboot -k`, the default kernel
 staying as it is. The board's default kernel has `WITNESS` and `INVARIANTS`, which a perf baseline
-may not (PERFORMANCE.md §2).
+may not (PERFORMANCE.md §2). One fix is applied to it, `tests/perf/board/rge-transmit-leak.patch`: FreeBSD's
+`rge_transmit_if` leaked each frame it refused at a full queue, so `p7`'s UDP sending exhausted the
+mbuf clusters within one core class; only `if_rge.ko` is rebuilt and replaced.
 
 `tests/perf/board/perf-run.sh SUITE...`, on the board as root, runs each suite once per core class
 (`big`: the A720s at 2.6 and 2.5 GHz, CPUs 0, 1, 10, 11; `mid`: those at 2.3 and 2.2 GHz, 6-9;
