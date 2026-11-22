@@ -254,11 +254,24 @@ fn arch_start(cpu: CpuId, hw: u64, stack_top: u64) -> bool {
     r == 0
 }
 
-/// The pending cross-call: a TLB range to flush (empty for a ping).
-static CALL_BUSY: AtomicBool = AtomicBool::new(false);
-static CALL_VA: AtomicU64 = AtomicU64::new(0);
-static CALL_LEN: AtomicU64 = AtomicU64::new(0);
-static CALL_PENDING: AtomicU32 = AtomicU32::new(0);
+/// The pending cross-call: a TLB range to flush (empty for a ping), and
+/// how many targets have yet to answer. One cache line: a target gets it
+/// with one transfer (`on_call_ipi` asks for it writable at once, since it
+/// decrements `pending`), and the initiator's spin reads it back.
+#[repr(align(64))]
+struct Call {
+    busy: AtomicBool,
+    va: AtomicU64,
+    len: AtomicU64,
+    pending: AtomicU32,
+}
+
+static CALL: Call = Call {
+    busy: AtomicBool::new(false),
+    va: AtomicU64::new(0),
+    len: AtomicU64::new(0),
+    pending: AtomicU32::new(0),
+};
 
 /// Whether a cross-call to every other CPU may use one broadcast IPI: true
 /// once every CPU the firmware listed (and we could take) is online.
@@ -324,18 +337,19 @@ pub(crate) fn barrier_cpus(mask: u64) {
 /// `[va, va + len)`, and waits for all to acknowledge.
 fn cross_call(va: VirtAddr, len: u64, targets: Targets) {
     // With interrupts masked this CPU cannot answer another initiator's
-    // call while it waits for CALL_BUSY: both stop forever.
+    // call while it waits for CALL.busy: both stop forever.
     if !arch::cpu::interrupts_enabled() {
         sched::lock::report(format_args!("smp: cross-call with interrupts masked"));
     }
-    while CALL_BUSY
+    while CALL
+        .busy
         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
         core::hint::spin_loop();
     }
-    CALL_VA.store(va.get(), Ordering::Relaxed);
-    CALL_LEN.store(len, Ordering::Relaxed);
+    CALL.va.store(va.get(), Ordering::Relaxed);
+    CALL.len.store(len, Ordering::Relaxed);
     let me = hal::cpu_id();
     let selected = |c: CpuId| match targets {
         Targets::AllOthers => c != me,
@@ -347,9 +361,13 @@ fn cross_call(va: VirtAddr, len: u64, targets: Targets) {
             .filter_map(|i| u32::try_from(i).ok().map(CpuId))
             .filter(|&c| selected(c) && ONLINE[c.index()].load(Ordering::Acquire))
     };
-    let n = u32::try_from(online().count()).unwrap_or(u32::MAX);
+    // A ping or a one-CPU barrier is the common case: no walk of the CPUs.
+    let n = match targets {
+        Targets::One(t) => u32::from(ONLINE[t.index()].load(Ordering::Acquire)),
+        _ => u32::try_from(online().count()).unwrap_or(u32::MAX),
+    };
     // Release: the range is visible to targets before they see the count.
-    CALL_PENDING.store(n, Ordering::Release);
+    CALL.pending.store(n, Ordering::Release);
     #[cfg(target_arch = "x86_64")]
     if matches!(targets, Targets::AllOthers) && BROADCAST.load(Ordering::Acquire) {
         crate::intc::send_call_all_but_self();
@@ -357,11 +375,14 @@ fn cross_call(va: VirtAddr, len: u64, targets: Targets) {
         online().for_each(crate::intc::send_call);
     }
     #[cfg(target_arch = "aarch64")]
-    online().for_each(crate::intc::send_call);
-    while CALL_PENDING.load(Ordering::Acquire) != 0 {
+    match targets {
+        Targets::One(t) if n == 1 => crate::intc::send_call(t),
+        _ => online().for_each(crate::intc::send_call),
+    }
+    while CALL.pending.load(Ordering::Acquire) != 0 {
         core::hint::spin_loop();
     }
-    CALL_BUSY.store(false, Ordering::Release);
+    CALL.busy.store(false, Ordering::Release);
 }
 
 /// Set by a panic: every other CPU stops at its next cross-call
@@ -403,12 +424,15 @@ pub(crate) fn stop_others(wait_ns: u64) -> (u32, u32) {
 /// The cross-call IPI arrived: flush the range and acknowledge (or stop,
 /// for a panic).
 pub(crate) fn on_call_ipi() {
+    // Ours to write below (`pending`), so ask for it that way before the
+    // loads: the line comes once, not shared and then upgraded.
+    arch::cpu::prefetch_write(&raw const CALL);
     if STOPPING.load(Ordering::Acquire) {
         STOPPED.fetch_add(1, Ordering::AcqRel);
         arch::cpu::halt_forever();
     }
-    let va = VirtAddr::new(CALL_VA.load(Ordering::Acquire));
-    let len = CALL_LEN.load(Ordering::Acquire);
+    let va = VirtAddr::new(CALL.va.load(Ordering::Acquire));
+    let len = CALL.len.load(Ordering::Acquire);
     if len > 64 * 4096 {
         // A user range needs only the user entries gone.
         #[cfg(target_arch = "x86_64")]
@@ -424,7 +448,7 @@ pub(crate) fn on_call_ipi() {
     }
     // A full barrier for `membarrier`'s callers, before the answer.
     core::sync::atomic::fence(Ordering::SeqCst);
-    CALL_PENDING.fetch_sub(1, Ordering::AcqRel);
+    CALL.pending.fetch_sub(1, Ordering::AcqRel);
 }
 
 /// How PSCI calls reach firmware: the FADT's `PSCI_USE_HVC`, else SMC.

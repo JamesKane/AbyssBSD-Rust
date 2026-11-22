@@ -43,6 +43,15 @@ pub fn interrupts_enabled() -> bool {
     read_sysreg!("daif") & (1 << 7) == 0
 }
 
+/// Asks the cache for the line at `p` in a state this CPU can write
+/// (`PRFM PSTL1KEEP`), ahead of a read that a write follows: one
+/// coherence transaction instead of two. A hint; changes nothing.
+#[inline(always)]
+pub fn prefetch_write<T>(p: *const T) {
+    // SAFETY: a prefetch never faults and has no architectural effect.
+    unsafe { asm!("prfm pstl1keep, [{}]", in(reg) p, options(nostack, preserves_flags)) };
+}
+
 /// Stops this CPU for good.
 pub fn halt_forever() -> ! {
     disable_interrupts();

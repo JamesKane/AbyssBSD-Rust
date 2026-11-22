@@ -175,6 +175,16 @@ pub fn wait_for_interrupt() {
     unsafe { asm!("sti", "hlt", "cli", options(nostack)) };
 }
 
+/// Asks the cache for the line at `p` in a state this CPU can write
+/// (`PREFETCHW`), ahead of a read that a write follows: one coherence
+/// transaction instead of two. A hint; changes nothing (a no-op where the
+/// CPU lacks it).
+#[inline(always)]
+pub fn prefetch_write<T>(p: *const T) {
+    // SAFETY: a prefetch never faults and has no architectural effect.
+    unsafe { asm!("prefetchw [{}]", in(reg) p, options(nostack, preserves_flags)) };
+}
+
 /// Stops this CPU for good.
 pub fn halt_forever() -> ! {
     loop {

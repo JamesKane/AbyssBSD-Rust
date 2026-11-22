@@ -513,8 +513,10 @@ fn suite_p2(s: &Sleepable) {
     callout_latency(s);
     wakeup_latency(s);
 
-    throughput(s, "ipi.rtt", 1, |_| {
-        crate::smp::ping(cpu(2));
+    // The target's CPU is looked up once: `cpu` parses the boot option.
+    let target = cpu(2);
+    throughput(s, "ipi.rtt", 1, move |_| {
+        crate::smp::ping(target);
         1
     });
     tlb_shootdown(s);
@@ -1049,8 +1051,9 @@ fn suite_diag(s: &Sleepable) {
             1
         });
     }
-    throughput(s, "diag.ping_idle", 1, |_| {
-        crate::smp::ping(cpu(2));
+    let target = cpu(2);
+    throughput(s, "diag.ping_idle", 1, move |_| {
+        crate::smp::ping(target);
         1
     });
     // The same with CPU 2 running a spinning thread: no halt to wake from.
@@ -1066,8 +1069,8 @@ fn suite_diag(s: &Sleepable) {
         })
         .expect("bench: spinner");
     time::sleep_ns(s, 10_000_000);
-    throughput(s, "diag.ping_busy", 1, |_| {
-        crate::smp::ping(cpu(2));
+    throughput(s, "diag.ping_busy", 1, move |_| {
+        crate::smp::ping(target);
         1
     });
     SPIN.store(false, Ordering::Relaxed);
