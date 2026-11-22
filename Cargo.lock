@@ -324,6 +324,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "drm-fourcc"
+version = "0.0.0"
+
+[[package]]
 name = "efi"
 version = "0.0.0"
 dependencies = [
