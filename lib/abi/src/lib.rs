@@ -24,6 +24,7 @@ pub mod consio;
 pub mod devfs;
 pub mod devstat;
 pub mod dirent;
+pub mod drm;
 pub mod efi;
 pub mod errno;
 pub mod evdev;
