@@ -210,3 +210,73 @@ fn tx_wraps_and_fills() {
     assert_eq!(m.get(0, tx::CMDSTS), tx::OWN | tx::EOF | 20);
     assert_eq!(t.push(&m, &B, &[], 0), Err(TxFull::BadShape));
 }
+
+/// The checksums the stack leaves to the controller become extended
+/// status bits; the IPv4 header's always comes with a transport one.
+#[test]
+fn tx_csum_ext() {
+    use mbuf::csum;
+    assert_eq!(tx::csum_ext(0), 0);
+    assert_eq!(tx::csum_ext(csum::IP), tx::IPCSUM);
+    assert_eq!(
+        tx::csum_ext(csum::IP | csum::IP_TCP),
+        tx::IPCSUM | tx::TCPCSUM
+    );
+    assert_eq!(tx::csum_ext(csum::IP_UDP), tx::IPCSUM | tx::UDPCSUM);
+    // Neither IPv6's nor a finished checksum's flags ask for anything.
+    assert_eq!(tx::csum_ext(csum::IP_CHECKED | csum::IP_VALID), 0);
+}
+
+/// The next frame starts where the last one ended.
+#[test]
+fn tx_next() {
+    let m = Mem::new();
+    let mut t = TxRing::new();
+    t.init(&m);
+    assert_eq!(t.next(), 0);
+    t.push(&m, &B, &[(0xa, 10), (0xb, 20)], 0).unwrap();
+    assert_eq!(t.next(), 2);
+}
+
+/// A UDP datagram of 4 bytes (iperf3's hello), its checksums left to the
+/// device: both come out right, as a receiver checks them.
+#[test]
+fn short_csum_udp() {
+    use mbuf::csum;
+    let sum = |b: &[u8]| -> u32 {
+        let mut s: u32 = b
+            .chunks(2)
+            .map(|w| u32::from(u16::from_be_bytes([w[0], *w.get(1).unwrap_or(&0)])))
+            .sum();
+        while s > 0xffff {
+            s = (s & 0xffff) + (s >> 16);
+        }
+        s
+    };
+    let (src, dst) = ([192, 168, 0, 19], [192, 168, 0, 14]);
+    let mut f = vec![0u8; 46];
+    f[12..14].copy_from_slice(&[0x08, 0x00]);
+    f[14..24].copy_from_slice(&[0x45, 0, 0, 32, 0x12, 0x34, 0x40, 0, 64, 17]);
+    f[26..30].copy_from_slice(&src);
+    f[30..34].copy_from_slice(&dst);
+    f[34..42].copy_from_slice(&[0x9c, 0x40, 0x14, 0x51, 0, 12, 0, 0]);
+    f[42..46].copy_from_slice(&[0x39, 0x38, 0x37, 0x36]);
+    // The stack's seed: the pseudo-header's folded sum.
+    let mut pseudo = Vec::new();
+    pseudo.extend_from_slice(&src);
+    pseudo.extend_from_slice(&dst);
+    pseudo.extend_from_slice(&[0, 17, 0, 12]);
+    let seed = sum(&pseudo) as u16;
+    f[40..42].copy_from_slice(&seed.to_be_bytes());
+    ring::short_csum(&mut f, csum::IP | csum::IP_UDP, 6);
+    assert_eq!(sum(&f[14..34]), 0xffff, "IPv4 header checksum");
+    let mut check = pseudo.clone();
+    check.extend_from_slice(&f[34..46]);
+    assert_eq!(sum(&check), 0xffff, "UDP checksum");
+    // Not IPv4: untouched.
+    let mut arp = vec![0u8; 42];
+    arp[12..14].copy_from_slice(&[0x08, 0x06]);
+    let before = arp.clone();
+    ring::short_csum(&mut arp, csum::IP | csum::IP_UDP, 6);
+    assert_eq!(arp, before);
+}

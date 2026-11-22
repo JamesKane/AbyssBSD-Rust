@@ -1940,6 +1940,7 @@ pub(crate) fn create(vnet: &Arc<Vnet>, unit: i32, ctx: &Ctx) -> String {
         link_state: LINK_STATE_UNKNOWN,
         capabilities: ifcap::VLAN_HWTAGGING,
         capenable: ifcap::VLAN_HWTAGGING,
+        hwassist: 0,
         // `nd6_ifattach`: no automatic link-local address on a bridge.
         nd6_flags: nd6_iff::PERFORMNUD | nd6_iff::IFDISABLED,
         nd: crate::ifnet::NdInfo::DEFAULT,

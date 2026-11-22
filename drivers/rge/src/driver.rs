@@ -23,9 +23,15 @@
 //!   reinitialization; senders take only the transmit ring's lock, and
 //!   send nothing unless the chip runs ([`State`]), which a reset changes
 //!   under that lock first.
-//! - A frame to send is copied into one buffer, padded to 60 bytes (the
-//!   controller pads nothing), and mapped; its segments become its
-//!   descriptors.
+//! - A frame to send is copied, padded to 60 bytes (the controller pads
+//!   nothing), into the slot of the descriptor it takes: each transmit
+//!   descriptor has one, mapped at attach as the receive slots are, so
+//!   sending maps nothing. A longer one (jumbo) gets a buffer of its own,
+//!   mapped for it, whose segments become its descriptors.
+//! - The controller computes the IPv4, TCP, and UDP checksums the stack
+//!   leaves to it (`if_hwassist`, `RGE_CSUM_FEATURES`), while transmit
+//!   checksums are on, except in a frame shorter than 60 bytes, where
+//!   its sums are wrong: those the driver computes before padding.
 //!
 //! Received frames are copied out of their slots, so DMA memory holds
 //! only device payload.
@@ -61,7 +67,7 @@ use crate::hw::{Chip, HwError, MacType, Regs};
 use crate::regs as r;
 use crate::ring::{self, Assembled, Assembler, DESCS, RxRing, SLOT, TxRing, WORDS};
 
-/// Receive slots per DMA chunk (32 KiB each).
+/// Slots per DMA chunk (32 KiB each), on either ring.
 const SLOTS_PER_CHUNK: usize = 16;
 /// Frames taken per pass of the interrupt thread.
 const RX_BUDGET: usize = 256;
@@ -179,7 +185,10 @@ impl Rx {
 struct Tx {
     ring: TxRing,
     descs: Descs,
-    /// Each in-flight frame's buffer, by its first descriptor.
+    /// Each descriptor's slot, mapped for the binding's life: a frame
+    /// that fits is copied into its first descriptor's.
+    slots: Vec<DmaCoherent<u8>>,
+    /// Each in-flight longer frame's buffer, by its first descriptor.
     sent: Vec<Option<Mapped<Vec<u8>, dir::ToDevice>>>,
     /// `sc_watchdog`.
     wd: TxWatchdog,
@@ -549,14 +558,80 @@ impl Shared {
         if len > MAX_FRAME {
             return Err(NoBufs);
         }
-        let mut buf = Vec::with_capacity(len.max(ring::MIN_FRAME));
+        let mcast = m.hdr.flags & (flags::BCAST | flags::MCAST) != 0;
+        self.port.tap.mtap(&m, net::bpf::Way::Out);
+        if len <= SLOT {
+            self.send_slotted(&m)?;
+        } else {
+            self.send_mapped(m)?;
+        }
+        let st = &self.port.stats;
+        st.opackets.add(1);
+        st.obytes.add(len as u64);
+        if mcast {
+            st.omcasts.add(1);
+        }
+        Ok(())
+    }
+
+    /// Sends `m`, no longer than a slot, from the slot of the descriptor
+    /// it takes: one copy, and no mapping.
+    fn send_slotted(&self, m: &Packet) -> Result<(), NoBufs> {
+        let len = m.len();
+        // The controller does not pad short frames.
+        let padded = len.max(ring::MIN_FRAME);
+        let mut tx = self.tx.lock();
+        // Nothing reaches a chip that is not running (`sc_stopped`).
+        if self.state() != State::Running {
+            return Err(NoBufs);
+        }
+        if tx.ring.free() == 0 {
+            tx.reap(&self.port);
+            if tx.ring.free() == 0 {
+                return Err(NoBufs);
+            }
+        }
+        // The next descriptor is free, and so is its slot.
+        let d = tx.ring.next();
+        let chunk = &tx.slots[d / SLOTS_PER_CHUNK];
+        let mut at = (d % SLOTS_PER_CHUNK) * SLOT;
+        let mut ext = ring::tx::csum_ext(m.hdr.csum_flags);
+        if len < ring::MIN_FRAME {
+            // The controller's checksums are wrong below 60 bytes: done
+            // here, then padded.
+            let mut b = [0u8; ring::MIN_FRAME];
+            m.data.copy_out(0, &mut b[..len]);
+            if ext != 0 {
+                ring::short_csum(&mut b[..len], m.hdr.csum_flags, m.hdr.csum_data);
+                ext = 0;
+            }
+            chunk.copy_from_slice(at, &b);
+        } else {
+            for seg in m.data.segments() {
+                chunk.copy_from_slice(at, seg);
+                at += seg.len();
+            }
+        }
+        let seg = (
+            slot_bus(&tx.slots, d),
+            u32::try_from(padded).unwrap_or(u32::MAX),
+        );
+        let Tx { ring, descs, .. } = &mut *tx;
+        ring.push(descs, &ring::Hal, &[seg], ext)
+            .map_err(|_| NoBufs)?;
+        tx.wd.queued();
+        self.chip.kick_tx();
+        Ok(())
+    }
+
+    /// Sends a longer `m` (a jumbo frame) from a buffer of its own,
+    /// mapped for it.
+    fn send_mapped(&self, m: Packet) -> Result<(), NoBufs> {
+        let ext = ring::tx::csum_ext(m.hdr.csum_flags);
+        let mut buf = Vec::with_capacity(m.len());
         for seg in m.data.segments() {
             buf.extend_from_slice(seg);
         }
-        // The controller does not pad short frames.
-        buf.resize(len.max(ring::MIN_FRAME), 0);
-        let mcast = m.hdr.flags & (flags::BCAST | flags::MCAST) != 0;
-        self.port.tap.mtap(&m, net::bpf::Way::Out);
         drop(m);
         let data = self.tag.map::<dir::ToDevice, _>(buf).map_err(|_| NoBufs)?;
         let segs: Vec<(u64, u32)> = data
@@ -565,7 +640,6 @@ impl Shared {
             .map(|s| (s.bus, u32::try_from(s.len).unwrap_or(u32::MAX)))
             .collect();
         let mut tx = self.tx.lock();
-        // Nothing reaches a chip that is not running (`sc_stopped`).
         if self.state() != State::Running {
             drop(tx);
             drop(data.unmap());
@@ -576,7 +650,7 @@ impl Shared {
         }
         let first = {
             let Tx { ring, descs, .. } = &mut *tx;
-            ring.push(descs, &ring::Hal, &segs, 0)
+            ring.push(descs, &ring::Hal, &segs, ext)
         };
         let Ok(first) = first else {
             drop(tx);
@@ -586,13 +660,6 @@ impl Shared {
         tx.sent[first] = Some(data);
         tx.wd.queued();
         self.chip.kick_tx();
-        drop(tx);
-        let st = &self.port.stats;
-        st.opackets.add(1);
-        st.obytes.add(len as u64);
-        if mcast {
-            st.omcasts.add(1);
-        }
         Ok(())
     }
 
@@ -757,10 +824,14 @@ impl Driver for Rge {
         let nomem = |_| AttachError::NoMemory;
         let rx_descs = Descs(ring_tag.coherent::<u32>(DESCS * WORDS).map_err(nomem)?);
         let tx_descs = Descs(ring_tag.coherent::<u32>(DESCS * WORDS).map_err(nomem)?);
-        let chunks = (0..DESCS / SLOTS_PER_CHUNK)
-            .map(|_| tag.coherent::<u8>(SLOT * SLOTS_PER_CHUNK))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(nomem)?;
+        let slots = || {
+            (0..DESCS / SLOTS_PER_CHUNK)
+                .map(|_| tag.coherent::<u8>(SLOT * SLOTS_PER_CHUNK))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(nomem)
+        };
+        let chunks = slots()?;
+        let tx_slots = slots()?;
         let mut chip = Chip::new(bar, mac);
         let hw = |e| {
             AttachError::Device(match e {
@@ -780,6 +851,7 @@ impl Driver for Rge {
         let mut tx = Tx {
             ring: TxRing::new(),
             descs: tx_descs,
+            slots: tx_slots,
             sent: (0..DESCS).map(|_| None).collect(),
             wd: TxWatchdog::default(),
         };
@@ -793,7 +865,7 @@ impl Driver for Rge {
         .map_err(hw)?;
         chip.set_filter(false, [0; 2]);
         let (line, messages) = pci::bus::msi_line(cx).map_err(|_| AttachError::Device("no MSI"))?;
-        let caps = ifcap::RXCSUM | ifcap::VLAN_MTU | ifcap::LINKSTATE;
+        let caps = ifcap::RXCSUM | ifcap::TXCSUM | ifcap::VLAN_MTU | ifcap::LINKSTATE;
         let info = Ether {
             dname: "rge",
             unit: i32::try_from(unit).unwrap_or(0),
@@ -801,6 +873,8 @@ impl Driver for Rge {
             mtu: ETHERMTU,
             capabilities: caps,
             capenable: caps,
+            // `RGE_CSUM_FEATURES`.
+            hwassist: csum::IP | csum::IP_TCP | csum::IP_UDP,
             baudrate: 5_000_000_000,
         };
         Ok(Self {

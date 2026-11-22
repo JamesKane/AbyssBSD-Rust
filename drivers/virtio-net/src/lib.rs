@@ -851,6 +851,9 @@ impl Driver for VtNet {
                 mtu: ETHERMTU,
                 capabilities: caps,
                 capenable,
+                // Its transmit path does not fill in the virtio header's
+                // checksum request: the stack finishes each checksum.
+                hwassist: 0,
                 baudrate,
             };
             let shared = Shared {

@@ -385,6 +385,7 @@ fn a_driver_attaches_runs_while_up_and_follows_moves() {
         mtu: 1500,
         capabilities: 0,
         capenable: 0,
+        hwassist: 0,
         baudrate: 10_000_000_000,
     };
     let name = crate::netif::attach_ether(&e, &port, dev.clone());

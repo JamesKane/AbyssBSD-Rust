@@ -270,6 +270,7 @@ fn epair_ifnet(
         link_state: LINK_STATE_UP,
         capabilities: caps,
         capenable: caps,
+        hwassist: 0,
         // `nd6_ifattach`: IPv6 off until enabled (`ifdisabled`).
         nd6_flags: nd6_iff::PERFORMNUD | nd6_iff::IFDISABLED | nd6_iff::AUTO_LINKLOCAL,
         nd: crate::ifnet::NdInfo::DEFAULT,

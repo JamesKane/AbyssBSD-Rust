@@ -942,6 +942,7 @@ pub fn create(vnet: &Arc<Vnet>, kind: Kind, unit: Option<i32>, ctx: &Ctx) -> Res
         link_state: LINK_STATE_UNKNOWN,
         capabilities,
         capenable: caps,
+        hwassist: 0,
         nd6_flags: nd6_iff::PERFORMNUD | nd6_iff::IFDISABLED | nd6_iff::AUTO_LINKLOCAL,
         nd: crate::ifnet::NdInfo::DEFAULT,
         description: None,

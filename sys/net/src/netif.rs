@@ -87,6 +87,9 @@ pub struct Ether {
     /// `IFCAP_*` available and on.
     pub capabilities: u32,
     pub capenable: u32,
+    /// The IPv4 `CSUM_*` the device computes on transmit (`if_hwassist`),
+    /// with `IFCAP_TXCSUM` on.
+    pub hwassist: u32,
     pub baudrate: u64,
 }
 
@@ -115,6 +118,7 @@ pub fn attach_ether(e: &Ether, port: &Arc<Port>, link: Arc<dyn Link>) -> String 
         link_state: LINK_STATE_UNKNOWN,
         capabilities: e.capabilities,
         capenable: e.capenable,
+        hwassist: e.hwassist,
         // `nd6_ifattach`: IPv6 off until enabled, as `rc.conf` leaves an
         // interface without `ifconfig_<if>_ipv6`.
         nd6_flags: nd6_iff::PERFORMNUD | nd6_iff::IFDISABLED | nd6_iff::AUTO_LINKLOCAL,

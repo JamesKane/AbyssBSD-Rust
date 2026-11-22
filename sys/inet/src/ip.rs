@@ -176,14 +176,16 @@ pub(crate) fn is_local4(n: &Net, a: &[u8; 4]) -> bool {
         .any(|i| addrs4(i).any(|x| v4_of(&x.addr) == *a))
 }
 
-/// What the device takes of the checksum work (`if_hwassist`): a loopback
-/// interface with transmit checksums enabled does it all, never on the
-/// wire; the others leave it here.
+/// What the device takes of the checksum work (`if_hwassist`), with
+/// transmit checksums enabled: a loopback interface all of it, never on
+/// the wire; another what its driver said it computes.
 fn hwassist(i: &IfView) -> u32 {
-    if i.ty == IFT_LOOP && i.capenable & ifcap::TXCSUM != 0 {
+    if i.capenable & ifcap::TXCSUM == 0 {
+        0
+    } else if i.ty == IFT_LOOP {
         csum::IP | csum::IP_UDP | csum::IP_TCP
     } else {
-        0
+        i.hwassist & (csum::IP | csum::IP_UDP | csum::IP_TCP)
     }
 }
 

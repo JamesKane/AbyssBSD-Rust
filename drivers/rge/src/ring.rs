@@ -33,6 +33,64 @@ pub const TX_SEGS: usize = 32;
 /// and its checksum offload is unreliable below this (the delta
 /// specification's critical summary, item 3).
 pub const MIN_FRAME: usize = 60;
+/// Computes, in `frame` (an untagged Ethernet frame shorter than
+/// [`MIN_FRAME`]), the IPv4 checksums `csum_flags` leave to the device:
+/// the controller's are wrong for such frames (the delta specification,
+/// 03 §4). `csum_data` is where the transport checksum is in its header;
+/// the field holds the pseudo-header's sum, as for `in_delayed_cksum`.
+/// Anything not IPv4, or cut short, is left as it is.
+pub fn short_csum(frame: &mut [u8], csum_flags: u32, csum_data: u32) {
+    use mbuf::csum;
+    const ETH: usize = 14;
+    if frame.len() < ETH + 20 || frame[12..14] != [0x08, 0x00] {
+        return;
+    }
+    let hlen = usize::from(frame[ETH] & 0xf) * 4;
+    let end = ETH + usize::from(u16::from_be_bytes([frame[ETH + 2], frame[ETH + 3]]));
+    if hlen < 20 || end < ETH + hlen || end > frame.len() {
+        return;
+    }
+    if csum_flags & csum::IP != 0 {
+        frame[ETH + 10..ETH + 12].fill(0);
+        let c = !sum16(&frame[ETH..ETH + hlen]);
+        frame[ETH + 10..ETH + 12].copy_from_slice(&c.to_be_bytes());
+    }
+    if csum_flags & (csum::IP_TCP | csum::IP_UDP) != 0 {
+        let l4 = ETH + hlen;
+        let Some(at) = usize::try_from(csum_data)
+            .ok()
+            .and_then(|o| l4.checked_add(o))
+        else {
+            return;
+        };
+        if at + 2 > end {
+            return;
+        }
+        let mut c = !sum16(&frame[l4..end]);
+        // UDP sends a zero sum as all ones (0 is "none").
+        if c == 0 && csum_flags & csum::IP_UDP != 0 {
+            c = 0xffff;
+        }
+        frame[at..at + 2].copy_from_slice(&c.to_be_bytes());
+    }
+}
+
+/// The one's-complement sum of `b`'s big-endian words (RFC 1071), folded;
+/// an odd last byte is a word's high half.
+fn sum16(b: &[u8]) -> u16 {
+    let mut s: u32 = 0;
+    for w in b.chunks(2) {
+        s += u32::from(u16::from_be_bytes([w[0], w.get(1).copied().unwrap_or(0)]));
+    }
+    while s > 0xffff {
+        s = (s & 0xffff) + (s >> 16);
+    }
+    #[allow(clippy::cast_possible_truncation, reason = "folded to 16 bits")]
+    {
+        s as u16
+    }
+}
+
 /// The Ethernet CRC the controller leaves on received frames.
 pub const CRC_LEN: usize = 4;
 
@@ -44,6 +102,31 @@ pub mod tx {
     pub const TXERR: u32 = 0x0080_0000;
     pub const EXCESSCOLL: u32 = 0x0010_0000;
     pub const COLL: u32 = 0x000f_0000;
+
+    /// Extended status: the controller computes the IPv4 header's
+    /// checksum, without which it computes neither of the others.
+    pub const IPCSUM: u32 = 0x2000_0000;
+    pub const TCPCSUM: u32 = 0x4000_0000;
+    pub const UDPCSUM: u32 = 0x8000_0000;
+
+    /// The extended status asking for the checksums `csum_flags` leave to
+    /// the device (`rge_encap`).
+    #[must_use]
+    pub const fn csum_ext(csum_flags: u32) -> u32 {
+        use mbuf::csum;
+        if csum_flags & (csum::IP | csum::IP_TCP | csum::IP_UDP) == 0 {
+            return 0;
+        }
+        let mut ext = IPCSUM;
+        if csum_flags & csum::IP_TCP != 0 {
+            ext |= TCPCSUM;
+        }
+        if csum_flags & csum::IP_UDP != 0 {
+            ext |= UDPCSUM;
+        }
+        ext
+    }
+
     /// Word 0 is the command and status; word 1 the extended status;
     /// words 2 and 3 the buffer's address.
     pub const CMDSTS: usize = 0;
@@ -329,6 +412,12 @@ impl TxRing {
     #[must_use]
     pub fn free(&self) -> usize {
         DESCS - 1 - self.used
+    }
+
+    /// The descriptor the next frame starts at.
+    #[must_use]
+    pub fn next(&self) -> usize {
+        self.next
     }
 
     /// Frames on the controller.

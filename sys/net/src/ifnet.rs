@@ -243,6 +243,9 @@ pub struct Ifnet {
     pub link_state: u8,
     pub capabilities: u32,
     pub capenable: u32,
+    /// `if_hwassist`: the `CSUM_*` work its device does, while
+    /// `IFCAP_TXCSUM` is on (an Ethernet driver's [`crate::netif::Ether`]).
+    pub hwassist: u32,
     /// `ND6_IFF_*` (`nd_ifinfo.flags`).
     pub nd6_flags: u32,
     /// The rest of its `nd_ifinfo`.
@@ -1668,6 +1671,7 @@ pub fn loopback(index: u16, now: i64, stats: Arc<Stats>) -> Ifnet {
         link_state: LINK_STATE_UP,
         capabilities: caps,
         capenable: caps,
+        hwassist: 0,
         nd6_flags: nd6_iff::PERFORMNUD | nd6_iff::AUTO_LINKLOCAL,
         nd: NdInfo::DEFAULT,
         description: None,

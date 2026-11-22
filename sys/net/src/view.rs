@@ -43,6 +43,8 @@ pub struct IfView {
     pub ty: u8,
     pub mtu: u32,
     pub capenable: u32,
+    /// `if_hwassist`.
+    pub hwassist: u32,
     pub lladdr: Option<[u8; 6]>,
     pub bpf: Option<Arc<crate::bpf::Tap>>,
     pub stats: Arc<Stats>,
@@ -86,6 +88,7 @@ impl View {
                     ty: i.ty,
                     mtu: i.mtu,
                     capenable: i.capenable,
+                    hwassist: i.hwassist,
                     lladdr: i.lladdr,
                     bpf: i.bpf.clone(),
                     stats: Arc::clone(&i.stats),
