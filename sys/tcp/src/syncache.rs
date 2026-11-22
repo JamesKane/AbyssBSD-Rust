@@ -12,10 +12,11 @@
 //!
 //! Behavior reference: sys/netinet/tcp_syncache.c, tcp_syncache.h.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use sync::SpinLock;
+use sync::{PreemptLock, SpinLock};
 
 use crate::cc::Algo;
 use crate::ecn::{self, scf as ecnf};
@@ -130,10 +131,22 @@ struct Pause {
     backoff: u32,
 }
 
-/// A VNET's SYN cache (`V_tcp_syncache`).
+/// A bucket and its lock (`struct syncache_head`'s `sch_mtx`, a sleepable
+/// mutex: no interrupt masking), with when its timer is next due readable
+/// without it (`sch_nextc`, which its callout is armed for).
+#[derive(Debug)]
+struct Slot {
+    b: PreemptLock<Bucket>,
+    /// The bucket's `nextc`, or `u64::MAX` while it is empty; written
+    /// under its lock.
+    nextc: AtomicU64,
+}
+
+/// A VNET's SYN cache (`V_tcp_syncache`): each bucket locked on its own,
+/// as `syncache_lookup` locks only the head it hashes to.
 #[derive(Debug)]
 pub struct SynCache {
-    buckets: SpinLock<Vec<Bucket>>,
+    buckets: Box<[Slot]>,
     secret: SpinLock<Secret>,
     pause: SpinLock<Pause>,
     count: AtomicU32,
@@ -175,9 +188,14 @@ fn same(a: &Inc, b: &Inc) -> bool {
 
 impl SynCache {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            buckets: SpinLock::new(Vec::new()),
+            buckets: (0..HASHSIZE)
+                .map(|_| Slot {
+                    b: PreemptLock::new(Bucket::default()),
+                    nextc: AtomicU64::new(u64::MAX),
+                })
+                .collect(),
             secret: SpinLock::new(Secret {
                 oddeven: 0,
                 key: [[0; 16]; 2],
@@ -205,11 +223,11 @@ impl SynCache {
     /// The entries, for `net.inet.tcp.pcblist`'s SYN_RECEIVED records.
     #[must_use]
     pub fn entries(&self) -> Vec<Entry> {
-        self.buckets
-            .lock()
-            .iter()
-            .flat_map(|b| b.q.iter().copied())
-            .collect()
+        let mut out = Vec::new();
+        for s in &self.buckets {
+            out.extend(s.b.lock().q.iter().copied());
+        }
+        out
     }
 
     /// The current cookie key and its parity, reseeding the other one
@@ -453,11 +471,18 @@ impl SynCache {
     }
 
     fn with_bucket<R>(&self, i: usize, f: impl FnOnce(&mut Bucket) -> R) -> R {
-        let mut b = self.buckets.lock();
-        if b.is_empty() {
-            b.resize_with(HASHSIZE, Bucket::default);
-        }
-        f(&mut b[i])
+        let s = &self.buckets[i];
+        let mut b = s.b.lock();
+        let r = f(&mut b);
+        Self::publish(s, &b);
+        r
+    }
+
+    /// Under `s`'s lock: its due time as the lock-free readers see it.
+    fn publish(s: &Slot, b: &Bucket) {
+        let due = if b.q.is_empty() { u64::MAX } else { b.nextc };
+        // Relaxed: read only as a hint of when to look (under the lock).
+        s.nextc.store(due, Ordering::Relaxed);
     }
 
     /// `syncache_add`: a SYN `t` with options `to` for listener `l`;
@@ -709,8 +734,8 @@ impl SynCache {
 
     /// Drops a listener's entries (its socket closed).
     pub fn drop_listener(&self, stats: &crate::Stats, id: u64) {
-        let mut bs = self.buckets.lock();
-        for b in bs.iter_mut() {
+        for s in &self.buckets {
+            let mut b = s.b.lock();
             let before = b.q.len();
             b.q.retain(|e| e.listener != id);
             let gone = before - b.q.len();
@@ -719,14 +744,30 @@ impl SynCache {
             }
             // Relaxed: a count changed under the lock.
             self.count.fetch_sub(gone as u32, Ordering::Relaxed);
+            Self::publish(s, &b);
         }
     }
 
     /// When [`SynCache::timer`] is next due.
     #[must_use]
     pub fn next_deadline(&self) -> Option<u64> {
-        let bs = self.buckets.lock();
-        bs.iter().filter(|b| !b.q.is_empty()).map(|b| b.nextc).min()
+        // Relaxed: see `publish`.
+        let d = self
+            .buckets
+            .iter()
+            .map(|s| s.nextc.load(Ordering::Relaxed))
+            .min()
+            .unwrap_or(u64::MAX);
+        (d != u64::MAX).then_some(d)
+    }
+
+    /// When the bucket `inc` hashes to is next due: what a new entry there
+    /// arms (`syncache_timeout`'s `callout_reset` of its head's callout).
+    #[must_use]
+    pub fn deadline_of(&self, inc: &Inc) -> Option<u64> {
+        // Relaxed: see `publish`.
+        let d = self.buckets[hash(inc)].nextc.load(Ordering::Relaxed);
+        (d != u64::MAX).then_some(d)
     }
 
     /// `syncache_timer`: retransmits due SYN-ACKs; entries past the limit
@@ -737,11 +778,17 @@ impl SynCache {
         let limit = self.rexmt_limit.load(Ordering::Relaxed);
         let ecn_max = get(&cx.conf.ecn_maxretries) as u32;
         let mut out = Vec::new();
-        let mut bs = self.buckets.lock();
-        for b in bs
-            .iter_mut()
-            .filter(|b| !b.q.is_empty() && b.nextc <= cx.now)
-        {
+        for s in &self.buckets {
+            // Relaxed: see `publish`; the bucket is looked at under its lock.
+            if s.nextc.load(Ordering::Relaxed) > cx.now {
+                continue;
+            }
+            let mut g = s.b.lock();
+            let b = &mut *g;
+            if b.q.is_empty() || b.nextc > cx.now {
+                Self::publish(s, b);
+                continue;
+            }
             b.nextc = u64::MAX;
             let mut i = 0;
             while i < b.q.len() {
@@ -784,6 +831,7 @@ impl SynCache {
                     }
                 }
             }
+            Self::publish(s, b);
         }
         out
     }

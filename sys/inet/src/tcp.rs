@@ -758,9 +758,9 @@ pub(crate) fn run_timers(now: u64) -> u64 {
 }
 
 /// The SYN cache's timer is due sooner than the thread knows.
-fn syncache_armed(vnet: &Vnet) {
+fn syncache_armed(vnet: &Vnet, inc: &Inc) {
     let st = state::of(vnet);
-    if let Some(d) = st.tcp.syncache.next_deadline() {
+    if let Some(d) = st.tcp.syncache.deadline_of(inc) {
         let ns = d.saturating_mul(1_000_000);
         if NEXT.fetch_min(ns, Ordering::AcqRel) > ns {
             crate::timer_kick();
@@ -1987,6 +1987,9 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
                     .lookup6(&section, vnet.id, &a.foreign, t.sport, &a.local, t.dport),
             }
         };
+        // The PCB's flags and creator, when the table was looked in: what
+        // a listener's segment needs of it, read in this one hold.
+        let mut lp = None;
         let found = fast.map(|so| (so, false)).or_else(|| {
             let tb = TCB.lock();
             let p = match a.family {
@@ -2000,7 +2003,13 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
                 ),
                 Family::Inet6 => tb.lookup6(vnet.id, &a.foreign, t.sport, &a.local, t.dport, true),
             };
-            p.and_then(|p| p.socket().map(|s| (s, p.flags & inp::DROPPED != 0)))
+            p.and_then(|p| {
+                lp = Some(ListenerPcb {
+                    flags: p.flags,
+                    uid: p.uid,
+                });
+                p.socket().map(|s| (s, p.flags & inp::DROPPED != 0))
+            })
         });
         let Some((so, dropped)) = found else {
             closed_port(vnet, st, &inc, &t, tlen, a);
@@ -2058,7 +2067,7 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
             Err(Not::Dropped) => None,
             Err(Not::Listening) => {
                 let data = seg.take().map(|s| s.data).unwrap_or_default();
-                listen_input(vnet, st, &so, &inc, &t, opts, data, a);
+                listen_input(vnet, st, &so, lp, &inc, &t, opts, data, a);
                 return;
             }
         };
@@ -2106,13 +2115,22 @@ fn closed_port(vnet: &Arc<Vnet>, st: &state::State, inc: &Inc, t: &Th, tlen: u32
     let _ = transmit_one(vnet, inc, &TxInfo::default_for(), seg);
 }
 
+/// What a listener's segment needs of its PCB.
+#[derive(Clone, Copy, Debug)]
+struct ListenerPcb {
+    flags: i32,
+    uid: u32,
+}
+
 /// A segment for a listener: the SYN cache's (a SYN, the handshake's
-/// ACK, a reset), and a new connection when the handshake is done.
+/// ACK, a reset), and a new connection when the handshake is done. `lp`:
+/// the listener's PCB as the lookup found it, if it read the table.
 #[allow(clippy::too_many_arguments)]
 fn listen_input(
     vnet: &Arc<Vnet>,
     st: &state::State,
     lso: &Arc<Socket>,
+    lp: Option<ListenerPcb>,
     inc: &Inc,
     t: &Th,
     opts: &[u8],
@@ -2120,10 +2138,15 @@ fn listen_input(
     a: &Arrival,
 ) {
     // The table's lock before the socket's, never with it.
-    let autoflow = TCB
-        .lock()
-        .get(lso.id)
-        .is_some_and(|p| p.flags & inp::IN6P_AUTOFLOWLABEL != 0);
+    let lp = lp.unwrap_or_else(|| {
+        TCB.lock()
+            .get(lso.id)
+            .map_or(ListenerPcb { flags: 0, uid: 0 }, |p| ListenerPcb {
+                flags: p.flags,
+                uid: p.uid,
+            })
+    });
+    let autoflow = lp.flags & inp::IN6P_AUTOFLOWLABEL != 0;
     let (l, lflags, lkeep, algo, over, lrcv, lsnd, linger, lip) = {
         let i = lso.inner.lock();
         let Some(x) = i.tcp.as_ref() else {
@@ -2181,6 +2204,7 @@ fn listen_input(
                 accept_new(
                     st,
                     lso,
+                    lp,
                     &e,
                     path,
                     lflags,
@@ -2230,7 +2254,7 @@ fn listen_input(
         replies.push(r);
     }
     transmit_replies(vnet, replies);
-    syncache_armed(vnet);
+    syncache_armed(vnet, inc);
 }
 
 /// `syncache_socket` and `solisten_enqueue`: the listener's new socket
@@ -2240,6 +2264,7 @@ fn listen_input(
 fn accept_new(
     st: &state::State,
     lso: &Arc<Socket>,
+    lp: ListenerPcb,
     e: &::tcp::syncache::Entry,
     path: Path,
     lflags: u32,
@@ -2258,35 +2283,31 @@ fn accept_new(
     snd.cc = 0;
     snd.mbcnt = 0;
     snd.cant = false;
-    let (uid, pflags) = TCB.lock().get(lso.id).map_or((0, 0), |p| (p.uid, p.flags));
+    let (uid, pflags) = (lp.uid, lp.flags);
     let cred = Cred {
         uid,
         ..Cred::default()
     };
-    let s = Socket::with_buffers(&lso.vnet, lso.family, Proto::Tcp, &cred, rcv, snd);
+    let v6 = e.inc.v6;
+    // The PCB goes into the table with its addresses (one hold).
+    let s = Socket::with_pcb(&lso.vnet, lso.family, Proto::Tcp, &cred, rcv, snd, |p| {
+        p.vflag = (p.vflag & !(INP_IPV4 | INP_IPV6)) | if v6 { INP_IPV6 } else { INP_IPV4 };
+        p.flags = (pflags & !(inp::ANONPORT | inp::INHASHLIST | inp::DROPPED)) | inp::INHASHLIST;
+        if v6 {
+            p.laddr = e.inc.laddr;
+            p.faddr = e.inc.faddr;
+        } else {
+            p.laddr = addr::from_v4(a4(&e.inc.laddr));
+            p.faddr = addr::from_v4(a4(&e.inc.faddr));
+        }
+        p.lport = e.inc.lport;
+        p.fport = e.inc.fport;
+        p.zone = e.inc.zone;
+        p.flow = e.flowlabel;
+        p.hashed = true;
+    });
     s.options
         .store(lso.so_options() & !SO_ACCEPTCONN, Ordering::Relaxed);
-    let v6 = e.inc.v6;
-    {
-        let mut tb = TCB.lock();
-        if let Some(mut p) = tb.get_mut(s.id) {
-            p.vflag = (p.vflag & !(INP_IPV4 | INP_IPV6)) | if v6 { INP_IPV6 } else { INP_IPV4 };
-            p.flags =
-                (pflags & !(inp::ANONPORT | inp::INHASHLIST | inp::DROPPED)) | inp::INHASHLIST;
-            if v6 {
-                p.laddr = e.inc.laddr;
-                p.faddr = e.inc.faddr;
-            } else {
-                p.laddr = addr::from_v4(a4(&e.inc.laddr));
-                p.faddr = addr::from_v4(a4(&e.inc.faddr));
-            }
-            p.lport = e.inc.lport;
-            p.fport = e.inc.fport;
-            p.zone = e.inc.zone;
-            p.flow = e.flowlabel;
-            p.hashed = true;
-        }
-    }
     {
         let mut i = s.inner.lock();
         i.linger = linger;

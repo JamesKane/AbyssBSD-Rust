@@ -132,7 +132,6 @@ pub struct Table {
     /// where a segment no connection takes finds its listener, however
     /// many connections share the port.
     wild: Index,
-    next_id: u64,
     /// `ipi_gencnt`.
     pub gencnt: u64,
     /// `ipi_lastport`, `ipi_lasthi`, `ipi_lastlow`.
@@ -154,7 +153,6 @@ impl Table {
             ports: Index::new(),
             exact: Index::new(),
             wild: Index::new(),
-            next_id: 1,
             gencnt: 0,
             last: [0; 3],
             next_reap: u64::MAX,
@@ -292,15 +290,21 @@ enum Range {
 /// (`INP_LOOKUP_MAPPED_PCB_COST`).
 const MAPPED_COST: u32 = 3;
 
-impl Table {
-    pub(crate) fn reserve_id(&mut self) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
-    }
+/// Ids for sockets and their PCBs: unique and increasing, and taken
+/// without a table's lock.
+static NEXT_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
-    /// `in_pcballoc`: `so`'s PCB, unbound.
-    pub(crate) fn alloc(&mut self, so: &Arc<Socket>, uid: u32) {
+/// A new socket's id (its PCB's too).
+pub(crate) fn reserve_id() -> u64 {
+    // Relaxed: only unique; `order` takes them in any order.
+    NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
+
+impl Table {
+    /// `in_pcballoc`: `so`'s PCB, unbound; then `init` on the PCB before anything can look it
+    /// up (`syncache_socket` filling in a connection's addresses), and
+    /// into the lookups as it then stands: one hold of the table.
+    pub(crate) fn alloc_with(&mut self, so: &Arc<Socket>, uid: u32, init: impl FnOnce(&mut Pcb)) {
         use core::sync::atomic::Ordering::Relaxed;
         let (vflag, mut flags) = match so.family {
             Family::Inet => (INP_IPV4, 0),
@@ -357,6 +361,14 @@ impl Table {
                 conn: None,
             }),
         );
+        if let Some(p) = self.pcbs.get_mut(&so.id) {
+            init(p);
+            if p.hashed {
+                self.reindex(so.id);
+            }
+        }
+        #[cfg(test)]
+        self.check_indices();
     }
 
     /// `in_pcbfree`.

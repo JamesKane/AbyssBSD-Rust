@@ -597,8 +597,22 @@ impl Socket {
         rcv: Sb,
         snd: Sb,
     ) -> Arc<Self> {
+        Self::with_pcb(vnet, family, proto, cred, rcv, snd, |_| {})
+    }
+
+    /// [`Socket::with_buffers`], with `init` run on its PCB as it goes
+    /// into the table ([`pcb::Table::alloc_with`]).
+    pub(crate) fn with_pcb(
+        vnet: &Arc<Vnet>,
+        family: Family,
+        proto: Proto,
+        cred: &Cred,
+        rcv: Sb,
+        snd: Sb,
+        init: impl FnOnce(&mut pcb::Pcb),
+    ) -> Arc<Self> {
         let table = pcb::table(proto);
-        let id = table.lock().reserve_id();
+        let id = pcb::reserve_id();
         let so = Arc::new(Self {
             vnet: Arc::clone(vnet),
             family,
@@ -635,7 +649,7 @@ impl Socket {
             wake_owed: core::sync::atomic::AtomicU8::new(0),
             tls_tx: sync::PreemptLock::new(None),
         });
-        table.lock().alloc(&so, cred.uid);
+        table.lock().alloc_with(&so, cred.uid, init);
         so
     }
 
