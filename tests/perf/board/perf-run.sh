@@ -10,8 +10,11 @@
 #	kbench <name> <value> <unit>
 #	kbench end <suite>
 #
-# Usage: perf-run.sh SUITE... (p4, p5, p6). Inputs come from /mnt/perf on
-# the kyuawork partition: ubench, ubench-p6 (the p6 build), tree.tar, fsx.
+# Usage: perf-run.sh SUITE... (p4, p5, p6, p7). Inputs come from /mnt/perf
+# on the kyuawork partition: ubench, ubench-p6 (the p6 build), tree.tar,
+# fsx, and for p7 p7-run.sh, iperf3, and libiperf.so.0 (arm64's package).
+# p7's far end is PERF_PEER (the build server), where perf-board.sh starts
+# the peers.
 #
 # Both kernels run the same userland: AbyssBSD's root (FreeBSD 15.1's
 # base). AbyssBSD runs from it; FreeBSD mounts it read-only and runs the
@@ -21,6 +24,7 @@
 set -eu
 IN=/mnt/perf
 SCRATCH=/dev/gpt/abyssbench	# p5's scratch partition, on the Samsung
+PEER=${PERF_PEER:-192.168.0.14}	# p7's far end: the build server
 # The core classes (docs/HARDWARE.md §4): the A720 clusters at 2.6 and
 # 2.5 GHz, those at 2.3 and 2.2 GHz, and the A520s. `all` is ubench's own
 # CPUs 0-7, across the three.
@@ -50,6 +54,19 @@ esac
 if pgrep -x powerd >/dev/null; then
 	service powerd onestop >/dev/null 2>&1 || kill "$(cat /var/run/powerd.pid)"
 fi
+# cron's periodic jobs would land in a run (daily at 3:01, weekly early on
+# Saturdays): cron is stopped for the run on both sides and started again
+# after, and the quiet start below waits for any periodic already running.
+cron=
+if pgrep -x cron >/dev/null; then
+	service cron onestop >/dev/null 2>&1 || kill "$(cat /var/run/cron.pid)"
+	cron=1
+fi
+cleanup() {
+	[ -z "${root:-}" ] || ! df $root/tmp | grep -q '^tmpfs' || umount $root/tmp
+	[ -z "$cron" ] || service cron onestart >/dev/null 2>&1
+}
+trap cleanup EXIT
 for c in $CLUSTERS; do
 	max=$(sysctl -n dev.cpu.$c.freq_levels | cut -d/ -f1)
 	sysctl -q dev.cpu.$c.freq=$max >/dev/null
@@ -69,12 +86,17 @@ for d in tmp bench benchtmp; do
 	[ -d $root/$d ] || { echo "perf-run: no $root/$d" >&2; exit 1; }
 done
 mount -t tmpfs tmpfs $root/tmp
-trap 'umount $root/tmp' EXIT
 cp $IN/ubench $IN/tree.tar $IN/fsx $root/tmp/
 cp $IN/ubench-p6 $root/tmp/ubench-p6
+case " $* " in *" p7 "*) cp $IN/p7-run.sh $IN/iperf3 $IN/libiperf.so.0 $root/tmp/ ;; esac
 
 # A quiet start: boot's own work (fsck, periodic, devmatch) done, up to
-# five minutes.
+# five minutes; a periodic run still going, up to an hour more.
+for i in $(jot 720); do
+	pgrep -f /usr/sbin/periodic >/dev/null || break
+	sleep 5
+done
+pgrep -f /usr/sbin/periodic >/dev/null && { echo "perf-run: periodic still running" >&2; exit 1; }
 for i in $(jot 60); do
 	load=$(sysctl -n vm.loadavg | awk '{ print $2 }')
 	[ "$(echo "$load < 0.3" | bc)" = 1 ] && break
@@ -100,6 +122,7 @@ for class in $CLASSES; do
 		echo "kbench class $name ${cpus:-0-7}"
 		case $suite in
 		p6) run /tmp/ubench-p6 p6 ;;
+		p7) run sh /tmp/p7-run.sh $PEER ;;
 		*) run /tmp/ubench $suite ;;
 		esac
 	done

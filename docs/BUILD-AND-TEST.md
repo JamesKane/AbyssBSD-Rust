@@ -428,10 +428,18 @@ may not (PERFORMANCE.md §2).
 `little`: the A520s, 2-5; `all`: `ubench`'s own CPUs 0-7), through `UBENCH_CPUS`. Both kernels run
 the same userland, AbyssBSD's root (FreeBSD 15.1's base): FreeBSD mounts it read-only and runs the
 suites chrooted into it. Both get a fresh tmpfs `/tmp`, every cluster held at its highest frequency
-with `powerd` stopped, FreeBSD's idle held at C1 (WFI, the only idle state AbyssBSD has yet), and a
-quiet start (load under 0.3). `p5` formats the Samsung's `abyssbench` partition (`nda1p4`, 16 GiB),
+with `powerd` stopped, FreeBSD's idle held at C1 (WFI, the only idle state AbyssBSD has yet), `cron`
+stopped for the run (its `periodic` runs would land in one), and a quiet start (no `periodic` still
+running, load under 0.3). `p5` formats the Samsung's `abyssbench` partition (`nda1p4`, 16 GiB),
 through `UBENCH_DISK`. Its inputs are in the `kyuawork` partition's `perf/`: `ubench` and its `p6`
 build (`ubench-p6`), the arm64 `fsx`, `tree.tar` from arm64's `base.txz`, and `perf-run.sh`.
+
+`p7` (`tests/perf/board/p7-run.sh`, the bhyve suite's benchmarks per core class, `iperf3` on the
+class's CPUs, each kernel's NIC interrupts where it binds them) adds `iperf3` and `libiperf.so.0`
+from arm64's `iperf3-3.22` package to `perf/`. Its far end is the build server on the LAN
+(`PERF_PEER`, 192.168.0.14): for each run `perf-board.sh` starts `iperf3 -s` and `ubench p7.peer`
+there from `~/abyss/perf`, under CI's lock, and stops them after. The board's link is 1000BASE-T,
+so the bulk throughput benchmarks are capped by the wire on any side that reaches it.
 
 `tests/perf/board/perf-board.sh WORKDIR RUNS SUITE...`, on the workstation, runs it `RUNS` times on
 each system, alternating them and which goes first, rebooting between (FreeBSD always leaves
