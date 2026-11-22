@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! The connected PCBs' hash for the packet paths (`ipi_hashbase` read as
-//! `in_pcblookup_hash_smr` reads it): a fixed array of buckets, each an
-//! immutable list published for readers inside the network epoch. The
-//! table's writers, under its lock, copy a bucket, change the copy and
-//! publish it; the old list goes after a grace period. A reader finds a
+//! `in_pcblookup_hash_smr` reads it): a fixed array of buckets, each a
+//! list read inside the network epoch. The table's writers, under its
+//! lock, link a new node at a bucket's head or unlink one, which goes
+//! after a grace period (`CK_LIST` under SMR). A reader finds a
 //! connection's socket with no lock, as FreeBSD's SMR lookup does.
 //!
 //! What a reader finds may have just been taken out (a closing
@@ -15,7 +15,6 @@
 
 use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use abi::inet::{INP_IPV4, INP_IPV6};
@@ -52,11 +51,15 @@ impl Conn {
     }
 }
 
-type Bucket = Vec<Conn>;
+/// A bucket's list node: a connection, and the next older one.
+struct Node {
+    conn: Conn,
+    next: AtomicPtr<Node>,
+}
 
 /// A table's connected hash.
 pub(crate) struct Exact {
-    buckets: [AtomicPtr<Bucket>; BUCKETS],
+    buckets: [AtomicPtr<Node>; BUCKETS],
 }
 
 impl core::fmt::Debug for Exact {
@@ -82,39 +85,20 @@ impl Exact {
         }
     }
 
-    /// The bucket `i` as of now, for as long as the section `_s` lasts.
-    fn read<'s>(&self, i: usize, _s: &'s net::view::Section) -> &'s [Conn] {
-        // Acquire: pairs with the release in `publish`.
-        let p = self.buckets[i].load(Ordering::Acquire);
-        // SAFETY: null or a bucket published by `publish`, which frees one
-        // only through `defer_drop` after unpublishing it, so it outlives
-        // every section begun before that; `_s` is such a section.
-        unsafe { p.as_ref() }.map_or(&[], Vec::as_slice)
-    }
-
-    /// Puts `b` in as bucket `i`; the one it replaces goes after a grace
-    /// period. Under the table's lock (one writer at a time).
-    fn publish(&self, i: usize, b: Bucket) {
-        let new = if b.is_empty() {
-            core::ptr::null_mut()
-        } else {
-            Box::into_raw(Box::new(b))
-        };
-        // AcqRel: the list's contents before the pointer; the old one's
-        // reads before its retirement.
-        let old = self.buckets[i].swap(new, Ordering::AcqRel);
-        if !old.is_null() {
-            // SAFETY: made by `Box::into_raw` above and now unpublished;
-            // freed once, after the grace period.
-            let old = unsafe { Box::from_raw(old) };
-            net::view::defer_drop(*old);
-        }
-    }
-
-    /// The current bucket `i`, to copy. Under the table's lock.
-    fn current(&self, i: usize) -> Bucket {
-        let s = net::view::enter();
-        self.read(i, &s).to_vec()
+    /// Bucket `i`'s connections, newest first, for as long as the section
+    /// `_s` lasts.
+    fn read<'s>(&self, i: usize, _s: &'s net::view::Section) -> impl Iterator<Item = &'s Conn> {
+        // Acquire: pairs with the release that linked each node.
+        let mut p = self.buckets[i].load(Ordering::Acquire);
+        core::iter::from_fn(move || {
+            // SAFETY: null or a node linked by `set`, which `remove` frees
+            // only through `defer_drop` after unlinking it, so it outlives
+            // every section begun before that; `_s` is such a section. An
+            // unlinked node keeps its `next`, so a reader on it goes on.
+            let n: &'s Node = unsafe { p.as_ref() }?;
+            p = n.next.load(Ordering::Acquire);
+            Some(&n.conn)
+        })
     }
 
     /// Makes `c` the entry for its PCB (in place of `was`, if it had one
@@ -126,20 +110,36 @@ impl Exact {
             }
             self.remove(w);
         }
-        let i = bucket_of(c.vnet, &c.faddr, c.lport, c.fport);
-        let mut b = self.current(i);
-        b.push(c);
-        self.publish(i, b);
+        let head = &self.buckets[bucket_of(c.vnet, &c.faddr, c.lport, c.fport)];
+        // Relaxed: the table's lock orders writers.
+        let node = Box::into_raw(Box::new(Node {
+            conn: c,
+            next: AtomicPtr::new(head.load(Ordering::Relaxed)),
+        }));
+        // Release: the node's contents before its link (`CK_LIST_INSERT_HEAD`).
+        head.store(node, Ordering::Release);
     }
 
     /// Takes PCB `c.id`'s entry out; under the table's lock.
     pub(crate) fn remove(&self, c: &Conn) {
-        let i = bucket_of(c.vnet, &c.faddr, c.lport, c.fport);
-        let mut b = self.current(i);
-        let n = b.len();
-        b.retain(|x| x.id != c.id);
-        if b.len() != n {
-            self.publish(i, b);
+        let mut link = &self.buckets[bucket_of(c.vnet, &c.faddr, c.lport, c.fport)];
+        loop {
+            let p = link.load(Ordering::Relaxed);
+            // SAFETY: a linked node; only writers free nodes, and they
+            // hold the table's lock, as this caller does.
+            let Some(n) = (unsafe { p.as_ref() }) else {
+                return;
+            };
+            if n.conn.id == c.id {
+                // Release: readers that see the unlink see a whole list.
+                link.store(n.next.load(Ordering::Relaxed), Ordering::Release);
+                // SAFETY: made by `Box::into_raw` in `set`, now unlinked;
+                // freed once, after the grace period.
+                let node = unsafe { Box::from_raw(p) };
+                net::view::defer_drop(node);
+                return;
+            }
+            link = &n.next;
         }
     }
 
@@ -148,7 +148,6 @@ impl Exact {
     pub(crate) fn holds(&self, c: &Conn) -> bool {
         let s = net::view::enter();
         self.read(bucket_of(c.vnet, &c.faddr, c.lport, c.fport), &s)
-            .iter()
             .any(|x| x.same(c))
     }
 
@@ -165,7 +164,6 @@ impl Exact {
     ) -> Option<Arc<Socket>> {
         let f = crate::addr::v4mapped(faddr);
         self.read(bucket_of(vnet, &f, lport, fport), s)
-            .iter()
             .find(|c| {
                 c.vnet == vnet
                     && c.lport == lport
@@ -188,7 +186,6 @@ impl Exact {
         lport: u16,
     ) -> Option<Arc<Socket>> {
         self.read(bucket_of(vnet, faddr, lport, fport), s)
-            .iter()
             .find(|c| {
                 c.vnet == vnet
                     && c.lport == lport

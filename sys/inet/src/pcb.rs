@@ -14,7 +14,9 @@
 //! `in_pcbdisconnect`, `in_pcblookup_local`, `in_pcblookup_hash_locked`),
 //! sys/netinet6/in6_pcb.c (the same for IPv6, `in6_pcbsetport`).
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::boxed::Box;
+#[cfg(test)]
+use alloc::collections::BTreeSet;
 use alloc::sync::{Arc, Weak};
 use core::ops::{Deref, DerefMut};
 
@@ -113,18 +115,23 @@ impl Pcb {
 /// A protocol's PCBs (`struct inpcbinfo`).
 #[derive(Debug)]
 pub struct Table {
-    pcbs: BTreeMap<u64, Pcb>,
+    /// By id; boxed, so the map's moves are of pointers, not PCBs.
+    pcbs: intmap::IntMap<u64, Box<Pcb>>,
+    /// The ids in PCB order (`ipi_listhead`, oldest first), including
+    /// `dead` ones of PCBs since freed, dropped lazily.
+    order: alloc::collections::VecDeque<u64>,
+    dead: usize,
     /// Hashed PCBs by VNET and local port (`ipi_porthashbase`, and the
     /// wildcard hash's role): every lookup that names a local port
     /// looks only here, in PCB order.
-    ports: BTreeSet<(u32, u16, u64)>,
+    ports: Index,
     /// Hashed connected PCBs by VNET and both ports (`ipi_hashbase`,
     /// the exact four-tuple hash).
-    exact: BTreeSet<(u32, u16, u16, u64)>,
+    exact: Index,
     /// Hashed unconnected PCBs by VNET and local port (`ipi_hash_wild`):
     /// where a segment no connection takes finds its listener, however
     /// many connections share the port.
-    wild: BTreeSet<(u32, u16, u64)>,
+    wild: Index,
     next_id: u64,
     /// `ipi_gencnt`.
     pub gencnt: u64,
@@ -141,15 +148,117 @@ impl Table {
     const fn new(hash: Option<&'static crate::pcbhash::Exact>) -> Self {
         Self {
             hash,
-            pcbs: BTreeMap::new(),
-            ports: BTreeSet::new(),
-            exact: BTreeSet::new(),
-            wild: BTreeSet::new(),
+            pcbs: intmap::IntMap::new(),
+            order: alloc::collections::VecDeque::new(),
+            dead: 0,
+            ports: Index::new(),
+            exact: Index::new(),
+            wild: Index::new(),
             next_id: 1,
             gencnt: 0,
             last: [0; 3],
             next_reap: u64::MAX,
         }
+    }
+}
+
+/// A lookup index (one of `inpcbinfo`'s hashes): the PCB ids under each
+/// key, in PCB order. A key is a VNET and a port or two, packed
+/// ([`port_key`], [`ports_key`]).
+#[derive(Debug)]
+struct Index(intmap::IntMap<u64, Ids>);
+
+/// The PCBs under one key: most keys have one (a connection's ports).
+#[derive(Debug)]
+enum Ids {
+    One(u64),
+    /// Two or more, sorted.
+    Many(alloc::collections::VecDeque<u64>),
+}
+
+const fn port_key(vnet: u32, lport: u16) -> u64 {
+    (vnet as u64) << 32 | lport as u64
+}
+
+const fn ports_key(vnet: u32, lport: u16, fport: u16) -> u64 {
+    (vnet as u64) << 32 | (lport as u64) << 16 | fport as u64
+}
+
+impl Index {
+    const fn new() -> Self {
+        Self(intmap::IntMap::new())
+    }
+
+    fn insert(&mut self, key: u64, id: u64) {
+        match self.0.get_mut(&key) {
+            None => {
+                self.0.insert(key, Ids::One(id));
+            }
+            Some(Ids::One(x)) => {
+                let x = *x;
+                if x != id {
+                    let v = if x < id { [x, id] } else { [id, x] };
+                    self.0.insert(key, Ids::Many(v.into_iter().collect()));
+                }
+            }
+            Some(Ids::Many(v)) => {
+                // New PCBs have the highest ids: usually a push.
+                if v.back().is_none_or(|&b| b < id) {
+                    v.push_back(id);
+                } else if let Err(i) = v.binary_search(&id) {
+                    v.insert(i, id);
+                }
+            }
+        }
+    }
+
+    fn remove(&mut self, key: u64, id: u64) {
+        match self.0.get_mut(&key) {
+            Some(Ids::One(x)) if *x == id => {
+                self.0.remove(&key);
+            }
+            Some(Ids::Many(v)) => {
+                // The oldest usually go first (TIME_WAIT's end).
+                if v.front() == Some(&id) {
+                    v.pop_front();
+                } else if let Ok(i) = v.binary_search(&id) {
+                    v.remove(i);
+                }
+                if v.len() == 1 {
+                    let x = v[0];
+                    self.0.insert(key, Ids::One(x));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The ids under `key`, in PCB order.
+    fn ids(&self, key: u64) -> impl Iterator<Item = u64> + '_ {
+        let (one, many) = match self.0.get(&key) {
+            None => (None, None),
+            Some(Ids::One(x)) => (Some(*x), None),
+            Some(Ids::Many(v)) => (None, Some(v.iter().copied())),
+        };
+        one.into_iter().chain(many.into_iter().flatten())
+    }
+
+    /// Every (key, id), for the tests' checks.
+    #[cfg(test)]
+    fn all(&self) -> BTreeSet<(u64, u64)> {
+        let mut out = BTreeSet::new();
+        for (&k, ids) in &self.0 {
+            match ids {
+                Ids::One(x) => {
+                    out.insert((k, *x));
+                }
+                Ids::Many(v) => {
+                    assert!(v.len() > 1 && v.iter().is_sorted(), "index list {v:?}");
+                    out.extend(v.iter().map(|&x| (k, x)));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -215,9 +324,15 @@ impl Table {
             flags |= inp::IN6P_AUTOFLOWLABEL;
         }
         self.gencnt += 1;
+        // Ids only grow: almost always at the end.
+        if self.order.back().is_none_or(|&b| b < so.id) {
+            self.order.push_back(so.id);
+        } else if let Err(i) = self.order.binary_search(&so.id) {
+            self.order.insert(i, so.id);
+        }
         self.pcbs.insert(
             so.id,
-            Pcb {
+            Box::new(Pcb {
                 so: Arc::downgrade(so),
                 vnet: Arc::clone(&so.vnet),
                 family: so.family,
@@ -240,7 +355,7 @@ impl Table {
                 flow: 0,
                 idx: None,
                 conn: None,
-            },
+            }),
         );
     }
 
@@ -249,6 +364,7 @@ impl Table {
         if let Some(p) = self.pcbs.remove(&id) {
             self.unhash(p.conn.as_ref());
             self.unindex(id, p.idx);
+            self.forget();
             self.gencnt += 1;
         }
         #[cfg(test)]
@@ -258,7 +374,7 @@ impl Table {
     /// The PCB `id`.
     #[must_use]
     pub fn get(&self, id: u64) -> Option<&Pcb> {
-        self.pcbs.get(&id)
+        self.pcbs.get(&id).map(|p| &**p)
     }
 
     /// The PCB `id`, to change: the lookup indices follow its addresses
@@ -276,7 +392,26 @@ impl Table {
 
     /// Every PCB, in PCB order.
     pub(crate) fn values(&self) -> impl Iterator<Item = &Pcb> {
-        self.pcbs.values()
+        self.order
+            .iter()
+            .filter_map(|id| self.pcbs.get(id).map(|p| &**p))
+    }
+
+    /// A PCB left the map: its id in `order` is dead, and goes when it
+    /// reaches the front, or when the dead are half of the list.
+    fn forget(&mut self) {
+        self.dead += 1;
+        while let Some(&f) = self.order.front()
+            && !self.pcbs.contains_key(&f)
+        {
+            self.order.pop_front();
+            self.dead -= 1;
+        }
+        if self.dead > 32 && self.dead * 2 > self.order.len() {
+            let pcbs = &self.pcbs;
+            self.order.retain(|id| pcbs.contains_key(id));
+            self.dead = 0;
+        }
     }
 
     /// Every PCB, newest first (`ipi_listhead`'s order), expired
@@ -286,7 +421,11 @@ impl Table {
         // A socket gone without a close (a kernel bug, or a test) leaves
         // its PCB behind; it goes here.
         self.remove_where(|p| p.tw_until.is_none() && p.so.strong_count() == 0);
-        self.pcbs.iter().rev()
+        let pcbs = &self.pcbs;
+        self.order
+            .iter()
+            .rev()
+            .filter_map(move |id| pcbs.get(id).map(|p| (id, &**p)))
     }
 
     /// Drops the PCBs whose `TIME_WAIT` has ended.
@@ -316,6 +455,7 @@ impl Table {
             if let Some(p) = self.pcbs.remove(&id) {
                 self.unhash(p.conn.as_ref());
                 self.unindex(id, p.idx);
+                self.forget();
             }
         }
     }
@@ -330,11 +470,11 @@ impl Table {
     /// Takes `id` out of the indices at `at`.
     fn unindex(&mut self, id: u64, at: Option<Indexed>) {
         if let Some(i) = at {
-            self.ports.remove(&(i.vnet, i.lport, id));
+            self.ports.remove(port_key(i.vnet, i.lport), id);
             if i.connected {
-                self.exact.remove(&(i.vnet, i.lport, i.fport, id));
+                self.exact.remove(ports_key(i.vnet, i.lport, i.fport), id);
             } else {
-                self.wild.remove(&(i.vnet, i.lport, id));
+                self.wild.remove(port_key(i.vnet, i.lport), id);
             }
         }
     }
@@ -382,11 +522,11 @@ impl Table {
         let was = core::mem::replace(&mut p.idx, now);
         self.unindex(id, was);
         if let Some(i) = now {
-            self.ports.insert((i.vnet, i.lport, id));
+            self.ports.insert(port_key(i.vnet, i.lport), id);
             if i.connected {
-                self.exact.insert((i.vnet, i.lport, i.fport, id));
+                self.exact.insert(ports_key(i.vnet, i.lport, i.fport), id);
             } else {
-                self.wild.insert((i.vnet, i.lport, id));
+                self.wild.insert(port_key(i.vnet, i.lport), id);
             }
         }
     }
@@ -399,17 +539,26 @@ impl Table {
         let mut wild = BTreeSet::new();
         for (&id, p) in &self.pcbs {
             if p.hashed {
-                ports.insert((p.vnet.id, p.lport, id));
+                ports.insert((port_key(p.vnet.id, p.lport), id));
                 if p.wild() {
-                    wild.insert((p.vnet.id, p.lport, id));
+                    wild.insert((port_key(p.vnet.id, p.lport), id));
                 } else {
-                    exact.insert((p.vnet.id, p.lport, p.fport, id));
+                    exact.insert((ports_key(p.vnet.id, p.lport, p.fport), id));
                 }
             }
         }
-        assert_eq!(ports, self.ports, "port index");
-        assert_eq!(exact, self.exact, "exact index");
-        assert_eq!(wild, self.wild, "wildcard index");
+        // PCB order: every PCB once, sorted, and the dead counted.
+        assert!(self.order.iter().is_sorted_by(|a, b| a < b), "order sorted");
+        let live = self
+            .order
+            .iter()
+            .filter(|id| self.pcbs.contains_key(id))
+            .count();
+        assert_eq!(live, self.pcbs.len(), "every PCB in order");
+        assert_eq!(self.order.len() - live, self.dead, "dead ids counted");
+        assert_eq!(ports, self.ports.all(), "port index");
+        assert_eq!(exact, self.exact.all(), "exact index");
+        assert_eq!(wild, self.wild.all(), "wildcard index");
         // The connected hash has each connected PCB, as it is now.
         if let Some(h) = self.hash {
             for (&id, p) in &self.pcbs {
@@ -426,24 +575,24 @@ impl Table {
     /// The hashed PCBs bound to `lport` in `vnet`, in PCB order.
     fn on_port(&self, vnet: u32, lport: u16) -> impl Iterator<Item = (u64, &Pcb)> {
         self.ports
-            .range((vnet, lport, 0)..=(vnet, lport, u64::MAX))
-            .filter_map(|&(_, _, id)| self.pcbs.get(&id).map(|p| (id, p)))
+            .ids(port_key(vnet, lport))
+            .filter_map(|id| self.pcbs.get(&id).map(|p| (id, &**p)))
     }
 
     /// The hashed unconnected PCBs bound to `lport` in `vnet`, in PCB
     /// order.
     fn on_port_wild(&self, vnet: u32, lport: u16) -> impl Iterator<Item = &Pcb> {
         self.wild
-            .range((vnet, lport, 0)..=(vnet, lport, u64::MAX))
-            .filter_map(|&(_, _, id)| self.pcbs.get(&id))
+            .ids(port_key(vnet, lport))
+            .filter_map(|id| self.pcbs.get(&id).map(|p| &**p))
     }
 
     /// The hashed connected PCBs with ports `lport` and `fport` in
     /// `vnet`, in PCB order.
     fn on_ports(&self, vnet: u32, lport: u16, fport: u16) -> impl Iterator<Item = &Pcb> {
         self.exact
-            .range((vnet, lport, fport, 0)..=(vnet, lport, fport, u64::MAX))
-            .filter_map(|&(_, _, _, id)| self.pcbs.get(&id))
+            .ids(ports_key(vnet, lport, fport))
+            .filter_map(|id| self.pcbs.get(&id).map(|p| &**p))
     }
 
     /// `in_pcbdrop` and `in_pcbremhash`: out of the lookups, its port

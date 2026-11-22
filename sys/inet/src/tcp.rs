@@ -48,6 +48,7 @@ use sync::SpinLock;
 use crate::addr::{self, is_broadcast4, is_multicast4, is_multicast6, is_v4mapped, v4_of};
 use crate::ip::{self, Ip};
 use crate::pcb::{Pcb, TCB};
+use crate::wheel::{self, Wheel};
 use crate::{Cred, Family, Inner, Proto, Socket, cksum, state, tune};
 
 pub use ::tcp::State as Tstate;
@@ -617,17 +618,10 @@ fn transmit_replies(vnet: &Arc<Vnet>, rs: Vec<Reply>) {
 
 // --- Timers ---
 
-/// Every connection's next deadline (ns), by time and by socket.
-#[derive(Debug)]
-struct TimerQ {
-    by_time: BTreeMap<(u64, u64), Weak<Socket>>,
-    by_id: BTreeMap<u64, u64>,
-}
-
-static TIMERS: SpinLock<TimerQ> = SpinLock::new(TimerQ {
-    by_time: BTreeMap::new(),
-    by_id: BTreeMap::new(),
-});
+/// Every connection's next deadline (ns), on a timing wheel (the
+/// callout wheel its `t_callout` would be on); each socket holds its
+/// entry's handle (`timer_node`).
+static TIMERS: SpinLock<Wheel<Weak<Socket>>> = SpinLock::new(Wheel::new());
 
 /// The earliest TCP deadline (ns), for the timer thread.
 static NEXT: AtomicU64 = AtomicU64::new(u64::MAX);
@@ -654,15 +648,15 @@ fn unschedule(so: &Arc<Socket>) {
 /// Puts `so`'s timer in the queue for `want` (ns), or out of it.
 fn requeue(so: &Arc<Socket>, at: Option<u64>, want: u64) {
     let mut q = TIMERS.lock();
-    if let Some(old) = q.by_id.remove(&so.id) {
-        q.by_time.remove(&(old, so.id));
-    }
+    // Relaxed: the handle is only used under the queue's lock.
+    let old = q.remove(so.timer_node.swap(wheel::NONE, Ordering::Relaxed));
     so.timer_at.store(want, Ordering::Relaxed);
     if at.is_some() {
         let ns = want;
-        q.by_id.insert(so.id, ns);
-        q.by_time.insert((ns, so.id), Arc::downgrade(so));
+        let h = q.insert(ns, Arc::downgrade(so));
+        so.timer_node.store(h, Ordering::Relaxed);
         drop(q);
+        drop(old);
         // AcqRel: an earlier deadline wins, and the thread sees it.
         if NEXT.fetch_min(ns, Ordering::AcqRel) > ns {
             crate::timer_kick();
@@ -686,19 +680,16 @@ pub(crate) fn run_timers(now: u64) -> u64 {
     loop {
         let due = {
             let mut q = TIMERS.lock();
-            let Some((&(t, id), _)) = q.by_time.iter().next() else {
+            let Some((_, w)) = q.pop_due(now) else {
                 break;
             };
-            if t > now {
-                break;
-            }
-            q.by_id.remove(&id);
             // Taken out under the lock, and dropped after it (a last
             // reference's drop may schedule).
-            let so = q.by_time.remove(&(t, id)).and_then(|w| w.upgrade());
+            let so = w.upgrade();
             if let Some(so) = &so {
                 // Relaxed: under the queue's lock, as in `schedule`.
                 so.timer_at.store(u64::MAX, Ordering::Relaxed);
+                so.timer_node.store(wheel::NONE, Ordering::Relaxed);
             }
             so
         };
@@ -706,12 +697,7 @@ pub(crate) fn run_timers(now: u64) -> u64 {
             so.tcp_timers();
         }
     }
-    let mut next = TIMERS
-        .lock()
-        .by_time
-        .keys()
-        .next()
-        .map_or(u64::MAX, |&(t, _)| t);
+    let mut next = TIMERS.lock().next();
     for v in Vnet::all() {
         if v.inet.get().is_none() {
             continue;

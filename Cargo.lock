@@ -527,6 +527,7 @@ dependencies = [
  "abi",
  "event",
  "hal",
+ "intmap",
  "ktls",
  "mbuf",
  "net",

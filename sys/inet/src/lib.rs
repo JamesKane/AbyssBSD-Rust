@@ -68,6 +68,7 @@ mod tcp;
 mod tests;
 pub mod tls;
 mod udp;
+mod wheel;
 #[cfg(test)]
 mod wire6_tests;
 #[cfg(test)]
@@ -516,6 +517,9 @@ pub struct Socket {
     /// When its TCP timer is queued for (ns), `u64::MAX` if not: the
     /// timer queue's entry, written under its lock, read without.
     pub(crate) timer_at: core::sync::atomic::AtomicU64,
+    /// That entry's handle in the timer wheel ([`wheel::NONE`] if none),
+    /// under the queue's lock.
+    pub(crate) timer_node: core::sync::atomic::AtomicU32,
     /// The sides ([`side`]) whose wakeup waits for a receive batch's
     /// flush ([`Socket::wake_soon`]).
     pub(crate) wake_owed: core::sync::atomic::AtomicU8,
@@ -627,6 +631,7 @@ impl Socket {
             spliced: core::sync::atomic::AtomicU8::new(0),
             splice_sent: AtomicU64::new(0),
             timer_at: core::sync::atomic::AtomicU64::new(u64::MAX),
+            timer_node: core::sync::atomic::AtomicU32::new(wheel::NONE),
             wake_owed: core::sync::atomic::AtomicU8::new(0),
             tls_tx: sync::PreemptLock::new(None),
         });

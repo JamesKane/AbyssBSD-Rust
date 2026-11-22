@@ -9,6 +9,7 @@ publish.workspace = true
 abi = { path = "../../lib/abi" }
 event = { path = "../event" }
 hal = { path = "../../arch/hal" }
+intmap = { path = "../../lib/intmap" }
 ktls = { path = "../ktls" }
 mbuf = { path = "../mbuf" }
 net = { path = "../net" }
