@@ -19,13 +19,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use abi::errno::Errno;
 use abi::socket::{MSG_DONTWAIT, MSG_EOR, MSG_NBIO, MSG_NOSIGNAL, MSG_OOB, MSG_PEEK, MSG_WAITALL};
 use abi::stat::{S_IFSOCK, Stat};
-use event::Wake;
 use sched::Sleepable;
 use socket::{Control, Cred, Socket, Type};
 use sync::SpinLock;
 use vfs::{Uio, Vnode, VnodeUse};
 
-use crate::event::Poller;
 use crate::signal::Woke;
 
 /// The sockets bound to names, by node (FreeBSD's `v_unpcb`).
@@ -267,12 +265,19 @@ fn wait<R>(
         }
     }
     let timeout = timeout();
-    let poller = Poller::new();
-    let w: Arc<dyn Wake> = Arc::clone(&poller) as Arc<dyn Wake>;
     let deadline = (timeout != 0).then(|| crate::time::now_ns().saturating_add(timeout));
+    // `sbwait`: on the object's own queue, as FreeBSD sleeps on the
+    // buffer's channel, with nothing made or registered per wait.
+    struct Asleep<'a>(&'a event::Notify);
+    impl Drop for Asleep<'_> {
+        fn drop(&mut self) {
+            self.0.sleep_end();
+        }
+    }
+    notify.sleep_begin();
+    let _asleep = Asleep(notify);
     loop {
-        poller.arm();
-        notify.record(&w);
+        let ticket = notify.ticket();
         match retry() {
             Err(Errno::EAGAIN) => {}
             r => return r,
@@ -281,7 +286,9 @@ fn wait<R>(
         if left == Some(0) {
             return Err(Errno::EAGAIN);
         }
-        if poller.wait(s, left)? == Woke::TimedOut {
+        let woke =
+            crate::signal::sleep(s, notify.sleep_queue(), || notify.woken_since(ticket), left)?;
+        if woke == Woke::TimedOut {
             return Err(Errno::EAGAIN);
         }
     }

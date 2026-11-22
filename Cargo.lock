@@ -359,6 +359,7 @@ name = "event"
 version = "0.0.0"
 dependencies = [
  "abi",
+ "sched",
  "sync",
 ]
 

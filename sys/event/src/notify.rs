@@ -5,6 +5,8 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering, fence};
 
+use sched::WaitQueue;
+
 use abi::event::{EV_EOF, EV_ONESHOT};
 use sync::SpinLock;
 
@@ -97,6 +99,14 @@ pub struct Notify {
     /// How the last spins went ([`Notify::may_spin`]).
     spin_missed: AtomicU8,
     inner: SpinLock<Inner>,
+    /// Threads blocked on the object itself (`sbwait`'s sleep on the
+    /// buffer, FreeBSD's sleepqueue keyed by `&sb_acc`): no poller to
+    /// make or register, no list to take; a notification wakes the queue.
+    sleepers: AtomicU32,
+    /// Counts notifications while anyone sleeps: a sleeper waits for it
+    /// to move past the ticket it took before it looked at the object.
+    wakes: AtomicU32,
+    queue: WaitQueue,
 }
 
 /// After this many spins in a row that saw no change, waiters stop
@@ -129,6 +139,9 @@ impl Notify {
                 knotes: Vec::new(),
                 pollers: Pollers::new(),
             }),
+            sleepers: AtomicU32::new(0),
+            wakes: AtomicU32::new(0),
+            queue: WaitQueue::new(),
         }
     }
 
@@ -148,9 +161,51 @@ impl Notify {
         fence(Ordering::SeqCst);
     }
 
-    /// Whether a poller or knote is registered.
+    /// Whether a poller or knote is registered, or a thread sleeps.
     pub fn is_armed(&self) -> bool {
-        self.armed.load(Ordering::Relaxed)
+        self.armed.load(Ordering::Relaxed) || self.sleepers.load(Ordering::Relaxed) != 0
+    }
+
+    /// A thread is about to block on the object ([`Notify::sleep_queue`]):
+    /// it counts as a sleeper until [`Notify::sleep_end`]. Look at the
+    /// object only after this; each look takes a [`Notify::ticket`] first.
+    pub fn sleep_begin(&self) {
+        self.sleepers.fetch_add(1, Ordering::Relaxed);
+        // Pairs with the fence in `deliver`: either it sees the sleeper,
+        // or the sleeper's look sees the state changed before it.
+        fence(Ordering::SeqCst);
+    }
+
+    /// The sleeper is done.
+    pub fn sleep_end(&self) {
+        self.sleepers.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// The notifications so far, taken before a look at the object.
+    #[must_use]
+    pub fn ticket(&self) -> u32 {
+        self.wakes.load(Ordering::Acquire)
+    }
+
+    /// Whether a notification came since `ticket` was taken.
+    #[must_use]
+    pub fn woken_since(&self, ticket: u32) -> bool {
+        self.wakes.load(Ordering::Acquire) != ticket
+    }
+
+    /// Where the sleepers sleep.
+    #[must_use]
+    pub fn sleep_queue(&self) -> &WaitQueue {
+        &self.queue
+    }
+
+    /// Wakes the sleepers, if any (after a fence that orders the state's
+    /// change before the look).
+    fn wake_sleepers(&self) {
+        if self.sleepers.load(Ordering::Relaxed) != 0 {
+            self.wakes.fetch_add(1, Ordering::Release);
+            self.queue.wake_all();
+        }
     }
 
     /// Adds a knote (`knlist_add`), as its filter's attach does. Its
@@ -189,7 +244,7 @@ impl Notify {
     pub fn armed(&self) -> bool {
         self.changed();
         fence(Ordering::SeqCst);
-        self.armed.load(Ordering::Relaxed)
+        self.armed.load(Ordering::Relaxed) || self.sleepers.load(Ordering::Relaxed) != 0
     }
 
     fn changed(&self) {
@@ -240,6 +295,7 @@ impl Notify {
     /// gone (`POLLNVAL`); the knotes hear nothing.
     pub fn drain(&self) {
         fence(Ordering::SeqCst);
+        self.wake_sleepers();
         if !self.armed.load(Ordering::Relaxed) {
             return;
         }
@@ -261,6 +317,9 @@ impl Notify {
     fn deliver(&self, hint: u64, pollers: bool) {
         self.changed();
         fence(Ordering::SeqCst);
+        if pollers {
+            self.wake_sleepers();
+        }
         if !self.armed.load(Ordering::Relaxed) {
             return;
         }
@@ -300,6 +359,8 @@ impl Notify {
     /// and marked `EV_EOF` and `EV_ONESHOT`, so they are reported once
     /// more, if active, and dropped; pollers wake.
     pub fn clear(&self) {
+        fence(Ordering::SeqCst);
+        self.wake_sleepers();
         let knotes = {
             let mut i = self.inner.lock();
             for p in i.pollers.drain() {
