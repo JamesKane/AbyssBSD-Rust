@@ -11,7 +11,8 @@
 //!   attached, as `vtnet` does.
 //! - The interrupt's filter masks the controller; its thread acknowledges
 //!   what is pending, takes received frames, reaps sent ones, follows the
-//!   link, and unmasks it. A system error reinitializes the chip.
+//!   link, unmasks it, and takes once more what arrived while it was
+//!   masked. A system error reinitializes the chip.
 //! - A thread ticks once a second (`rge_tick`): it follows the link,
 //!   reaps sent frames, and counts the transmit watchdog down
 //!   ([`crate::health`]); a stalled transmitter is reported and the chip
@@ -364,8 +365,9 @@ impl Shared {
     /// The interrupt thread's work (`rge_intr`), which the tick also runs
     /// for frames that waited too long: acknowledges what is pending,
     /// takes received frames (delivered with the `core` lock let go),
-    /// reaps sent ones, reinitializes on a system error, and unmasks the
-    /// controller. A controller that stopped running stays masked.
+    /// reaps sent ones, reinitializes on a system error, unmasks the
+    /// controller, and takes what arrived before the unmask. A controller
+    /// that stopped running stays masked.
     fn service(&self, s: &Sleepable) {
         let mut g = self.core.lock(s);
         let mut link = false;
@@ -381,7 +383,25 @@ impl Shared {
             }
             if st & r::INTRS == 0 {
                 self.chip.unmask();
-                break;
+                // Collects again once unmasked (`rge_intr_msi`, "to
+                // avoid the possible race introduced by changing
+                // interrupt masks"): a frame that arrived after the last
+                // acknowledgement, while masked, raises no interrupt when
+                // the mask is lifted, and would wait for the next one.
+                let (frames, more) = self.rx_take();
+                self.tx.lock().reap(&self.port);
+                if frames.is_empty() {
+                    break;
+                }
+                drop(g);
+                self.deliver(frames);
+                g = self.core.lock(s);
+                if !more {
+                    break;
+                }
+                // A full budget: service the rest masked, as above.
+                self.chip.mask();
+                continue;
             }
             loop {
                 let (frames, more) = self.rx_take();
