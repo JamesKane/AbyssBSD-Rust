@@ -449,6 +449,16 @@ each system, alternating them and which goes first, rebooting between (FreeBSD a
 `WORKDIR/<side>-<run>.log`; rerun to resume. `cargo xtask perf --platform opi6p --dir WORKDIR`
 writes the report, one table per core class, to `WORKDIR/report.txt`.
 
+`tests/perf/board/p2-board.sh WORKDIR RUNS`, on the workstation with the board's serial adapter
+(`/dev/ttyUSB0`), runs the in-kernel suite `p2` the same way, once per core class a run:
+FreeBSD's side is `kbench.ko` on the NODEBUG kernel (`kbench-run.sh`, the module in
+`kyuawork`'s `perf/`); AbyssBSD's is one boot a class with `abyss.bench=p2 abyss.bench.reboot
+abyss.bench.cpus=<coordinator>,<class>` on its command line (`EFI/ABYSS/CMDLINE` on the Samsung's
+`abyssefi`, set from FreeBSD and put back to `CMDLINE.noprof` at the end), its results read off the
+serial console, after which the board resets into FreeBSD. The coordinator is off the class (an
+A520 for the A720 classes, an A720 for the A520s; `all` is 0, then 1-7). The logs are
+`perf-board.sh`'s, so `cargo xtask perf --platform opi6p --dir WORKDIR` makes the report.
+
 ### The network soak
 
 `cargo xtask --remote net-soak [--duration SECONDS] [--freebsd]` runs `iperf3` between the guest
