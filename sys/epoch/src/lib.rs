@@ -195,12 +195,17 @@ impl Epoch {
     /// unlinked has ended (`epoch_call`): after a grace period begun after
     /// this call. Deferred calls run in the order made, from
     /// [`Epoch::reclaim`].
-    pub fn call(&self, f: Box<dyn FnOnce() + Send>) {
+    /// Returns whether none was waiting before (the callback task may
+    /// need a nudge).
+    pub fn call(&self, f: Box<dyn FnOnce() + Send>) -> bool {
         // SeqCst: the caller's unlink comes before the grace period count
         // read here, so a later grace period's switch follows it.
         fence(Ordering::SeqCst);
         let need = self.started.load(Ordering::SeqCst) + 1;
-        self.deferred.lock().push_back((need, f));
+        let mut q = self.deferred.lock();
+        let first = q.is_empty();
+        q.push_back((need, f));
+        first
     }
 
     /// Deferred calls waiting.

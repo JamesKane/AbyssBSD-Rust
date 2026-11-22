@@ -144,13 +144,33 @@ pub(crate) fn uptime_s() -> u64 {
 
 /// Deletes routes as they expire (`rt_expire`'s callout), and ages the
 /// link-layer table's entries (their `lle_timer`s), once a second.
+/// The network epoch's callback task (`epoch_call_task`, which
+/// `hardclock` queues each tick while a CPU has callbacks): what sections
+/// may no longer see goes a grace period and about a tick after it was
+/// unlinked, so the memory comes back while it is still in the caches.
+/// Asleep while nothing waits.
+static RECLAIM_WQ: sched::WaitQueue = sched::WaitQueue::new();
+
+fn reclaim_kick() {
+    RECLAIM_WQ.wake_one();
+}
+
+fn start_epoch_reclaim() {
+    net::view::set_reclaim_kick(reclaim_kick);
+    let _ = sched::spawn("epoch", sched::Priority::KERNEL, |s| {
+        loop {
+            RECLAIM_WQ.wait_until(s, || net::view::pending() > 0);
+            // A tick's batch, as the callback task runs once a tick.
+            crate::time::sleep_ns(s, 1_000_000);
+            net::view::reclaim(&mut || crate::time::sleep_ns(s, 1_000_000));
+        }
+    });
+}
+
 fn start_route_expiry() {
     let _ = sched::spawn("rtexpire", sched::Priority::KERNEL, |s| {
         loop {
             crate::time::sleep_ns(s, 1_000_000_000);
-            // The network epoch's callback task: views and the like
-            // retired a grace period ago go now.
-            net::view::reclaim(&mut || crate::time::sleep_ns(s, 1_000_000));
             let now = u64::try_from(now_s()).unwrap_or(0);
             let up = uptime_s();
             // `bridge_timer`: each bridge's table pruned in its period.
@@ -273,6 +293,7 @@ pub(crate) fn init(s: &Sleepable) {
     inet::ifnet::configure_loopback(&mut net::vnet0().net.lock(), now);
     splice::init();
     start_netisr();
+    start_epoch_reclaim();
     start_route_expiry();
     start_ip6_timer();
     sysctl::init(s);

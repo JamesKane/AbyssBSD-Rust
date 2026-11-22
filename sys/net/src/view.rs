@@ -163,19 +163,45 @@ impl Drop for Published {
 /// Drops `x` after a grace period (`epoch_call`): for what a reader in a
 /// section may still be looking at when its writer unlinked it.
 pub fn defer_drop<T: Send + 'static>(x: T) {
-    NET_EPOCH.call(Box::new(move || drop(x)));
+    if NET_EPOCH.call(Box::new(move || drop(x))) {
+        kick_reclaim();
+    }
+}
+
+/// Wakes the epoch's callback task (set once at start-up).
+static RECLAIM_KICK: sync::Once<fn()> = sync::Once::new();
+
+/// Sets what wakes the network epoch's callback task when a deferred call
+/// is queued with none waiting.
+pub fn set_reclaim_kick(f: fn()) {
+    let _ = RECLAIM_KICK.set(f);
+}
+
+fn kick_reclaim() {
+    if let Some(k) = RECLAIM_KICK.get() {
+        k();
+    }
+}
+
+/// Deferred calls waiting for a grace period.
+#[must_use]
+pub fn pending() -> usize {
+    NET_EPOCH.pending()
 }
 
 /// Frees `old` after a grace period (`epoch_call`).
 fn retire(old: *mut View) {
     let old = SendPtr(old);
-    NET_EPOCH.call(Box::new(move || {
+    let first = NET_EPOCH.call(Box::new(move || {
         let p = old;
         // SAFETY: unpublished before this call was queued, so after the
         // grace period no section can still read it; made by
         // `Box::into_raw`, freed once.
         drop(unsafe { Box::from_raw(p.0) });
     }));
+    if first {
+        kick_reclaim();
+    }
 }
 
 /// A view's pointer, carried to the deferred free.
