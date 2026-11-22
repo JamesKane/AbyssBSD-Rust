@@ -28,6 +28,7 @@ addr = { path = "../lib/addr" }
 intmap = { path = "../lib/intmap" }
 bootproto = { path = "../boot/bootproto" }
 bus = { path = "../sys/bus" }
+drm = { path = "../sys/drm" }
 evdev = { path = "../sys/evdev" }
 input = { path = "../sys/input" }
 kcrypto = { path = "../sys/crypto" }

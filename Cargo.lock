@@ -324,6 +324,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "drm"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "addr",
+ "drm-fourcc",
+ "sched",
+ "sync",
+ "vfs",
+ "vm",
+]
+
+[[package]]
 name = "drm-fourcc"
 version = "0.0.0"
 
@@ -628,6 +641,7 @@ dependencies = [
  "demangle",
  "devtree",
  "driver-table",
+ "drm",
  "efi",
  "elf",
  "evdev",

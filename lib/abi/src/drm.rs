@@ -187,7 +187,12 @@ impl DrmWaitVblank {
     /// The reply for a wait that finished at `sec`.`usec`.
     #[must_use]
     pub fn reply(kind: u32, sequence: u32, sec: i64, usec: i64) -> Self {
-        let r = DrmWaitVblankReply { kind, sequence, tval_sec: sec, tval_usec: usec };
+        let r = DrmWaitVblankReply {
+            kind,
+            sequence,
+            tval_sec: sec,
+            tval_usec: usec,
+        };
         Self {
             kind: r.kind,
             sequence: r.sequence,
@@ -932,8 +937,7 @@ pub const DRM_IOCTL_MODE_GETPLANERESOURCES: u32 = iowr(0xB5, size_of::<DrmModeGe
 pub const DRM_IOCTL_MODE_GETPLANE: u32 = iowr(0xB6, size_of::<DrmModeGetPlane>());
 pub const DRM_IOCTL_MODE_SETPLANE: u32 = iowr(0xB7, size_of::<DrmModeSetPlane>());
 pub const DRM_IOCTL_MODE_ADDFB2: u32 = iowr(0xB8, size_of::<DrmModeFbCmd2>());
-pub const DRM_IOCTL_MODE_OBJ_GETPROPERTIES: u32 =
-    iowr(0xB9, size_of::<DrmModeObjGetProperties>());
+pub const DRM_IOCTL_MODE_OBJ_GETPROPERTIES: u32 = iowr(0xB9, size_of::<DrmModeObjGetProperties>());
 pub const DRM_IOCTL_MODE_OBJ_SETPROPERTY: u32 = iowr(0xBA, size_of::<DrmModeObjSetProperty>());
 pub const DRM_IOCTL_MODE_CURSOR2: u32 = iowr(0xBB, size_of::<DrmModeCursor2>());
 pub const DRM_IOCTL_MODE_ATOMIC: u32 = iowr(0xBC, size_of::<DrmModeAtomic>());
@@ -946,70 +950,70 @@ pub const DRM_IOCTL_MODE_REVOKE_LEASE: u32 = iowr(0xC9, size_of::<DrmModeRevokeL
 pub const DRM_IOCTL_MODE_GETFB2: u32 = iowr(0xCE, size_of::<DrmModeFbCmd2>());
 pub const DRM_IOCTL_MODE_CLOSEFB: u32 = iowr(0xD0, size_of::<DrmModeClosefb>());
 
+// Layouts, from compiling `drm.h` and `drm_mode.h` for LP64 with a C
+// compiler. `abi-check` compares against FreeBSD's base headers, and
+// these are libdrm's (a port), so each size is pinned here instead.
+const _: () = {
+    assert!(size_of::<DrmVersion>() == 64);
+    assert!(size_of::<DrmUnique>() == 16);
+    assert!(size_of::<DrmAuth>() == 4);
+    assert!(size_of::<DrmGemClose>() == 8);
+    assert!(size_of::<DrmGemFlink>() == 8);
+    assert!(size_of::<DrmGemOpen>() == 16);
+    assert!(size_of::<DrmGetCap>() == 16);
+    assert!(size_of::<DrmSetClientCap>() == 16);
+    assert!(size_of::<DrmSetClientName>() == 16);
+    assert!(size_of::<DrmModesetCtl>() == 8);
+    assert!(size_of::<DrmPrimeHandle>() == 12);
+    assert!(size_of::<DrmWaitVblank>() == 24);
+    assert!(size_of::<DrmCrtcGetSequence>() == 24);
+    assert!(size_of::<DrmCrtcQueueSequence>() == 24);
+    assert!(size_of::<DrmEvent>() == 8);
+    assert!(size_of::<DrmEventVblank>() == 32);
+    assert!(size_of::<DrmEventCrtcSequence>() == 32);
+    assert!(size_of::<DrmModeModeinfo>() == 68);
+    assert!(size_of::<DrmModeCardRes>() == 64);
+    assert!(size_of::<DrmModeCrtc>() == 104);
+    assert!(size_of::<DrmModeSetPlane>() == 48);
+    assert!(size_of::<DrmModeGetPlane>() == 32);
+    assert!(size_of::<DrmModeGetPlaneRes>() == 16);
+    assert!(size_of::<DrmModeGetEncoder>() == 20);
+    assert!(size_of::<DrmModeGetConnector>() == 80);
+    assert!(size_of::<DrmModePropertyEnum>() == 40);
+    assert!(size_of::<DrmModeGetProperty>() == 64);
+    assert!(size_of::<DrmModeConnectorSetProperty>() == 16);
+    assert!(size_of::<DrmModeObjGetProperties>() == 32);
+    assert!(size_of::<DrmModeObjSetProperty>() == 24);
+    assert!(size_of::<DrmModeGetBlob>() == 16);
+    assert!(size_of::<DrmModeFbCmd>() == 28);
+    assert!(size_of::<DrmModeFbCmd2>() == 104);
+    assert!(size_of::<DrmModeFbDirtyCmd>() == 24);
+    assert!(size_of::<DrmModeCursor>() == 28);
+    assert!(size_of::<DrmModeCursor2>() == 36);
+    assert!(size_of::<DrmModeCrtcLut>() == 32);
+    assert!(size_of::<DrmModeCrtcPageFlip>() == 24);
+    assert!(size_of::<DrmModeCrtcPageFlipTarget>() == 24);
+    assert!(size_of::<DrmModeCreateDumb>() == 32);
+    assert!(size_of::<DrmModeMapDumb>() == 16);
+    assert!(size_of::<DrmModeDestroyDumb>() == 4);
+    assert!(size_of::<DrmModeAtomic>() == 56);
+    assert!(size_of::<DrmFormatModifierBlob>() == 24);
+    assert!(size_of::<DrmFormatModifier>() == 24);
+    assert!(size_of::<DrmModeCreateBlob>() == 16);
+    assert!(size_of::<DrmModeDestroyBlob>() == 4);
+    assert!(size_of::<DrmModeCreateLease>() == 24);
+    assert!(size_of::<DrmModeListLessees>() == 16);
+    assert!(size_of::<DrmModeGetLease>() == 16);
+    assert!(size_of::<DrmModeRevokeLease>() == 4);
+    assert!(size_of::<DrmModeRect>() == 16);
+    assert!(size_of::<DrmModeClosefb>() == 8);
+    assert!(size_of::<DrmColorLut>() == 8);
+    assert!(size_of::<DrmColorCtm>() == 72);
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Sizes from compiling `drm.h` and `drm_mode.h` with a C compiler
-    /// for LP64.
-    #[test]
-    fn layouts_match_the_c_headers() {
-        assert_eq!(size_of::<DrmVersion>(), 64);
-        assert_eq!(size_of::<DrmUnique>(), 16);
-        assert_eq!(size_of::<DrmAuth>(), 4);
-        assert_eq!(size_of::<DrmGemClose>(), 8);
-        assert_eq!(size_of::<DrmGemFlink>(), 8);
-        assert_eq!(size_of::<DrmGemOpen>(), 16);
-        assert_eq!(size_of::<DrmGetCap>(), 16);
-        assert_eq!(size_of::<DrmSetClientCap>(), 16);
-        assert_eq!(size_of::<DrmSetClientName>(), 16);
-        assert_eq!(size_of::<DrmModesetCtl>(), 8);
-        assert_eq!(size_of::<DrmPrimeHandle>(), 12);
-        assert_eq!(size_of::<DrmWaitVblank>(), 24);
-        assert_eq!(size_of::<DrmCrtcGetSequence>(), 24);
-        assert_eq!(size_of::<DrmCrtcQueueSequence>(), 24);
-        assert_eq!(size_of::<DrmEvent>(), 8);
-        assert_eq!(size_of::<DrmEventVblank>(), 32);
-        assert_eq!(size_of::<DrmEventCrtcSequence>(), 32);
-        assert_eq!(size_of::<DrmModeModeinfo>(), 68);
-        assert_eq!(size_of::<DrmModeCardRes>(), 64);
-        assert_eq!(size_of::<DrmModeCrtc>(), 104);
-        assert_eq!(size_of::<DrmModeSetPlane>(), 48);
-        assert_eq!(size_of::<DrmModeGetPlane>(), 32);
-        assert_eq!(size_of::<DrmModeGetPlaneRes>(), 16);
-        assert_eq!(size_of::<DrmModeGetEncoder>(), 20);
-        assert_eq!(size_of::<DrmModeGetConnector>(), 80);
-        assert_eq!(size_of::<DrmModePropertyEnum>(), 40);
-        assert_eq!(size_of::<DrmModeGetProperty>(), 64);
-        assert_eq!(size_of::<DrmModeConnectorSetProperty>(), 16);
-        assert_eq!(size_of::<DrmModeObjGetProperties>(), 32);
-        assert_eq!(size_of::<DrmModeObjSetProperty>(), 24);
-        assert_eq!(size_of::<DrmModeGetBlob>(), 16);
-        assert_eq!(size_of::<DrmModeFbCmd>(), 28);
-        assert_eq!(size_of::<DrmModeFbCmd2>(), 104);
-        assert_eq!(size_of::<DrmModeFbDirtyCmd>(), 24);
-        assert_eq!(size_of::<DrmModeCursor>(), 28);
-        assert_eq!(size_of::<DrmModeCursor2>(), 36);
-        assert_eq!(size_of::<DrmModeCrtcLut>(), 32);
-        assert_eq!(size_of::<DrmModeCrtcPageFlip>(), 24);
-        assert_eq!(size_of::<DrmModeCrtcPageFlipTarget>(), 24);
-        assert_eq!(size_of::<DrmModeCreateDumb>(), 32);
-        assert_eq!(size_of::<DrmModeMapDumb>(), 16);
-        assert_eq!(size_of::<DrmModeDestroyDumb>(), 4);
-        assert_eq!(size_of::<DrmModeAtomic>(), 56);
-        assert_eq!(size_of::<DrmFormatModifierBlob>(), 24);
-        assert_eq!(size_of::<DrmFormatModifier>(), 24);
-        assert_eq!(size_of::<DrmModeCreateBlob>(), 16);
-        assert_eq!(size_of::<DrmModeDestroyBlob>(), 4);
-        assert_eq!(size_of::<DrmModeCreateLease>(), 24);
-        assert_eq!(size_of::<DrmModeListLessees>(), 16);
-        assert_eq!(size_of::<DrmModeGetLease>(), 16);
-        assert_eq!(size_of::<DrmModeRevokeLease>(), 4);
-        assert_eq!(size_of::<DrmModeRect>(), 16);
-        assert_eq!(size_of::<DrmModeClosefb>(), 8);
-        assert_eq!(size_of::<DrmColorLut>(), 8);
-        assert_eq!(size_of::<DrmColorCtm>(), 72);
-    }
 
     #[test]
     fn requests_use_freebsd_encoding() {
@@ -1028,7 +1032,10 @@ mod tests {
     #[test]
     fn event_bytes() {
         let e = DrmEventVblank {
-            base: DrmEvent { kind: DRM_EVENT_FLIP_COMPLETE, length: 32 },
+            base: DrmEvent {
+                kind: DRM_EVENT_FLIP_COMPLETE,
+                length: 32,
+            },
             user_data: 0x1122_3344_5566_7788,
             tv_sec: 1,
             tv_usec: 2,

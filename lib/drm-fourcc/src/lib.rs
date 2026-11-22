@@ -108,7 +108,16 @@ pub struct FormatInfo {
 }
 
 const fn rgb(format: Fourcc, name: &'static str, cpp: u8, has_alpha: bool) -> FormatInfo {
-    FormatInfo { format, name, planes: 1, cpp: [cpp, 0, 0], hsub: 1, vsub: 1, has_alpha, is_yuv: false }
+    FormatInfo {
+        format,
+        name,
+        planes: 1,
+        cpp: [cpp, 0, 0],
+        hsub: 1,
+        vsub: 1,
+        has_alpha,
+        is_yuv: false,
+    }
 }
 
 const fn yuv(
@@ -119,7 +128,16 @@ const fn yuv(
     hsub: u8,
     vsub: u8,
 ) -> FormatInfo {
-    FormatInfo { format, name, planes, cpp, hsub, vsub, has_alpha: false, is_yuv: true }
+    FormatInfo {
+        format,
+        name,
+        planes,
+        cpp,
+        hsub,
+        vsub,
+        has_alpha: false,
+        is_yuv: true,
+    }
 }
 
 /// Every format this table knows.
@@ -177,13 +195,21 @@ impl FormatInfo {
     /// Width in pixels of plane `plane` for a framebuffer `width` wide.
     #[must_use]
     pub fn plane_width(&self, plane: usize, width: u32) -> u32 {
-        if plane == 0 { width } else { width.div_ceil(u32::from(self.hsub)) }
+        if plane == 0 {
+            width
+        } else {
+            width.div_ceil(u32::from(self.hsub))
+        }
     }
 
     /// Height in lines of plane `plane`.
     #[must_use]
     pub fn plane_height(&self, plane: usize, height: u32) -> u32 {
-        if plane == 0 { height } else { height.div_ceil(u32::from(self.vsub)) }
+        if plane == 0 {
+            height
+        } else {
+            height.div_ceil(u32::from(self.vsub))
+        }
     }
 
     /// The smallest pitch plane `plane` of a `width`-wide framebuffer
@@ -287,7 +313,9 @@ pub fn check_fb(req: &FbRequest, max_width: u32, max_height: u32) -> Result<[u64
         if req.pitches[plane] < min {
             return Err(FbError::PitchTooSmall);
         }
-        if req.modifier == MOD_LINEAR && !req.pitches[plane].is_multiple_of(u32::from(info.cpp[plane])) {
+        if req.modifier == MOD_LINEAR
+            && !req.pitches[plane].is_multiple_of(u32::from(info.cpp[plane]))
+        {
             return Err(FbError::PitchUnaligned);
         }
         let lines = u64::from(info.plane_height(plane, req.height));

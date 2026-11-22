@@ -73,6 +73,9 @@ pub(crate) fn unchecked(sources: &[(String, String)]) -> Vec<String> {
                     }
                     None if checked.contains(name) => {}
                     None if PRIVATE.iter().any(|(t, _)| *t == name) => {}
+                    // libdrm's structures (a port's header, not base): their
+                    // sizes are pinned at compile time in the file.
+                    None if path == "lib/abi/src/drm.rs" => {}
                     None => out.push(format!(
                         "{path}: `{name}` is #[repr(C)] but no abi::layout::LAYOUTS entry checks it"
                     )),

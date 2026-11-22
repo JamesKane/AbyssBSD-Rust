@@ -36,6 +36,7 @@ mod cred;
 mod devctl;
 mod devices;
 mod devstat;
+mod drm;
 mod efidev;
 mod efirtc;
 mod errata;

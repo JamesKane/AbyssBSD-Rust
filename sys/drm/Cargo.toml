@@ -1,0 +1,18 @@
+[package]
+name = "drm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+addr = { path = "../../lib/addr" }
+drm-fourcc = { path = "../../lib/drm-fourcc" }
+sched = { path = "../sched" }
+sync = { path = "../sync" }
+vfs = { path = "../vfs" }
+vm = { path = "../vm" }
+
+[lints]
+workspace = true
