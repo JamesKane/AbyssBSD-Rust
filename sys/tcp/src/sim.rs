@@ -78,6 +78,9 @@ impl Sock for SimSock {
     fn snd_copy(&mut self, off: u32, len: u32) -> Option<Chain> {
         self.snd.copy_seq(off as usize, len as usize).ok()
     }
+    fn snd_read(&self, off: u32, dst: &mut [u8]) -> usize {
+        self.snd.copy_out(off as usize, dst)
+    }
     fn snd_drop(&mut self, n: u32) {
         self.snd.trim_front(n as usize);
     }

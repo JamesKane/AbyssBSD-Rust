@@ -418,6 +418,8 @@ impl Tcpcb {
             tso = false;
         }
         let mut data = None;
+        let mut inline = [0u8; SMALL as usize];
+        let mut inline_len = 0;
         if len > 0 {
             if self.flags & tf::FORCEDATA != 0 && len == 1 {
                 cx.stats.inc(tcps::SNDPROBE);
@@ -436,27 +438,21 @@ impl Tcpcb {
                 cx.stats.inc(tcps::SNDPACK);
                 cx.stats.add(tcps::SNDBYTE, len as u64);
             }
-            let Some(d) = so.snd_copy(off as u32, len as u32) else {
-                // ENOBUFS: back to one segment.
-                self.snd_cwnd = self.maxseg();
-                return false;
-            };
-            // A short piece goes by copy (it then fits the header's mbuf).
-            let d = if (len as u32) <= SMALL {
-                let mut b = alloc::vec![0u8; len as usize];
-                d.copy_out(0, &mut b);
-                mbuf::Chain::from_slice(&b).ok()
+            // A short piece is copied into the header's mbuf
+            // (`m_copydata`), a longer one referenced (`m_copym`).
+            if (len as u32) <= SMALL {
+                inline_len = so.snd_read(off as u32, &mut inline[..len as usize]);
             } else {
-                Some(d)
-            };
-            let Some(d) = d else {
-                self.snd_cwnd = self.maxseg();
-                return false;
-            };
+                let Some(d) = so.snd_copy(off as u32, len as u32) else {
+                    // ENOBUFS: back to one segment.
+                    self.snd_cwnd = self.maxseg();
+                    return false;
+                };
+                data = Some(d);
+            }
             if len <= maxseg - optlen {
                 tso = false;
             }
-            data = Some(d);
             if off as u32 + len as u32 == so.snd_cc() && flags & th::SYN == 0 {
                 flags |= th::PUSH;
             }
@@ -563,7 +559,7 @@ impl Tcpcb {
         } else {
             0
         };
-        let Some(pkt) = build_with(t, &optb[..optn], data) else {
+        let Some(pkt) = build_with(t, &optb[..optn], data, &inline[..inline_len]) else {
             // ENOBUFS: as if sent, with the window cut to a segment.
             self.snd_cwnd = self.maxseg();
             return false;

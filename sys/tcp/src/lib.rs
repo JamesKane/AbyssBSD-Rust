@@ -185,6 +185,9 @@ pub trait Sock {
     /// reference, from the send pointer (`sbsndptr_noadv`) when it is at
     /// or before `off`; `None` out of buffers.
     fn snd_copy(&mut self, off: u32, len: u32) -> Option<Chain>;
+    /// `m_copydata` from `off` in the send buffer into `dst`; returns the
+    /// bytes copied.
+    fn snd_read(&self, off: u32, dst: &mut [u8]) -> usize;
     /// `sbdrop`: the first `n` bytes were acknowledged; wakes writers.
     fn snd_drop(&mut self, n: u32);
     /// `SBS_CANTSENDMORE` on the send buffer.

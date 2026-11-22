@@ -722,7 +722,7 @@ impl Tcpcb {
 pub fn build(t: Th, to: &Opts, data: Option<mbuf::Chain>) -> Option<mbuf::Packet> {
     let mut ob = [0u8; MAXOLEN + 4];
     let olen = to.write(&mut ob);
-    build_with(t, &ob[..olen], data)
+    build_with(t, &ob[..olen], data, &[])
 }
 
 /// [`build`] with the options already written (`tcp_output` writes them
@@ -732,6 +732,7 @@ pub(crate) fn build_with(
     mut t: Th,
     opts: &[u8],
     data: Option<mbuf::Chain>,
+    inline: &[u8],
 ) -> Option<mbuf::Packet> {
     let olen = opts.len().min(MAXOLEN);
     t.off = hdr::HDR_LEN + olen;
@@ -740,8 +741,13 @@ pub(crate) fn build_with(
     let mut h = [0u8; hdr::HDR_LEN + MAXOLEN];
     t.write(&mut h[..hdr::HDR_LEN]);
     h[hdr::HDR_LEN..t.off].copy_from_slice(&opts[..olen]);
-    let mut p = mbuf::Packet::for_output(t.off).ok()?;
+    let mut p = mbuf::Packet::for_output(t.off + inline.len()).ok()?;
     p.data.extend_from_slice(&h[..t.off]).ok()?;
+    // A short payload, copied in behind the header (`m_copydata` into
+    // the header's mbuf).
+    if !inline.is_empty() {
+        p.data.extend_from_slice(inline).ok()?;
+    }
     if let Some(d) = data {
         p.data.append(d);
     }

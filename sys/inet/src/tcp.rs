@@ -271,6 +271,9 @@ impl Sock for View<'_> {
     fn snd_copy(&mut self, off: u32, len: u32) -> Option<Chain> {
         self.i.sndq.copy_seq(off as usize, len as usize).ok()
     }
+    fn snd_read(&self, off: u32, dst: &mut [u8]) -> usize {
+        self.i.sndq.copy_out(off as usize, dst)
+    }
     fn snd_drop(&mut self, n: u32) {
         let n = n.min(self.i.snd.cc);
         let freed = self.i.sndq.cut_front(n as usize);
