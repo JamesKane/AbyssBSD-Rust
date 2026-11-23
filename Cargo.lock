@@ -732,6 +732,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "linlondp"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "drm",
+ "drm-fourcc",
+ "kms-check",
+ "sync",
+]
+
+[[package]]
 name = "loader-efi"
 version = "0.0.0"
 dependencies = [

@@ -1,0 +1,16 @@
+[package]
+name = "linlondp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+drm = { path = "../../sys/drm" }
+drm-fourcc = { path = "../../lib/drm-fourcc" }
+kms-check = { path = "../../lib/kms-check" }
+sync = { path = "../../sys/sync" }
+
+[lints]
+workspace = true
