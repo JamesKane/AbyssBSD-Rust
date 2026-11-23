@@ -85,6 +85,33 @@ macro_rules! defs {
 
 const TABLE: &[Def] = &[
     def!(DRM_IOCTL_VERSION, "VERSION", DrmVersion, version),
+    def!(DRM_IOCTL_GET_MAGIC, "GET_MAGIC", DrmAuth, get_magic),
+    def!(DRM_IOCTL_AUTH_MAGIC, "AUTH_MAGIC", DrmAuth, auth_magic),
+    // Leases are not built: callers (wlroots) take this refusal and go on.
+    def!(
+        DRM_IOCTL_MODE_CREATE_LEASE,
+        "MODE_CREATE_LEASE",
+        DrmModeCreateLease,
+        no_leases
+    ),
+    def!(
+        DRM_IOCTL_MODE_LIST_LESSEES,
+        "MODE_LIST_LESSEES",
+        DrmModeListLessees,
+        no_leases
+    ),
+    def!(
+        DRM_IOCTL_MODE_GET_LEASE,
+        "MODE_GET_LEASE",
+        DrmModeGetLease,
+        no_leases
+    ),
+    def!(
+        DRM_IOCTL_MODE_REVOKE_LEASE,
+        "MODE_REVOKE_LEASE",
+        DrmModeRevokeLease,
+        no_leases
+    ),
     def!(DRM_IOCTL_GEM_CLOSE, "GEM_CLOSE", DrmGemClose, gem_close),
     def!(DRM_IOCTL_GET_CAP, "GET_CAP", DrmGetCap, get_cap),
     def!(
@@ -315,6 +342,28 @@ fn version(f: &Open, a: &mut DrmVersion) -> Result<usize, Errno> {
         *len = text.len() as u64;
     }
     Ok(0)
+}
+
+/// `GET_MAGIC`: a number that names this file, which the master can
+/// vouch for with `AUTH_MAGIC`.
+fn get_magic(f: &Open, a: &mut DrmAuth) -> Result<usize, Errno> {
+    let me = f.card.file(f.id).ok_or(Errno::ENODEV)?;
+    a.magic = me.magic();
+    Ok(0)
+}
+
+/// `AUTH_MAGIC`: the master vouches for the file that holds `magic`.
+fn auth_magic(f: &Open, a: &mut DrmAuth) -> Result<usize, Errno> {
+    if !f.is_master() {
+        return Err(Errno::EACCES);
+    }
+    f.authenticate(a.magic).map(|()| 0)
+}
+
+/// The lease calls: leasing display objects to another client is not
+/// built, and says so as callers expect.
+fn no_leases<T>(_: &Open, _: &mut T) -> Result<usize, Errno> {
+    Err(Errno::EOPNOTSUPP)
 }
 
 /// `PRIME_HANDLE_TO_FD`: a descriptor for the buffer a handle names.

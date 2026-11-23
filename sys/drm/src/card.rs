@@ -7,7 +7,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use abi::errno::Errno;
 use sched::{Sleepable, WaitQueue};
@@ -48,6 +48,10 @@ pub struct Card {
     /// Every open file, so a revoke can end them.
     files: SpinLock<Vec<alloc::sync::Weak<Open>>>,
     path: Once<String>,
+    /// The magic numbers files have asked for, until the master
+    /// authenticates them.
+    magics: SpinLock<alloc::collections::BTreeMap<u32, alloc::sync::Weak<Open>>>,
+    next_magic: AtomicU32,
 }
 
 impl core::fmt::Debug for Card {
@@ -80,6 +84,8 @@ pub fn register(driver: Arc<dyn DrmDriver>) -> Result<Arc<Card>, Errno> {
         revoked: AtomicBool::new(false),
         files: SpinLock::new(Vec::new()),
         path: Once::new(),
+        magics: SpinLock::new(alloc::collections::BTreeMap::new()),
+        next_magic: AtomicU32::new(1),
     });
     let path = format!("dri/card{unit}");
     let node = Arc::new(Node(Arc::clone(&card)));
@@ -130,6 +136,15 @@ impl Card {
         UNITS.lock().remove(&self.unit);
     }
 
+    /// The open file with number `id`.
+    pub(crate) fn file(&self, id: u64) -> Option<Arc<Open>> {
+        self.files
+            .lock()
+            .iter()
+            .filter_map(alloc::sync::Weak::upgrade)
+            .find(|f| f.id == id)
+    }
+
     /// A new open file, for a client inside the kernel (the console,
     /// tests); devfs makes the same for each open. The first file
     /// opened becomes master if there is none.
@@ -152,6 +167,8 @@ impl Card {
             notify: vfs::event::Notify::new(),
             hung_up: AtomicBool::new(false),
             client_caps: AtomicU8::new(0),
+            magic: AtomicU32::new(0),
+            authenticated: AtomicBool::new(false),
             name: SpinLock::new(None),
         });
         self.adopt_master(id);
@@ -256,6 +273,10 @@ pub struct Open {
     notify: vfs::event::Notify,
     hung_up: AtomicBool,
     pub(crate) client_caps: AtomicU8,
+    /// The magic number it asked for (`GET_MAGIC`), 0 before.
+    magic: AtomicU32,
+    /// Whether the master vouched for it (`AUTH_MAGIC`).
+    authenticated: AtomicBool,
     /// The name the client gave itself (`SET_CLIENT_NAME`).
     pub(crate) name: SpinLock<Option<String>>,
 }
@@ -338,6 +359,45 @@ impl Open {
         }
         self.wait.wake_all();
         self.notify.notify(0);
+    }
+
+    /// This file's magic number, made on first ask: what it gives the
+    /// master to be authenticated (`drm_getmagic`).
+    pub(crate) fn magic(self: &Arc<Self>) -> u32 {
+        let have = self.magic.load(Ordering::Relaxed);
+        if have != 0 {
+            return have;
+        }
+        // Each number differs from the last and is never 0; the
+        // multiplier spreads them (they are names, not secrets).
+        let n = self.card.next_magic.fetch_add(1, Ordering::Relaxed);
+        let m = n.wrapping_mul(0x9e37_79b9) | 1;
+        match self
+            .magic
+            .compare_exchange(0, m, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => {
+                self.card.magics.lock().insert(m, Arc::downgrade(self));
+                m
+            }
+            Err(other) => other,
+        }
+    }
+
+    /// The master vouches for the file that asked for `magic`
+    /// (`drm_authmagic`): the number is spent.
+    pub(crate) fn authenticate(&self, magic: u32) -> Result<(), Errno> {
+        let file = self.card.magics.lock().remove(&magic);
+        let file = file.and_then(|w| w.upgrade()).ok_or(Errno::EINVAL)?;
+        file.authenticated.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Whether the file may use the calls that need the master's
+    /// say-so: it is the master, or was authenticated.
+    #[must_use]
+    pub fn is_authenticated(&self) -> bool {
+        self.authenticated.load(Ordering::Acquire) || self.is_master()
     }
 
     fn hangup(&self) {

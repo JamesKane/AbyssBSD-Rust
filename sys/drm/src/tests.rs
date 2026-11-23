@@ -2038,3 +2038,93 @@ fn placements_not_built_yet_are_refused_with_a_clear_error() {
         c.unregister(&s());
     }
 }
+
+// ---- authentication and leases ----
+
+#[test]
+fn the_master_vouches_for_a_file_by_its_magic() {
+    let c = card(false, true);
+    let master = open(&c);
+    let guest = open(&c);
+    assert!(master.is_authenticated(), "the master needs no vouching");
+    assert!(!guest.is_authenticated());
+
+    let magic = ctl(&guest, DRM_IOCTL_GET_MAGIC, &DrmAuth { magic: 0 })
+        .unwrap()
+        .magic;
+    assert_ne!(magic, 0);
+    // The same file gets the same number; another file a different one.
+    assert_eq!(
+        ctl(&guest, DRM_IOCTL_GET_MAGIC, &DrmAuth { magic: 0 })
+            .unwrap()
+            .magic,
+        magic
+    );
+    let other = ctl(&master, DRM_IOCTL_GET_MAGIC, &DrmAuth { magic: 0 })
+        .unwrap()
+        .magic;
+    assert_ne!(other, magic);
+
+    // Only the master vouches, and only for a number that was given out.
+    assert_eq!(
+        ctl(&guest, DRM_IOCTL_AUTH_MAGIC, &DrmAuth { magic }).err(),
+        Some(Errno::EACCES)
+    );
+    assert_eq!(
+        ctl(
+            &master,
+            DRM_IOCTL_AUTH_MAGIC,
+            &DrmAuth {
+                magic: magic ^ 0x10
+            }
+        )
+        .err(),
+        Some(Errno::EINVAL)
+    );
+    ctl(&master, DRM_IOCTL_AUTH_MAGIC, &DrmAuth { magic }).unwrap();
+    assert!(guest.is_authenticated());
+    // A number is spent once it is used.
+    assert_eq!(
+        ctl(&master, DRM_IOCTL_AUTH_MAGIC, &DrmAuth { magic }).err(),
+        Some(Errno::EINVAL)
+    );
+    c.unregister(&s());
+}
+
+#[test]
+fn leases_are_refused_as_unsupported_so_callers_go_on_without() {
+    let c = card(false, true);
+    let f = open(&c);
+    assert_eq!(
+        ctl(
+            &f,
+            DRM_IOCTL_MODE_CREATE_LEASE,
+            &DrmModeCreateLease::default()
+        )
+        .err(),
+        Some(Errno::EOPNOTSUPP)
+    );
+    assert_eq!(
+        ctl(
+            &f,
+            DRM_IOCTL_MODE_LIST_LESSEES,
+            &DrmModeListLessees::default()
+        )
+        .err(),
+        Some(Errno::EOPNOTSUPP)
+    );
+    assert_eq!(
+        ctl(&f, DRM_IOCTL_MODE_GET_LEASE, &DrmModeGetLease::default()).err(),
+        Some(Errno::EOPNOTSUPP)
+    );
+    assert_eq!(
+        ctl(
+            &f,
+            DRM_IOCTL_MODE_REVOKE_LEASE,
+            &DrmModeRevokeLease::default()
+        )
+        .err(),
+        Some(Errno::EOPNOTSUPP)
+    );
+    c.unregister(&s());
+}

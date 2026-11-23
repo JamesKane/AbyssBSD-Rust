@@ -451,7 +451,7 @@ a Sway session, taken on the machine under test and kept with the run's results,
 windows in their Sway frames:
 
 1. a `foot` terminal running `fastfetch`, which names AbyssBSD, the kernel, the CPU, and the GPU;
-2. glmark2's 3D jellyfish scene (`glmark2-es2-wayland -b jellyfish --run-forever --show-fps`),
+2. glmark2's 3D jellyfish scene (`glmark2-es2-wayland -b jellyfish:show-fps=true --run-forever`),
    with its frame rate on screen.
 
 The run's log records glmark2's `GL_RENDERER` and Sway's renderer, so the capture says what drew
