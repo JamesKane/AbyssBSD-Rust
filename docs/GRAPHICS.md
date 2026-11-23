@@ -688,5 +688,11 @@ that locks to the signal regardless of polarity would show the same.
    whichever detaches first, and later reads give 0 and writes nothing. The shutdown log no longer has the
    line.
 
-Open: the original monitor with the real EDID and a mode-to-mode switch (the Acer has one mode); whether the
-vendor's sync polarities are right (only a monitor that checks them would say).
+Restart test on the Acer (one mode): stopping Sway and starting it again takes the link down and brings it up
+(a second `sky1_dp: link up, Rbr x4` line), and the picture returns stable with no faults. Sway's
+`output dpms off` and `on` brought the picture back but logged no new link bring-up, so it did not take the
+link down; it proves nothing about the shutdown path.
+
+Open: the original monitor with the real EDID and a mode-to-mode switch (the Acer has one mode; the 1920x1080
+to 1280x720 switch that failed there has not been run since the link-shutdown fix); whether the vendor's sync
+polarities are right (only a monitor that checks them would say).
