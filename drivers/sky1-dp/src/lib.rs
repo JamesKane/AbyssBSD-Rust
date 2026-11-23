@@ -264,7 +264,24 @@ impl EncoderHw for Encoder {
         } else if l.reinit_next.swap(false, Ordering::AcqRel) {
             l.reinit();
         }
-        let up = match l.dptx.link_up(&m, bpc) {
+        // A sink just woken after the last link was shut down can refuse
+        // (NACK) the first requests (seen on the board between two
+        // modes): try again after a pause, and once more from a full
+        // re-initialisation of the host side.
+        let mut tried = l.dptx.link_up(&m, bpc);
+        for attempt in 0..2 {
+            let Err(e) = &tried else { break };
+            let (hpd, status) = l.dptx.aux_snapshot();
+            bus::manager().log(format_args!(
+                "sky1_dp: link did not come up: {e:?} (hpd {hpd}, aux status {status:#x}), trying again"
+            ));
+            bus::manager().delay_us(100_000);
+            if attempt == 1 {
+                l.reinit();
+            }
+            tried = l.dptx.link_up(&m, bpc);
+        }
+        let up = match tried {
             Ok(up) => up,
             Err(e) => {
                 let (hpd, status) = l.dptx.aux_snapshot();
