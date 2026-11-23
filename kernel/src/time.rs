@@ -145,6 +145,16 @@ pub(crate) fn counter() -> u64 {
     return arch::timer::counter();
 }
 
+/// The raw counter, not ordered after earlier instructions (it may be
+/// read a few early): for timestamps in the scheduler's bookkeeping, as
+/// FreeBSD's `cpu_ticks`. (x86's `counter` is the same read.)
+pub(crate) fn counter_unordered() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    return arch::cpu::timestamp();
+    #[cfg(target_arch = "aarch64")]
+    return arch::timer::counter_unordered();
+}
+
 /// Converts counter ticks to nanoseconds.
 #[inline]
 pub(crate) fn ticks_to_ns(ticks: u64) -> u64 {

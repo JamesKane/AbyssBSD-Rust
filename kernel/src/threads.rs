@@ -31,7 +31,7 @@ impl sched::Platform for Platform {
     }
 
     fn now(&self) -> u64 {
-        crate::time::counter()
+        crate::time::counter_unordered()
     }
 
     fn frequency(&self) -> u64 {

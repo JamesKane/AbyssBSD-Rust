@@ -14,6 +14,17 @@ pub fn counter() -> u64 {
     v
 }
 
+/// The virtual count without the `ISB` of [`counter`]: the read may be
+/// taken a few instructions early (FreeBSD's `get_cyclecount`), which an
+/// accounting timestamp does not mind and a context switch's bookkeeping
+/// cannot afford to wait for: the `ISB` drains the pipeline.
+pub fn counter_unordered() -> u64 {
+    let v: u64;
+    // SAFETY: reading the counter is harmless.
+    unsafe { asm!("mrs {}, cntvct_el0", out(reg) v, options(nostack, nomem, preserves_flags)) };
+    v
+}
+
 /// The counter frequency in Hz.
 pub fn frequency() -> u64 {
     read_sysreg!("cntfrq_el0")

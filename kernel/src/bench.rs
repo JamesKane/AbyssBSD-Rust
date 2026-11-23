@@ -274,12 +274,22 @@ fn milli_ns_per_op(run: &Run, workers: usize, ticks: u64) -> u128 {
     u128::from(time::ticks_to_ns(ticks)) * 1000 / u128::from(ops.max(1))
 }
 
+/// Ends a benchmark's profile (`abyss.prof`): the profiler reports on the
+/// result lines that reach the console through the tty, which these
+/// kernel-printed ones do not.
+fn end_profile(name: &str) {
+    if crate::prof::on() {
+        crate::prof::console_output(alloc::format!("kbench {name} ").as_bytes());
+    }
+}
+
 /// Runs `round` [`ROUNDS`] times and reports the median.
 fn report_median(name: &str, mut round: impl FnMut() -> u128) {
     let mut r: [u128; ROUNDS] = core::array::from_fn(|_| round());
     r.sort_unstable();
     let milli = r[ROUNDS / 2];
     kprintln!("kbench {name} {}.{:03} ns/op", milli / 1000, milli % 1000);
+    end_profile(name);
 }
 
 /// Diagnostics for a latency run (not compared): the tail, and how often
@@ -310,6 +320,7 @@ fn report_lat(name: &str, ns: &mut [u64]) {
     ns.sort_unstable();
     kprintln!("kbench {name}.p50 {} ns", ns[ns.len() / 2]);
     kprintln!("kbench {name}.p99 {} ns", ns[ns.len() * 99 / 100]);
+    end_profile(name);
 }
 
 /// A throughput benchmark: `workers` threads in the default placement, each
@@ -407,6 +418,7 @@ fn lock_throughput<F: Fn(&LockSet, &Sleepable) -> u64 + Copy + Send + Sync + 'st
     }
     let milli = sum / sets.len() as u128;
     kprintln!("kbench {name} {}.{:03} ns/op", milli / 1000, milli % 1000);
+    end_profile(name);
 }
 
 fn layout() -> Layout {
