@@ -104,6 +104,18 @@ impl PlatformSource for CixSky1 {
                     .push(devtree::platform::SharedRange { device, why });
             }
         }
+        // The FCH CRU (`CRU0`, `CIXHA018` unit 4) has the S5 reset
+        // controller's window: its clients lease fields of it.
+        for &d in devices {
+            let is_cru = interp.hid(d, host).ok().flatten().as_deref() == Some("CIXHA018")
+                && matches!(interp.uid(d, host), Ok(Some(aml::Uid::Integer(4))));
+            if is_cru {
+                x.description.shared.push(devtree::platform::SharedRange {
+                    device: d,
+                    why: "FCH CRU: the same 4 KiB as the S5 reset controller (RST0); clients lease fields",
+                });
+            }
+        }
         x
     }
 

@@ -453,6 +453,9 @@ pub enum LineKind {
     /// A mailbox channel ([`crate::mailbox::Mailbox`]); the line's
     /// identifier is the channel number.
     Mailbox,
+    /// A shared register window ([`crate::region::RegisterRegion`]); the
+    /// line's name is the `_DSD` property that referenced it.
+    Region,
 }
 
 /// What a line carries beyond its supplier and identifier.

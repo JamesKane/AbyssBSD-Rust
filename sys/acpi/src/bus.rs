@@ -278,6 +278,16 @@ pub(crate) fn walk(
             f.lines
                 .push((LineKind::Mailbox, None, path, channel, LineDetail::None));
         }
+        for (sup, prop) in region_lines(interp, host, f.device.node) {
+            let path = alloc::format!("{}", interp.path(sup));
+            f.lines.push((
+                LineKind::Region,
+                Some(alloc::string::String::from(prop)),
+                path,
+                0,
+                LineDetail::None,
+            ));
+        }
     }
     // Ranges two parties touch: what drivers of children overlapping
     // AML's must ask for knowingly, and how many overlaps between
@@ -534,6 +544,35 @@ pub(crate) fn mailbox_lines(
                 Some((interp.resolve_value_name(mbox)?, u32::try_from(*ch).ok()?))
             }
             _ => None,
+        })
+        .collect()
+}
+
+/// The `_DSD` properties that reference a register window another device
+/// owns (CRUs and syscons; DRIVER-MODEL.md §9.3 `RegisterRegion`).
+pub(crate) const REGION_PROPERTIES: &[&str] = &[
+    "cix,usbphy_syscon",
+    "cix,usb_syscon",
+    "cix,gmac-ctrl",
+    "cix,dsp-ctrl",
+    "sky1,fch_cru",
+    "audss_cru",
+    "cru-ctrl",
+    "cdns,cru-ctrl",
+];
+
+/// The register windows the device's `_DSD` references: the device that
+/// owns each and the property that names it.
+pub(crate) fn region_lines(
+    interp: &mut aml::Interpreter,
+    host: &mut dyn aml::Host,
+    node: aml::NodeId,
+) -> Vec<(aml::NodeId, &'static str)> {
+    REGION_PROPERTIES
+        .iter()
+        .filter_map(|&name| {
+            let v = crate::properties::property(interp, host, node, name)?;
+            Some((interp.resolve_value_name(&v)?, name))
         })
         .collect()
 }

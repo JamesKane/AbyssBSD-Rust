@@ -647,6 +647,41 @@ fn the_scmi_agent_gets_its_mailbox_channels() {
     );
 }
 
+/// The register windows a device's `_DSD` references become region lines
+/// named by the property: each USB-C PHY leases its orientation bit from
+/// the FCH CRU.
+#[test]
+fn the_phys_get_the_system_controllers_window() {
+    let (mut i, mut h) = acpi_corpus::load("opi6p");
+    let w = crate::bus::walk(
+        &mut i,
+        &mut h,
+        &dma_controllers("opi6p"),
+        &[],
+        &FirmwareIdentity::default(),
+        None,
+    );
+    let regions: Vec<(String, String, String)> = w
+        .found
+        .into_iter()
+        .flat_map(|f| {
+            let path = f.device.path.clone();
+            f.lines
+                .into_iter()
+                .filter(|l| l.0 == bus::LineKind::Region)
+                .map(move |l| (path.clone(), l.1.clone().unwrap_or_default(), l.2))
+        })
+        .collect();
+    assert!(
+        regions.contains(&(
+            "\\_SB_.UCP3".into(),
+            "cix,usbphy_syscon".into(),
+            "\\_SB_.CRU0".into()
+        )),
+        "{regions:?}"
+    );
+}
+
 /// What `_CCA` says of each machine's devices: the Sky1's USB hosts do not
 /// snoop the caches, its PCIe hosts do; QEMU's virt machine says coherent
 /// for its PCIe host; the PCs say nothing.

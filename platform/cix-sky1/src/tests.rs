@@ -293,8 +293,9 @@ fn reference_names() {
     }
 }
 
-/// The SCMI shared memory is declared shared with its mailbox: those two
-/// overlaps, and no other, become declared, so each entry still applies.
+/// The SCMI shared memory is declared shared with its mailbox, and the FCH
+/// CRU with the reset controller: those three overlaps, and no other,
+/// become declared, so each entry still applies.
 #[test]
 fn scmi_shared_memory_is_declared() {
     use acpi::ranges::{Party, consumed, declared, overlaps};
@@ -303,7 +304,7 @@ fn scmi_shared_memory_is_declared() {
     let x = PLATFORM.extract(&mut i, &mut h, &devices);
     let shared = &x.description.shared;
     let paths: Vec<String> = shared.iter().map(|s| i.path(s.device).to_text()).collect();
-    assert_eq!(paths, ["\\_SB_.SHM0", "\\_SB_.SHM1"]);
+    assert_eq!(paths, ["\\_SB_.SHM0", "\\_SB_.SHM1", "\\_SB_.CRU0"]);
     let ranges: Vec<_> = devices
         .iter()
         .map(|&d| {
@@ -315,7 +316,14 @@ fn scmi_shared_memory_is_declared() {
         .collect();
     let declared = declared(shared, &ranges);
     let got: Vec<(u64, u64)> = declared.iter().map(|r| (r.base, r.len)).collect();
-    assert_eq!(got, [(0x0659_0000, 0x80), (0x065a_0000, 0x80)]);
+    assert_eq!(
+        got,
+        [
+            (0x0659_0000, 0x80),
+            (0x065a_0000, 0x80),
+            (0x1600_0000, 0x1000)
+        ]
+    );
     let pairs: Vec<(String, String)> = overlaps(&ranges, &[], &declared)
         .into_iter()
         .filter_map(|o| match o.with {
@@ -326,8 +334,13 @@ fn scmi_shared_memory_is_declared() {
     assert_eq!(
         pairs,
         [
+            // The S5 window's other occupant (the power-domain controller)
+            // overlaps both, as it always did.
+            (String::from("\\_SB_.PDC0"), String::from("\\_SB_.RST0")),
+            (String::from("\\_SB_.PDC0"), String::from("\\_SB_.CRU0")),
             (String::from("\\_SB_.MBX6"), String::from("\\_SB_.SHM0")),
             (String::from("\\_SB_.MBX7"), String::from("\\_SB_.SHM1")),
+            (String::from("\\_SB_.RST0"), String::from("\\_SB_.CRU0")),
         ]
     );
 }

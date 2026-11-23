@@ -37,6 +37,7 @@ use crate::i2c::I2cSource;
 use crate::mailbox::MailboxSource;
 use crate::platform::Platform;
 use crate::provider::{ClockSource, DomainSource, ResetSource};
+use crate::region::RegionSource;
 use crate::space::{Range, ResourceSpace, Sharing};
 use crate::sysctl::DeviceStrings;
 use crate::types::{
@@ -104,6 +105,7 @@ struct Provides {
     gpio: Option<Arc<GpioSource>>,
     i2c: Option<Arc<I2cSource>>,
     mailbox: Option<Arc<MailboxSource>>,
+    region: Option<Arc<RegionSource>>,
     iommu: Option<Arc<crate::iommu::IommuSource>>,
 }
 
@@ -117,6 +119,9 @@ impl Provides {
         }
         if let Some(m) = &self.mailbox {
             m.revoke();
+        }
+        if let Some(r) = &self.region {
+            r.revoke();
         }
         if let Some(c) = &self.clocks {
             c.revoke();
@@ -141,6 +146,7 @@ pub(crate) enum Provided {
     Gpio(Arc<GpioSource>),
     I2c(Arc<I2cSource>),
     Mailbox(Arc<MailboxSource>),
+    Region(Arc<RegionSource>),
     Iommu(Arc<crate::iommu::IommuSource>),
 }
 
@@ -1184,6 +1190,7 @@ impl Manager {
             Provided::Gpio(g) => n.provides.gpio.replace(g).map(Provided::Gpio),
             Provided::I2c(i) => n.provides.i2c.replace(i).map(Provided::I2c),
             Provided::Mailbox(m) => n.provides.mailbox.replace(m).map(Provided::Mailbox),
+            Provided::Region(r) => n.provides.region.replace(r).map(Provided::Region),
             Provided::Iommu(u) => n.provides.iommu.replace(u).map(Provided::Iommu),
         };
         match old {
@@ -1193,6 +1200,7 @@ impl Manager {
             Some(Provided::Gpio(g)) => g.revoke(),
             Some(Provided::I2c(i)) => i.revoke(),
             Some(Provided::Mailbox(m)) => m.revoke(),
+            Some(Provided::Region(r)) => r.revoke(),
             Some(Provided::Iommu(u)) => u.revoke(),
             None => {}
         }
@@ -1214,6 +1222,7 @@ impl Manager {
             LineKind::Gpio => p.and_then(|p| p.gpio.clone()).map(Provided::Gpio),
             LineKind::I2c => p.and_then(|p| p.i2c.clone()).map(Provided::I2c),
             LineKind::Mailbox => p.and_then(|p| p.mailbox.clone()).map(Provided::Mailbox),
+            LineKind::Region => p.and_then(|p| p.region.clone()).map(Provided::Region),
         };
         found.ok_or(ResourceError::NoProvider)
     }

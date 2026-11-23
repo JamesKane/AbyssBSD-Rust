@@ -731,6 +731,16 @@ impl<'a> AttachCx<'a> {
         }
     }
 
+    /// A lease of the shared register window firmware names with `_DSD`
+    /// property `name` (`cix,usbphy_syscon`).
+    pub fn region(&mut self, name: &str) -> Result<crate::region::RegionHandle, ResourceError> {
+        let l = self.line(LineKind::Region, Some(name))?;
+        match self.mgr.provider(self.s, l.supplier, LineKind::Region)? {
+            Provided::Region(r) => Ok(r.handle()),
+            _ => Err(ResourceError::NoProvider),
+        }
+    }
+
     /// The device's line of `kind` its driver asks for by `name`: `None`
     /// asks for its unnamed line, or its only one.
     fn line(&self, kind: LineKind, name: Option<&str>) -> Result<Line, ResourceError> {
@@ -1268,6 +1278,14 @@ impl<D: Driver> StartCx<'_, D> {
         let src = crate::mailbox::MailboxSource::new(imp);
         self.mgr
             .provide(self.s, self.binding.node, Provided::Mailbox(src));
+    }
+
+    /// Publishes this device's register window to the clients whose
+    /// region lines name it.
+    pub fn provide_region(&mut self, imp: Arc<dyn crate::region::RegisterRegion>) {
+        let src = crate::region::RegionSource::new(imp);
+        self.mgr
+            .provide(self.s, self.binding.node, Provided::Region(src));
     }
 
     /// Publishes this device as an IOMMU unit: the broker asks it for the

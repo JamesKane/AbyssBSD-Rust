@@ -35,6 +35,7 @@ pub mod mailbox;
 pub mod manager;
 pub mod platform;
 pub mod provider;
+pub mod region;
 pub mod rman;
 mod roothold;
 pub mod space;
