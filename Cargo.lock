@@ -698,6 +698,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kms-check"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "drm-fourcc",
+]
+
+[[package]]
 name = "ktest"
 version = "0.0.0"
 
