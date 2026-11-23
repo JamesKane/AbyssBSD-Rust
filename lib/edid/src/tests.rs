@@ -152,3 +152,119 @@ fn the_fallback_prefers_1080p() {
             .all(|x| x.htotal > x.hsync_end && x.vtotal > x.vsync_end)
     );
 }
+
+/// A CTA-861 extension block (revision 3): a video data block of `codes`,
+/// then the detailed timings.
+fn cta_block(codes: &[u8], dtds: &[[u8; 18]]) -> Vec<u8> {
+    let mut b = std::vec![0u8; BLOCK];
+    b[0] = 0x02;
+    b[1] = 3;
+    let mut at = 4;
+    if !codes.is_empty() {
+        b[at] = 2 << 5 | u8::try_from(codes.len()).unwrap();
+        b[at + 1..at + 1 + codes.len()].copy_from_slice(codes);
+        at += 1 + codes.len();
+    }
+    b[2] = u8::try_from(at).unwrap();
+    for d in dtds {
+        b[at..at + 18].copy_from_slice(d);
+        at += 18;
+    }
+    let sum = b[..127].iter().fold(0u8, |a, x| a.wrapping_add(*x));
+    b[127] = 0u8.wrapping_sub(sum);
+    b
+}
+
+fn resum(b: &mut [u8]) {
+    let sum = b[..127].iter().fold(0u8, |a, x| a.wrapping_add(*x));
+    b[127] = 0u8.wrapping_sub(sum);
+}
+
+fn with_extension(base: &[[u8; 18]], ext: &[u8]) -> Vec<u8> {
+    let mut b = block(base);
+    b[126] = 1;
+    let sum = b[..127].iter().fold(0u8, |a, x| a.wrapping_add(*x));
+    b[127] = 0u8.wrapping_sub(sum);
+    b.extend_from_slice(ext);
+    b
+}
+
+#[test]
+fn video_codes_in_the_extension_add_modes_after_the_base_blocks() {
+    // Native 1080p60 (the base block's timing: not added twice), 720p60,
+    // 2160p60, 1080p50, and a code this does not read.
+    let ext = cta_block(&[0x90, 4, 97, 31, 200], &[]);
+    let e = parse(&with_extension(&[DTD_1080P], &ext)).unwrap();
+    let got: Vec<(u16, u16, u32)> = e
+        .modes
+        .iter()
+        .map(|m| (m.hdisplay, m.vdisplay, m.clock_khz))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (1920, 1080, 148_500),
+            (1280, 720, 74_250),
+            (3840, 2160, 594_000),
+            (1920, 1080, 148_500)
+        ]
+    );
+    // The 1080p50 differs from the base block's 1080p60 by rate: it stays,
+    // and only the base block's timing is preferred.
+    assert!(e.modes[0].kind & DRM_MODE_TYPE_PREFERRED != 0);
+    assert!(
+        e.modes[1..]
+            .iter()
+            .all(|m| m.kind & DRM_MODE_TYPE_PREFERRED == 0)
+    );
+    assert_eq!(e.modes[3].htotal, 2640);
+}
+
+#[test]
+fn the_extensions_detailed_timings_are_read_too() {
+    let ext = cta_block(&[], &[DTD_720P]);
+    let e = parse(&with_extension(&[DTD_1080P], &ext)).unwrap();
+    assert_eq!(e.modes.len(), 2);
+    assert_eq!((e.modes[1].hdisplay, e.modes[1].vdisplay), (1280, 720));
+}
+
+#[test]
+fn a_malformed_extension_gives_no_modes_and_no_panic() {
+    let good = cta_block(&[4, 16], &[]);
+    // Bad checksum.
+    let mut bad = good.clone();
+    bad[127] = bad[127].wrapping_add(1);
+    // Not CTA-861.
+    let mut other = good.clone();
+    other[0] = 0x70;
+    resum(&mut other);
+    // A data block longer than the space before the detailed timings.
+    let mut long = good.clone();
+    long[4] = 2 << 5 | 31;
+    resum(&mut long);
+    // Detailed timings offset out of range.
+    let mut off = good.clone();
+    off[2] = 200;
+    resum(&mut off);
+    let mut low = good.clone();
+    low[2] = 2;
+    resum(&mut low);
+    for ext in [bad, other, long, off, low] {
+        // Each is refused for its own reason (the checksum is redone for
+        // all but the one meant to fail it).
+        let e = parse(&with_extension(&[DTD_1080P], &ext)).unwrap();
+        assert_eq!(e.modes.len(), 1);
+    }
+    // A short extension (fewer than 128 bytes) is left out.
+    let mut short = with_extension(&[DTD_1080P], &good);
+    short.truncate(BLOCK + 60);
+    assert_eq!(parse(&short).unwrap().modes.len(), 1);
+    // And the good one gives its two modes.
+    assert_eq!(
+        parse(&with_extension(&[DTD_1080P], &good))
+            .unwrap()
+            .modes
+            .len(),
+        2
+    );
+}

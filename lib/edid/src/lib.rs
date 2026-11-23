@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! Reading a monitor's identification data (EDID 1.3 and 1.4, the base
-//! block): its size, name and the timings of its detailed descriptors.
+//! Reading a monitor's identification data (EDID 1.3 and 1.4): its size,
+//! name and the timings of its detailed descriptors in the base block, and
+//! the modes of its CTA-861 extension blocks (standard video codes and
+//! detailed timings).
 //!
 //! The data is untrusted input from the monitor: every read is checked and
-//! a malformed block is an error, never a panic. Extension blocks (CTA,
-//! DisplayID) are not read yet; their timings and audio data come later.
+//! a malformed base block is an error, never a panic; an extension block
+//! that is malformed gives no modes. DisplayID extensions and the audio
+//! data are not read yet.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -12,6 +15,8 @@
 extern crate alloc;
 #[cfg(test)]
 extern crate std;
+
+mod cta;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -53,7 +58,9 @@ pub struct Edid {
 
 const HEADER: [u8; 8] = [0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0];
 
-/// Parses the base block.
+/// Parses the base block, and the CTA-861 extension blocks that follow it in
+/// `data` (those present; a monitor's extension count may say more than was
+/// read).
 ///
 /// # Errors
 ///
@@ -111,6 +118,20 @@ pub fn parse(data: &[u8]) -> Result<Edid, Error> {
                 })
                 .collect();
             name = Some(String::from(text.trim_end()));
+        }
+    }
+    // Extension blocks: their modes follow the base block's, without those
+    // the monitor gave twice (the same size at the same rate).
+    for ext in data[BLOCK..].as_chunks::<BLOCK>().0.iter().take(3) {
+        for m in cta::modes(ext) {
+            let seen = modes.iter().any(|o| {
+                o.hdisplay == m.hdisplay
+                    && o.vdisplay == m.vdisplay
+                    && cta::refresh_hz(o) == cta::refresh_hz(&m)
+            });
+            if !seen {
+                modes.push(m);
+            }
         }
     }
     Ok(Edid {
