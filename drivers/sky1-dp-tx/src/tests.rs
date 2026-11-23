@@ -680,3 +680,20 @@ fn a_channel_level_defer_on_an_i2c_read_is_retried() {
     assert_eq!(e[8], 8);
     assert_eq!(e[127], 127);
 }
+
+#[test]
+fn an_extension_block_that_cannot_be_read_leaves_the_blocks_that_were() {
+    // Seen on the board: a monitor behind a KVM switch refused the segment
+    // pointer (0x30) that EDID blocks 2 and 3 need; the base block and the
+    // first extension had been read, and the modes are in the base block.
+    let (sim, _, d) = rig(Config::default());
+    sim.sink(|s| {
+        s.edid[126] = 3;
+        s.edid.extend(core::iter::repeat_n(0xAA, 128 * 3));
+        s.nack_i2c = vec![0x30];
+    });
+    let e = d.edid().unwrap();
+    assert_eq!(e.len(), 256, "the base block and block 1");
+    assert!(e.starts_with(&[0, 0xFF]));
+    assert_eq!(e[128], 0xAA);
+}

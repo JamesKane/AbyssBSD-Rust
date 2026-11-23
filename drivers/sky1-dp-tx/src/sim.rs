@@ -33,6 +33,9 @@ pub(crate) struct Sink {
     pub dead: bool,
     /// Writes to these DPCD addresses are refused.
     pub nack_write: Vec<u32>,
+    /// I2C-over-AUX addresses whose writes the sink refuses (a monitor
+    /// without E-DDC refuses the segment pointer, `0x30`).
+    pub nack_i2c: Vec<u32>,
 }
 
 impl Sink {
@@ -56,6 +59,7 @@ impl Sink {
             i2c_defer: 0,
             dead: false,
             nack_write: Vec::new(),
+            nack_i2c: Vec::new(),
         }
     }
 
@@ -219,7 +223,9 @@ impl State {
             }
             // I2C write (the offset, or the segment).
             0 => {
-                if self.addr == 0x50
+                if self.sink.nack_i2c.contains(&self.addr) {
+                    self.reply_code = code(1);
+                } else if self.addr == 0x50
                     && let Some(o) = data.first()
                 {
                     self.i2c_offset = usize::from(*o);

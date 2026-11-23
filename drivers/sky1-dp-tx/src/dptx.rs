@@ -202,7 +202,14 @@ impl Dptx {
         let blocks = usize::from(first[126]).min(3) + 1;
         let mut out = first.to_vec();
         for i in 1..blocks {
-            out.extend_from_slice(&self.aux().read_edid_block(u8::try_from(i).unwrap_or(0))?);
+            // An extension block that cannot be read ends the read, and
+            // what was read stands: the base block carries the modes. A
+            // monitor behind a KVM switch NACKed the segment pointer
+            // (E-DDC, address 0x30) that blocks 2 and 3 need.
+            match self.aux().read_edid_block(u8::try_from(i).unwrap_or(0)) {
+                Ok(b) => out.extend_from_slice(&b),
+                Err(_) => break,
+            }
         }
         Ok(out)
     }
