@@ -266,6 +266,11 @@ pub(crate) fn walk(
                 .push((kind, name.clone(), path, id, LineDetail::None));
         }
     }
+    // The register windows the applying platforms say `_DSD` references.
+    let region_names: Vec<&'static str> = platforms
+        .iter()
+        .flat_map(|p| p.register_windows().iter().copied())
+        .collect();
     // The GPIO and I2C lines each child's `_CRS` consumes, and the
     // mailbox channels its `_DSD` names.
     for f in &mut found {
@@ -278,7 +283,7 @@ pub(crate) fn walk(
             f.lines
                 .push((LineKind::Mailbox, None, path, channel, LineDetail::None));
         }
-        for (sup, prop) in region_lines(interp, host, f.device.node) {
+        for (sup, prop) in region_lines(interp, host, f.device.node, &region_names) {
             let path = alloc::format!("{}", interp.path(sup));
             f.lines.push((
                 LineKind::Region,
@@ -548,27 +553,15 @@ pub(crate) fn mailbox_lines(
         .collect()
 }
 
-/// The `_DSD` properties that reference a register window another device
-/// owns (CRUs and syscons; DRIVER-MODEL.md §9.3 `RegisterRegion`).
-pub(crate) const REGION_PROPERTIES: &[&str] = &[
-    "cix,usbphy_syscon",
-    "cix,usb_syscon",
-    "cix,gmac-ctrl",
-    "cix,dsp-ctrl",
-    "sky1,fch_cru",
-    "audss_cru",
-    "cru-ctrl",
-    "cdns,cru-ctrl",
-];
-
 /// The register windows the device's `_DSD` references: the device that
 /// owns each and the property that names it.
 pub(crate) fn region_lines(
     interp: &mut aml::Interpreter,
     host: &mut dyn aml::Host,
     node: aml::NodeId,
+    names: &[&'static str],
 ) -> Vec<(aml::NodeId, &'static str)> {
-    REGION_PROPERTIES
+    names
         .iter()
         .filter_map(|&name| {
             let v = crate::properties::property(interp, host, node, name)?;

@@ -78,7 +78,7 @@ pub enum Power {
 }
 
 #[derive(Debug)]
-struct State {
+struct CoreState {
     mode: Mode,
     orient: Orientation,
     /// The core is out of reset with its table written.
@@ -86,71 +86,43 @@ struct State {
     /// The table in place: DP-only or the shared one, and its
     /// orientation.
     table: Option<(bool, Orientation)>,
-    /// The interface is up (section 3.10.4 "init" done).
-    iface_up: bool,
-    link: Option<(Rate, u8)>,
-    locked: bool,
+    /// Counts the core's initialisations: an interface that saw an
+    /// earlier one has lost its state.
+    epoch: u32,
 }
 
-/// The combo PHY.
+/// The shared PHY core: the table, the resets and the clock, which the
+/// USB side and the DisplayPort side both use (section 3.6). The
+/// controller's interface window is the DisplayPort side's own
+/// ([`UsbDpPhy`]).
 #[allow(missing_debug_implementations)]
-pub struct UsbDpPhy {
+pub struct Core {
     regs: alloc::sync::Arc<dyn Regs16>,
-    iface: alloc::sync::Arc<dyn Words32>,
     plat: alloc::sync::Arc<dyn Platform>,
-    s: SpinLock<State>,
+    s: SpinLock<CoreState>,
 }
 
-impl UsbDpPhy {
+impl Core {
     #[must_use]
     pub fn new(
         regs: alloc::sync::Arc<dyn Regs16>,
-        iface: alloc::sync::Arc<dyn Words32>,
         plat: alloc::sync::Arc<dyn Platform>,
         mode: Mode,
     ) -> Self {
         Self {
             regs,
-            iface,
             plat,
-            s: SpinLock::new(State {
+            s: SpinLock::new(CoreState {
                 mode,
                 orient: Orientation::Normal,
                 powered: false,
                 table: None,
-                iface_up: false,
-                link: None,
-                locked: false,
+                epoch: 0,
             }),
         }
     }
 
-    /// Whether the controller's PHY-interface window is the combo PHY's
-    /// (section 3.10.1).
-    #[must_use]
-    pub fn is_combo(iface: &dyn Words32) -> bool {
-        iface.read(ID_REV) >> 16 == INTERFACE_COMBO
-    }
-
-    fn poll(&self, off: usize, mask: u32, want: u32, tries: u32) -> bool {
-        for _ in 0..tries {
-            if self.iface.read(off) & mask == want {
-                return true;
-            }
-            self.plat.delay_us(1);
-        }
-        false
-    }
-
-    /// Brings the shared core up with the table for the mode and
-    /// orientation, if it is not up with it already (section 3.6). The
-    /// table is rewritten whenever it would change (which the vendor does
-    /// not do for DP-only to USB plus DP; an open question).
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Clock`] when the register clock does not start.
-    fn power_core(&self, st: &mut State) -> Result<(), Error> {
+    fn power(&self, st: &mut CoreState) -> Result<(), Error> {
         let key = (st.mode.dp_table(), st.orient);
         if st.powered && st.table == Some(key) {
             return Ok(());
@@ -178,42 +150,42 @@ impl UsbDpPhy {
             self.regs.write(r, v);
         }
         self.plat.release_core_reset();
-        // Not checked by the vendor; noted for the status.
-        st.locked = false;
         st.powered = true;
         st.table = Some(key);
-        st.iface_up = false;
-        st.link = None;
+        st.epoch += 1;
         Ok(())
     }
 
-    /// Records a new mode or orientation (from the Type-C controller). A
-    /// powered PHY is re-initialised at once if its table changes.
+    /// Brings the core up with the table for the mode and orientation, if
+    /// it is not up with it already. The table is rewritten whenever it
+    /// would change (which the vendor does not do for DP-only to USB plus
+    /// DP; an open question).
     ///
     /// # Errors
     ///
-    /// As [`UsbDpPhy::power_up`].
+    /// [`Error::Clock`] when the register clock does not start.
+    pub fn power_up(&self) -> Result<(), Error> {
+        let mut st = self.s.lock();
+        self.power(&mut st)
+    }
+
+    /// Records a new mode or orientation (from the Type-C controller). A
+    /// powered core is re-initialised at once if its table changes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Core::power_up`].
     pub fn update(&self, mode: Mode, orient: Orientation) -> Result<(), Error> {
         let mut st = self.s.lock();
         st.mode = mode;
         st.orient = orient;
         if st.powered && st.table != Some((mode.dp_table(), orient)) {
-            self.power_core(&mut st)?;
+            self.power(&mut st)?;
         }
         Ok(())
     }
 
-    /// Powers the core (a user of the PHY, DisplayPort here).
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Clock`].
-    pub fn power_up(&self) -> Result<(), Error> {
-        let mut st = self.s.lock();
-        self.power_core(&mut st)
-    }
-
-    /// Powers the core down, for when no user is left (section 3.6).
+    /// Powers the core down, for when no user is left.
     pub fn power_down(&self) {
         let mut st = self.s.lock();
         if st.powered {
@@ -222,6 +194,123 @@ impl UsbDpPhy {
         }
         st.powered = false;
         st.table = None;
+    }
+
+    fn snapshot(&self) -> (Mode, Orientation, u32) {
+        let st = self.s.lock();
+        (st.mode, st.orient, st.epoch)
+    }
+
+    /// The mode now.
+    #[must_use]
+    pub fn mode(&self) -> Mode {
+        self.s.lock().mode
+    }
+}
+
+/// What the DisplayPort side keeps: its interface and link.
+#[derive(Debug)]
+struct State {
+    /// The interface is up (section 3.10.4 "init" done), as of core
+    /// initialisation number `epoch`.
+    iface_up: bool,
+    epoch: u32,
+    link: Option<(Rate, u8)>,
+    locked: bool,
+}
+
+/// The combo PHY as one DisplayPort controller sees it.
+#[allow(missing_debug_implementations)]
+pub struct UsbDpPhy {
+    core: alloc::sync::Arc<Core>,
+    iface: alloc::sync::Arc<dyn Words32>,
+    plat: alloc::sync::Arc<dyn Platform>,
+    regs: alloc::sync::Arc<dyn Regs16>,
+    s: SpinLock<State>,
+}
+
+impl UsbDpPhy {
+    /// A PHY with its own core (the interface window and the core one
+    /// device's: tests, and a machine with no sharing).
+    #[must_use]
+    pub fn new(
+        regs: alloc::sync::Arc<dyn Regs16>,
+        iface: alloc::sync::Arc<dyn Words32>,
+        plat: alloc::sync::Arc<dyn Platform>,
+        mode: Mode,
+    ) -> Self {
+        let core = alloc::sync::Arc::new(Core::new(regs.clone(), plat.clone(), mode));
+        Self::with_core(core, regs, iface, plat)
+    }
+
+    /// The DisplayPort side of `core`, through the controller's interface
+    /// window.
+    #[must_use]
+    pub fn with_core(
+        core: alloc::sync::Arc<Core>,
+        regs: alloc::sync::Arc<dyn Regs16>,
+        iface: alloc::sync::Arc<dyn Words32>,
+        plat: alloc::sync::Arc<dyn Platform>,
+    ) -> Self {
+        Self {
+            core,
+            iface,
+            plat,
+            regs,
+            s: SpinLock::new(State {
+                iface_up: false,
+                epoch: 0,
+                link: None,
+                locked: false,
+            }),
+        }
+    }
+
+    /// The core this uses.
+    #[must_use]
+    pub fn core(&self) -> &alloc::sync::Arc<Core> {
+        &self.core
+    }
+
+    /// Whether the controller's PHY-interface window is the combo PHY's
+    /// (section 3.10.1).
+    #[must_use]
+    pub fn is_combo(iface: &dyn Words32) -> bool {
+        iface.read(ID_REV) >> 16 == INTERFACE_COMBO
+    }
+
+    fn poll(&self, off: usize, mask: u32, want: u32, tries: u32) -> bool {
+        for _ in 0..tries {
+            if self.iface.read(off) & mask == want {
+                return true;
+            }
+            self.plat.delay_us(1);
+        }
+        false
+    }
+
+    /// Records a new mode or orientation (see [`Core::update`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Core::power_up`].
+    pub fn update(&self, mode: Mode, orient: Orientation) -> Result<(), Error> {
+        self.core.update(mode, orient)
+    }
+
+    /// Powers the core (see [`Core::power_up`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Clock`].
+    pub fn power_up(&self) -> Result<(), Error> {
+        self.core.power_up()
+    }
+
+    /// Powers the core down (see [`Core::power_down`]).
+    pub fn power_down(&self) {
+        self.core.power_down();
+        let mut st = self.s.lock();
         st.iface_up = false;
         st.link = None;
     }
@@ -261,10 +350,11 @@ impl UsbDpPhy {
     /// The interface "init" step: lanes out of reset, wait for the PHY,
     /// the lane clocks, A2 then A0, data on (section 3.10.4).
     fn iface_init(&self, st: &mut State) -> Result<(), Error> {
-        if st.mode.dp_lanes() == 0 {
+        if self.core.mode().dp_lanes() == 0 {
             return Err(Error::NoDisplayPort);
         }
-        self.power_core(st)?;
+        self.core.power_up()?;
+        st.epoch = self.core.snapshot().2;
         let i = &*self.iface;
         i.write(PHY_LANE_RSTN, 0xF);
         i.write(PHY_LANE_EN, 0xF);
@@ -292,9 +382,15 @@ impl UsbDpPhy {
     /// [`Error`] when the PHY or its interface does not come up.
     pub fn set_rate(&self, rate: Rate, lanes: u8) -> Result<(), Error> {
         let mut st = self.s.lock();
+        // A core initialised since the interface came up has lost it.
+        if st.iface_up && st.epoch != self.core.snapshot().2 {
+            st.iface_up = false;
+            st.link = None;
+        }
         if !st.iface_up {
             self.iface_init(&mut st)?;
         }
+        let (mode, orient, _) = self.core.snapshot();
         let i = &*self.iface;
         // Bracket: data off, A3, lane clocks off.
         i.write(PHY_DATA_ENABLE, 0);
@@ -308,7 +404,7 @@ impl UsbDpPhy {
             self.regs.write(r, v);
         }
         let v = tables::rate_vals(rate);
-        for l in tables::dp_pma_lanes(st.mode, st.orient, lanes) {
+        for l in tables::dp_pma_lanes(mode, orient, lanes) {
             self.regs
                 .write(tables::lane(tables::XCVR_DIAG_HSCLK_DIV, l), v.hsclk_div);
         }
@@ -335,9 +431,10 @@ impl UsbDpPhy {
     /// stand in for combinations the standard does not allow).
     pub fn set_levels(&self, d: Drive) -> Drive {
         let st = self.s.lock();
-        let lanes = st.link.map_or(st.mode.dp_lanes(), |l| l.1);
+        let (mode, orient, _) = self.core.snapshot();
+        let lanes = st.link.map_or(mode.dp_lanes(), |l| l.1);
         let ((s, e), (mgn, cpost)) = tables::drive_vals(d.swing, d.emphasis);
-        for l in tables::dp_pma_lanes(st.mode, st.orient, lanes) {
+        for l in tables::dp_pma_lanes(mode, orient, lanes) {
             let acya = tables::lane(tables::TX_DIAG_ACYA, l);
             let a = self.regs.read(acya);
             self.regs.write(acya, a | 1);
@@ -384,8 +481,9 @@ impl UsbDpPhy {
     #[must_use]
     pub fn active_lanes(&self) -> Vec<u32> {
         let st = self.s.lock();
+        let (mode, orient, _) = self.core.snapshot();
         st.link
-            .map_or_else(Vec::new, |l| tables::dp_pma_lanes(st.mode, st.orient, l.1))
+            .map_or_else(Vec::new, |l| tables::dp_pma_lanes(mode, orient, l.1))
     }
 }
 
@@ -401,6 +499,6 @@ impl Phy for UsbDpPhy {
     }
 
     fn lanes(&self) -> u8 {
-        self.s.lock().mode.dp_lanes()
+        self.core.mode().dp_lanes()
     }
 }

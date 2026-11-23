@@ -344,3 +344,18 @@ fn scmi_shared_memory_is_declared() {
         ]
     );
 }
+
+/// The properties that name a CRU or syscon, for the register-window
+/// leases.
+#[test]
+fn the_register_window_properties_include_the_phys_orientation_syscon() {
+    let w = PLATFORM.register_windows();
+    assert!(w.contains(&"cix,usbphy_syscon"));
+    // Each is a reference the graph already orders on.
+    for name in w {
+        assert!(
+            PLATFORM.reference_kinds().iter().any(|(n, _)| n == name),
+            "{name}"
+        );
+    }
+}

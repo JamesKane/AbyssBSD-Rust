@@ -311,6 +311,7 @@ dependencies = [
  "sky1-pinctrl",
  "sky1-reset",
  "sky1-syscon",
+ "sky1-usbdp-phy",
  "smmu",
  "timers",
  "uart",
@@ -990,6 +991,15 @@ dependencies = [
 name = "sky1-usbdp-phy"
 version = "0.0.0"
 dependencies = [
+ "acpi",
+ "acpi-corpus",
+ "acpi-platform",
+ "aml",
+ "bus",
+ "cix-sky1",
+ "devtree",
+ "regs",
+ "sched",
  "sky1-dp-tx",
  "sync",
 ]

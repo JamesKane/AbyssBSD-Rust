@@ -6,8 +6,19 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+acpi = { path = "../../sys/acpi" }
+bus = { path = "../../sys/bus" }
+devtree = { path = "../../lib/devtree" }
+regs = { path = "../../lib/regs" }
+sched = { path = "../../sys/sched" }
 sky1-dp-tx = { path = "../sky1-dp-tx" }
 sync = { path = "../../sys/sync" }
+
+[dev-dependencies]
+acpi-corpus = { path = "../../lib/acpi-corpus" }
+acpi-platform = { path = "../../lib/acpi-platform" }
+aml = { path = "../../lib/aml" }
+cix-sky1 = { path = "../../platform/cix-sky1" }
 
 [lints]
 workspace = true

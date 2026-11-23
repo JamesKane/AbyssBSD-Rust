@@ -101,6 +101,13 @@ pub trait PlatformSource: Sync {
     fn reference_kinds(&self) -> &'static [(&'static str, EdgeKind)] {
         &[]
     }
+
+    /// The `_DSD` reference properties that name a register window
+    /// another device owns (a CRU or syscon), which the referring device
+    /// leases a field of (DRIVER-MODEL.md §9.3, `RegisterRegion`).
+    fn register_windows(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 /// The edge a `_DSD` reference property makes, by the generic table and

@@ -119,6 +119,19 @@ impl PlatformSource for CixSky1 {
         x
     }
 
+    fn register_windows(&self) -> &'static [&'static str] {
+        &[
+            "cix,usbphy_syscon",
+            "cix,usb_syscon",
+            "cix,gmac-ctrl",
+            "cix,dsp-ctrl",
+            "sky1,fch_cru",
+            "audss_cru",
+            "cru-ctrl",
+            "cdns,cru-ctrl",
+        ]
+    }
+
     fn reference_kinds(&self) -> &'static [(&'static str, EdgeKind)] {
         REFERENCES
     }

@@ -10,13 +10,15 @@
 //! and the eDP PHY of unit 2 (section 04).
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod acpi_driver;
 pub mod phy;
+pub mod registry;
 pub mod tables;
 
 #[cfg(test)]

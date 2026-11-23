@@ -648,16 +648,34 @@ fn the_scmi_agent_gets_its_mailbox_channels() {
 }
 
 /// The register windows a device's `_DSD` references become region lines
-/// named by the property: each USB-C PHY leases its orientation bit from
-/// the FCH CRU.
+/// named by the property, for the properties an applying platform lists.
 #[test]
-fn the_phys_get_the_system_controllers_window() {
+fn a_platforms_register_window_properties_become_region_lines() {
+    #[derive(Debug)]
+    struct Windows;
+    impl acpi_platform::PlatformSource for Windows {
+        fn name(&self) -> &'static str {
+            "test"
+        }
+        fn applies(
+            &self,
+            _: &FirmwareIdentity,
+            _: &mut aml::Interpreter,
+            _: &mut dyn aml::Host,
+            _: &[aml::NodeId],
+        ) -> bool {
+            true
+        }
+        fn register_windows(&self) -> &'static [&'static str] {
+            &["dp_phy"]
+        }
+    }
     let (mut i, mut h) = acpi_corpus::load("opi6p");
     let w = crate::bus::walk(
         &mut i,
         &mut h,
         &dma_controllers("opi6p"),
-        &[],
+        &[&Windows],
         &FirmwareIdentity::default(),
         None,
     );
@@ -674,11 +692,26 @@ fn the_phys_get_the_system_controllers_window() {
         .collect();
     assert!(
         regions.contains(&(
-            "\\_SB_.UCP3".into(),
-            "cix,usbphy_syscon".into(),
-            "\\_SB_.CRU0".into()
+            "\\_SB_.DP04".into(),
+            "dp_phy".into(),
+            "\\_SB_.UCP3.UDPP".into()
         )),
         "{regions:?}"
+    );
+    // No platform, no lines.
+    let (mut i, mut h) = acpi_corpus::load("opi6p");
+    let none = crate::bus::walk(
+        &mut i,
+        &mut h,
+        &dma_controllers("opi6p"),
+        &[],
+        &FirmwareIdentity::default(),
+        None,
+    );
+    assert!(
+        none.found
+            .iter()
+            .all(|f| f.lines.iter().all(|l| l.0 != bus::LineKind::Region))
     );
 }
 
