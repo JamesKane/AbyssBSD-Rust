@@ -374,34 +374,63 @@ static CONSOLE: SpinLock<Sinks> = SpinLock::new(Sinks {
     log_rseq: 0,
 });
 
+/// The I/O port of the loader's serial port if no UART answers there.
+#[cfg(target_arch = "x86_64")]
+fn absent_port(s: &Serial) -> Option<u16> {
+    let Serial::Ns16550Port { port } = *s else {
+        return None;
+    };
+    // SAFETY: only reads and writes the port's scratch register.
+    let ports = Ports(unsafe { crate::arch::cpu::PortBlock::new(port) });
+    (!uart_16550::Uart::present(&ports)).then_some(port)
+}
+
+/// Ports exist only on x86; every other serial port is memory the loader
+/// mapped, which firmware described.
+#[cfg(not(target_arch = "x86_64"))]
+fn absent_port(_: &Serial) -> Option<u16> {
+    None
+}
+
 /// Takes over the devices the loader described.
 pub(crate) fn init(info: &BootInfo) {
-    let serial = info.serial.get().map(|s| match s {
-        #[cfg(target_arch = "x86_64")]
-        // SAFETY: the loader found a 16550 at this port.
-        Serial::Ns16550Port { port } => SerialSink::Port(uart_16550::Uart::init(Ports(unsafe {
-            crate::arch::cpu::PortBlock::new(port)
-        }))),
-        #[cfg(not(target_arch = "x86_64"))]
-        Serial::Ns16550Port { .. } => unreachable!("I/O ports exist only on x86"),
-        Serial::Ns16550Mmio(m) => {
-            let width = if m.access_width == 4 {
-                AccessWidth::Dword
-            } else {
-                AccessWidth::Byte
-            };
-            // SAFETY: the loader mapped the UART's registers as device
-            // memory at `virt`, and the kernel tables keep that mapping.
-            let regs = unsafe { mmio(m) };
-            SerialSink::Mmio16550(uart_16550::Uart::init(StridedMmio::new(
-                regs,
-                m.reg_shift,
-                width,
-            )))
-        }
-        // SAFETY: as above.
-        Serial::Pl011(m) => SerialSink::Pl011(uart_pl011::Uart::init(unsafe { mmio(m) })),
-    });
+    // A port the loader named but no UART answers at (it assumes COM1 on a
+    // PC whose firmware describes no console UART) is no console.
+    let absent_port = info.serial.get().and_then(|s| absent_port(&s));
+    let serial = info
+        .serial
+        .get()
+        .filter(|_| absent_port.is_none())
+        .map(|s| {
+            match s {
+                #[cfg(target_arch = "x86_64")]
+                Serial::Ns16550Port { port } => {
+                    // SAFETY: a UART answered at this port, or firmware
+                    // described it.
+                    let ports = Ports(unsafe { crate::arch::cpu::PortBlock::new(port) });
+                    SerialSink::Port(uart_16550::Uart::init(ports))
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                Serial::Ns16550Port { .. } => unreachable!("I/O ports exist only on x86"),
+                Serial::Ns16550Mmio(m) => {
+                    let width = if m.access_width == 4 {
+                        AccessWidth::Dword
+                    } else {
+                        AccessWidth::Byte
+                    };
+                    // SAFETY: the loader mapped the UART's registers as device
+                    // memory at `virt`, and the kernel tables keep that mapping.
+                    let regs = unsafe { mmio(m) };
+                    SerialSink::Mmio16550(uart_16550::Uart::init(StridedMmio::new(
+                        regs,
+                        m.reg_shift,
+                        width,
+                    )))
+                }
+                // SAFETY: as above.
+                Serial::Pl011(m) => SerialSink::Pl011(uart_pl011::Uart::init(unsafe { mmio(m) })),
+            }
+        });
     let fb_info = info.framebuffer.get().and_then(|f| {
         Some(Framebuffer {
             phys: f.phys.get(),
@@ -441,10 +470,14 @@ pub(crate) fn init(info: &BootInfo) {
         let buf = unsafe { core::slice::from_raw_parts_mut(va.get() as *mut u8, len) };
         logring::Ring::open(buf).ok()
     });
-    let at = info.serial.get().map(|s| match s {
-        Serial::Ns16550Port { port } => SerialAt::Port(port),
-        Serial::Ns16550Mmio(m) | Serial::Pl011(m) => SerialAt::Mmio(m.phys.get()),
-    });
+    let at = info
+        .serial
+        .get()
+        .filter(|_| serial.is_some())
+        .map(|s| match s {
+            Serial::Ns16550Port { port } => SerialAt::Port(port),
+            Serial::Ns16550Mmio(m) | Serial::Pl011(m) => SerialAt::Mmio(m.phys.get()),
+        });
     let mut c = CONSOLE.lock();
     c.serial = serial;
     c.fb_info = fb.is_some().then_some(fb_info).flatten();
@@ -459,6 +492,11 @@ pub(crate) fn init(info: &BootInfo) {
         let _ = uart::CONSOLE.set(&PORT);
     }
     CONSOLES_KNOWN.store(true, core::sync::atomic::Ordering::Release);
+    if let Some(port) = absent_port {
+        print(format_args!(
+            "console: no UART answers at I/O port {port:#x}: no serial console (the video console is the console)\n"
+        ));
+    }
 }
 
 /// Whether the loader found a serial console.
@@ -747,15 +785,25 @@ pub(crate) fn print(args: fmt::Arguments<'_>) {
 
 /// Writes bytes from user mode to every console; bytes that are not UTF-8
 /// show as U+FFFD (the consoles are text devices until the tty layer).
-#[cfg_attr(not(feature = "ktest"), allow(dead_code))] // processes come in P4.3
+///
+/// This is `/dev/console` with no terminal behind it. It is not kernel
+/// `printf`: the text reaches the consoles but not the message buffer
+/// except as `/dev/console` output is logged (`log_console`: tagged as the
+/// console's, and off with `kern.log_console_output=0`), so `syslogd` does
+/// not read back and print again what it wrote.
 pub(crate) fn write_bytes(bytes: &[u8]) {
     let mut c = CONSOLE.lock();
+    let shown = !MUTED.load(core::sync::atomic::Ordering::Relaxed);
     for chunk in bytes.utf8_chunks() {
-        let _ = c.write_str(chunk.valid());
-        if !chunk.invalid().is_empty() {
-            let _ = c.write_str("\u{fffd}");
+        if shown {
+            let _ = c.write_consoles(chunk.valid());
+            if !chunk.invalid().is_empty() {
+                let _ = c.write_consoles("\u{fffd}");
+            }
         }
     }
+    drop(c);
+    crate::klog::log_console(bytes);
 }
 
 /// Prints on the panic path, breaking the console lock if its holder is

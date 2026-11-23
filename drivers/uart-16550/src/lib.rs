@@ -29,6 +29,7 @@ const LCR: usize = 3;
 const MCR: usize = 4;
 const LSR: usize = 5;
 const MSR: usize = 6;
+const SCR: usize = 7;
 
 const IER_RXRDY: u8 = 1 << 0;
 const IER_TXRDY: u8 = 1 << 1;
@@ -75,6 +76,23 @@ pub struct Uart<R> {
 }
 
 impl<R: RegisterIo> Uart<R> {
+    /// Whether a 16550-compatible UART answers on `regs`: its scratch
+    /// register keeps what is written (both patterns, so a bus that floats
+    /// high or holds one value does not pass), and its line status is not
+    /// all ones. Nothing is left changed. FreeBSD's `uart` probes a port
+    /// the same way before it makes it a console, and a PC with no serial
+    /// port at COM1 reads all ones there.
+    pub fn present(regs: &R) -> bool {
+        let saved = regs.read(SCR);
+        let mut ok = true;
+        for pattern in [0x5a, 0xa5] {
+            regs.write(SCR, pattern);
+            ok &= regs.read(SCR) == pattern;
+        }
+        regs.write(SCR, saved);
+        ok && regs.read(LSR) != 0xff
+    }
+
     /// Takes over a UART firmware already configured.
     pub fn init(regs: R) -> Self {
         regs.write(IER, 0);
@@ -270,6 +288,46 @@ mod tests {
         fn write(&self, n: usize, v: u8) {
             self.writes.borrow_mut().push((n, v));
         }
+    }
+
+    /// A bus with no device: every read is all ones (a floating line).
+    struct Floating;
+
+    impl RegisterIo for &Floating {
+        fn read(&self, _: usize) -> u8 {
+            0xff
+        }
+        fn write(&self, _: usize, _: u8) {}
+    }
+
+    /// A bus whose scratch register works.
+    #[derive(Default)]
+    struct Scratch(RefCell<u8>);
+
+    impl RegisterIo for &Scratch {
+        fn read(&self, n: usize) -> u8 {
+            match n {
+                SCR => *self.0.borrow(),
+                LSR => LSR_THR_EMPTY,
+                _ => 0,
+            }
+        }
+        fn write(&self, n: usize, v: u8) {
+            if n == SCR {
+                *self.0.borrow_mut() = v;
+            }
+        }
+    }
+
+    #[test]
+    fn presence() {
+        assert!(!Uart::present(&&Floating), "an empty COM1 reads all ones");
+        let s = Scratch::default();
+        *s.0.borrow_mut() = 0x33;
+        assert!(Uart::present(&&s));
+        assert_eq!(*s.0.borrow(), 0x33, "left as found");
+        // Registers that read back zero (no scratch register) do not pass.
+        assert!(!Uart::present(&&Fake::default()));
     }
 
     #[test]
