@@ -13,6 +13,7 @@ mod diff;
 mod expect;
 mod fattest;
 mod fs;
+mod graphics;
 mod image;
 mod isotest;
 mod kyua;
@@ -45,6 +46,8 @@ commands:
   build       --arch <a|all> [--release] [--ktest]       build the loader
   image       --arch <a> [--release] [--ktest] [--root md|installed]
                                                          build a GPT disk image with an ESP
+  graphics    --arch <a> --disk IMAGE --key PRIVATE_KEY [--install] [--out DIR]
+                                                         the Sway acceptance run (docs/GRAPHICS.md §14, tests/graphics)
   run         --arch <a> [--release] [--ktest] [--smp N] [--mem SIZE] [--gdb] [--display] [--usb] [--el2] [--iommu]
               [--qmp SOCK]                               ... with a QMP socket for `qmp`
   qmp         --sock SOCK [--type TEXT] [--key KEYS] [--move DX,DY] [--screendump FILE] [--unplug ID]
@@ -116,6 +119,7 @@ fn run() -> Result<()> {
         "build" => build::cmd(args),
         "image" => image::cmd(args),
         "run" => qemu::cmd_run(args),
+        "graphics" => graphics::cmd(args),
         "qmp" => qmp::cmd(args),
         "test" => test::cmd(args),
         "perf" => perf::cmd(args),

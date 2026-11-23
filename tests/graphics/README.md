@@ -12,7 +12,18 @@ Stock Wayland and Sway from FreeBSD 15.1 packages, unmodified, on the card under
   `simpledrm` (`drivers/gop-kms`) in QEMU on x86_64, 1280x800, Sway 1.12, wlroots 0.20.2, Mesa
   26.2.2 llvmpipe. The jellyfish runs at about 400 frames a second.
 
-## Reproducing it (a development guest, QEMU with KVM on the workstation)
+## Running it
+
+```sh
+cargo xtask graphics --arch x86_64 --disk disk-board.img --key devvm_key [--install] [--out DIR]
+```
+
+Boots the image in QEMU (a snapshot, unless `--install`, which also installs the packages),
+starts Sway, takes the capture with `grim`, and checks the logs: the pixman renderer, a successful
+modeset commit, and glmark2 on llvmpipe. The capture, `sway.log` and `glmark2.txt` go to `--out`
+(default `build/graphics`). ssh is key only and never prompts.
+
+## Making the image (a development guest, QEMU with KVM on the workstation)
 
 ```sh
 # On the build server's side: an installed root with 6 GiB free, root's key, DHCP and sshd.
@@ -32,4 +43,5 @@ rebooting it; QEMU exits on reboot (`-no-reboot`), so start it again.
 
 ## Not yet
 
-arm64 under QEMU, the two reference machines, and an automated case in the boot tier.
+The two reference machines, and a case in the boot tier (the packages come from the network, so it
+needs a prepared image).
