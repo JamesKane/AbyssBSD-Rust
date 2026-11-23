@@ -7,9 +7,9 @@
 
 use addr::PhysAddr;
 use bootproto::{BootInfo, Header, MemoryKind, MemoryRegion, Table};
-use efi::{Allocate, MemoryMap, MemoryType, SystemTable};
+use efi::{MemoryMap, MemoryType, SystemTable};
 
-use crate::{Error, memtype};
+use crate::{Error, tracked};
 
 /// Handoff memory, allocated and waiting for the final memory map.
 #[derive(Debug)]
@@ -36,8 +36,7 @@ pub(crate) fn prepare(
 ) -> Result<Handoff, Error> {
     let regions_bytes = capacity * size_of::<MemoryRegion>();
     let total = INFO_SPACE + regions_bytes + cmdline.len() + env.len();
-    let base = st
-        .allocate_pages(Allocate::Anywhere, memtype::BOOT_DATA, total.div_ceil(4096))
+    let base = tracked::boot_data(st, total.div_ceil(4096))
         .map_err(|s| Error::Efi("allocate handoff", s))?;
     let base = PhysAddr::new(base);
     let regions = base + INFO_SPACE as u64;
@@ -97,7 +96,15 @@ impl Handoff {
             n += 1;
         }
         let kernel = f.kernel.phys.get()..f.kernel.phys.get() + f.kernel.size;
-        let n = relabel(regions, n, kernel, MemoryKind::Kernel);
+        let mut n = relabel(regions, n, kernel, MemoryKind::Kernel);
+        // Handoff data and the log ring are plain loader data to firmware
+        // (see `tracked`); the kernel gets them labelled.
+        for (start, end) in tracked::boot_data_ranges() {
+            n = relabel(regions, n, start..end, MemoryKind::BootData);
+        }
+        for (start, end) in tracked::log_ring_ranges() {
+            n = relabel(regions, n, start..end, MemoryKind::LogRing);
+        }
         let len = normalize(&mut regions[..n]);
         let info = BootInfo {
             header: Header::CURRENT,
@@ -207,9 +214,6 @@ fn kind(t: MemoryType) -> MemoryKind {
         MemoryType::MMIO | MemoryType::MMIO_PORT_SPACE => MemoryKind::Mmio,
         MemoryType::UNUSABLE => MemoryKind::Unusable,
         MemoryType::PERSISTENT => MemoryKind::Persistent,
-        memtype::KERNEL => MemoryKind::Kernel,
-        memtype::BOOT_DATA => MemoryKind::BootData,
-        memtype::LOG_RING => MemoryKind::LogRing,
         _ => MemoryKind::Reserved,
     }
 }

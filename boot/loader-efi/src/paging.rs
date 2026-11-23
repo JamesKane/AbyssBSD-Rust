@@ -17,12 +17,12 @@ use alloc::vec::Vec;
 use addr::{PhysAddr, VirtAddr};
 use bootproto::layout::{DEVICE_WINDOW_BASE, DEVICE_WINDOW_SIZE, DMAP_SIZE, dmap};
 use bootproto::{Framebuffer, Mmio, Serial};
-use efi::{Allocate, MemoryType, SystemTable};
+use efi::{MemoryType, SystemTable};
 use pt::{Attrs, Frame, PageSize, PageTable};
 
 use crate::devices::{self, SerialPort};
 use crate::kernel::Kernel;
-use crate::{Error, memtype};
+use crate::{Error, tracked};
 
 #[cfg(target_arch = "x86_64")]
 type Format = pt::x86_64::X86_64;
@@ -36,10 +36,7 @@ struct Frames<'a> {
 
 impl pt::Memory for Frames<'_> {
     fn alloc_frame(&mut self) -> Option<PhysAddr> {
-        let pa = self
-            .st
-            .allocate_pages(Allocate::Anywhere, memtype::BOOT_DATA, 1)
-            .ok()?;
+        let pa = tracked::boot_data(self.st, 1).ok()?;
         // SAFETY: a fresh page, identity mapped.
         unsafe { (pa as *mut Frame).write([0; pt::ENTRIES]) };
         Some(PhysAddr::new(pa))

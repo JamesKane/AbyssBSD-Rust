@@ -9,10 +9,10 @@
 //! the least likely to be reused before the loader runs again.
 
 use addr::{PhysAddr, PhysRange};
-use efi::{Allocate, File, Guid, Mode, SystemTable};
+use efi::{File, Guid, Mode, SystemTable};
 use logring::Ring;
 
-use crate::memtype;
+use crate::tracked;
 
 /// The AbyssBSD vendor GUID for loader variables.
 const VENDOR: Guid = Guid::must_parse("6A3C2F1E-8B4D-4E7A-9C15-41B5A59D0B17");
@@ -53,9 +53,7 @@ pub(crate) fn setup(st: &SystemTable, root: &File<'_>) -> Option<(bootproto::Log
         .filter(|a| a % 4096 == 0 && *a != 0);
 
     if let Some(addr) = previous
-        && st
-            .allocate_pages(Allocate::At(addr), memtype::LOG_RING, PAGES)
-            .is_ok()
+        && tracked::log_ring(st, Some(addr), PAGES).is_ok()
     {
         let buf = region(addr);
         let (recovered, boots) = match Ring::open(buf) {
@@ -77,14 +75,8 @@ pub(crate) fn setup(st: &SystemTable, root: &File<'_>) -> Option<(bootproto::Log
     }
 
     let addr = quiet_spot(st)
-        .and_then(|a| {
-            st.allocate_pages(Allocate::At(a), memtype::LOG_RING, PAGES)
-                .ok()
-        })
-        .or_else(|| {
-            st.allocate_pages(Allocate::Anywhere, memtype::LOG_RING, PAGES)
-                .ok()
-        })?;
+        .and_then(|a| tracked::log_ring(st, Some(a), PAGES).ok())
+        .or_else(|| tracked::log_ring(st, None, PAGES).ok())?;
     Ring::format(region(addr), 1).ok()?;
     // Without the variable the next boot cannot find the ring; still use
     // it for this boot.

@@ -7,7 +7,7 @@ use bootproto::layout::{KASLR_ALIGN, KERNEL_LINK_BASE, KERNEL_MAX_SIZE};
 use efi::{Allocate, File, Mode, SystemTable};
 use elf::{Elf, FileType, Relocation, SegmentKind};
 
-use crate::{Error, memtype};
+use crate::{Error, tracked};
 
 /// A file read into boot-data pages, which the kernel can still reach.
 #[derive(Debug)]
@@ -32,9 +32,7 @@ pub(crate) fn read_file(st: &SystemTable, root: &File<'_>, path: &str) -> Result
     let len = file.size().map_err(|s| Error::Efi("file size", s))?;
     let len = usize::try_from(len).map_err(|_| Error::Kernel("file too large"))?;
     let pages = len.div_ceil(4096).max(1);
-    let phys = st
-        .allocate_pages(Allocate::Anywhere, memtype::BOOT_DATA, pages)
-        .map_err(|s| Error::Efi("allocate file buffer", s))?;
+    let phys = tracked::boot_data(st, pages).map_err(|s| Error::Efi("allocate file buffer", s))?;
     // SAFETY: freshly allocated pages, identity mapped, `pages * 4096` ≥ len.
     let buf = unsafe { core::slice::from_raw_parts_mut(phys as *mut u8, len) };
     file.read_exact(buf).map_err(|s| Error::Efi("read", s))?;

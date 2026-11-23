@@ -18,10 +18,10 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::fmt::Write;
 
-use efi::{Allocate, Handle, SystemTable, raw};
+use efi::{Handle, SystemTable, raw};
 
 use crate::kernel::Loaded;
-use crate::{Error, memtype};
+use crate::{Error, tracked};
 
 /// Blocks kept by the metadata cache.
 const CACHED: usize = 8;
@@ -293,9 +293,7 @@ fn load(st: &SystemTable, fs: &ufs::Ufs<Partition<'_>>, ip: &ufs::Inode) -> Resu
     let room = usize::try_from(ip.size.next_multiple_of(bsize))
         .map_err(|_| Error::Kernel("file too large"))?;
     let pages = room.div_ceil(4096).max(1);
-    let phys = st
-        .allocate_pages(Allocate::Anywhere, memtype::BOOT_DATA, pages)
-        .map_err(|s| Error::Efi("allocate file buffer", s))?;
+    let phys = tracked::boot_data(st, pages).map_err(|s| Error::Efi("allocate file buffer", s))?;
     // SAFETY: freshly allocated pages, identity mapped, `pages * 4096`
     // bytes long.
     let buf = unsafe { core::slice::from_raw_parts_mut(phys as *mut u8, pages * 4096) };

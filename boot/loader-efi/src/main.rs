@@ -26,6 +26,7 @@ mod rng;
 mod smbios;
 #[cfg(feature = "ktest")]
 mod tests;
+mod tracked;
 mod ufs;
 
 use alloc::vec::Vec;
@@ -45,20 +46,6 @@ const CMDLINE_PATH: &str = "EFI/ABYSS/CMDLINE";
 const MD_PATH: &str = "EFI/ABYSS/MD";
 const UFS_KERNEL_PATH: &[u8] = b"/boot/kernel/kernel";
 const UFS_MD_PATH: &[u8] = b"/boot/abyss/md";
-
-/// UEFI memory types the loader tags its allocations with, so the final
-/// memory map tells the kernel what each region holds.
-pub(crate) mod memtype {
-    use efi::MemoryType;
-
-    /// The kernel image.
-    pub(crate) const KERNEL: MemoryType = MemoryType(0x8000_0001);
-    /// Handoff data: `BootInfo`, the memory map, page tables, the kernel
-    /// file (for its symbols), the command line.
-    pub(crate) const BOOT_DATA: MemoryType = MemoryType(0x8000_0002);
-    /// The persistent log ring.
-    pub(crate) const LOG_RING: MemoryType = MemoryType(0x8000_0003);
-}
 
 /// Why booting failed.
 #[derive(Debug)]
@@ -270,7 +257,7 @@ fn boot(image: Handle, st: SystemTable) -> Result<core::convert::Infallible, Err
         );
     }
     let env = smbios::serialize(&env);
-    let handoff = handoff::prepare(&st, map_bytes / 40 + 64, &cmdline, &env)?;
+    let handoff = handoff::prepare(&st, map_bytes / 40 + 64 + 256, &cmdline, &env)?;
     let mut map_buf = alloc::vec![0u8; map_bytes];
 
     let firmware = bootproto::Firmware {
