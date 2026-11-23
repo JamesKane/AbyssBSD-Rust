@@ -132,6 +132,15 @@ pub trait Ops: Sync {
         let _ = uid;
         None
     }
+    /// The drivers the platform adds under every `cpu` device, as
+    /// (class, description): what FreeBSD's `identify` routines do for
+    /// `cpu` (`hwpstate_amd` on x86). Each gets a [`CpuChild`] as its bus
+    /// data and declines if its CPU lacks what it needs. None by default.
+    ///
+    /// [`CpuChild`]: crate::cpu::CpuChild
+    fn cpu_children(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
     /// Reads functional fixed hardware register `address` on the current
     /// CPU, as the architecture defines them for `_CPC`: on arm64, 0 is
     /// the activity monitors' core cycle counter and 1 their constant

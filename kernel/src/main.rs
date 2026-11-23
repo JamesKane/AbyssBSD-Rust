@@ -49,6 +49,8 @@ mod fs;
 mod geom_ctl;
 mod geom_kern;
 mod gopkms;
+#[cfg(target_arch = "x86_64")]
+mod hwpstate_amd;
 #[cfg(target_arch = "aarch64")]
 mod idregs;
 mod iic;

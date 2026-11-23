@@ -23,6 +23,13 @@
 //! are its driver's settings; FreeBSD's relative drivers (throttling, as
 //! `p4tcc`) and their combinations are not implemented.
 //!
+//! A driver with no settings is information only
+//! (`CPUFREQ_FLAG_INFO_ONLY`): the hardware picks the frequency, as under
+//! `hwpstate_amd`'s CPPC, and the driver can only say what it is. Its
+//! frequency is not cached (`CPUFREQ_FLAG_UNCACHED`): reading
+//! `dev.cpu.N.freq` asks the driver, on the CPU, each time; writing it
+//! fails.
+//!
 //! Behavior reference: sys/kern/kern_cpu.c.
 
 #![no_std]
@@ -34,10 +41,12 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
+
+pub mod amd_cppc;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use abi::errno::Errno;
-use abi::sysctl::ctlflag;
+use abi::sysctl::{ctlflag, ctltype};
 use bus::{AttachCx, AttachError, DeviceId, Driver, DriverDecl, Ident, Ids, StopCx, StopReason};
 use devtree::graph::EdgeKind;
 use hal::CpuId;
@@ -237,13 +246,35 @@ impl Cpufreq {
         }
     }
 
+    /// The current frequency as the driver measures it, on the CPU it
+    /// controls (`CPUFREQ_FLAG_UNCACHED`): for a driver whose frequency the
+    /// hardware chooses. May busy-wait, so only from thread context.
+    #[must_use]
+    pub fn get_on_cpu(&self) -> Option<i32> {
+        let was = sched::bound_cpu();
+        sched::move_to(Some(CpuId(self.cpu)));
+        let f = self.driver.get();
+        sched::move_to(was);
+        f
+    }
+
+    /// Whether the driver only reports (it offers no levels to set).
+    #[must_use]
+    pub fn info_only(&self) -> bool {
+        self.levels.is_empty()
+    }
+
     /// Sets a level at `priority` (`CPUFREQ_SET`): the driver switches on
     /// the domain's CPU, as FreeBSD binds to it.
     ///
     /// # Errors
     ///
-    /// As [`Policy::apply`].
+    /// As [`Policy::apply`]; `EOPNOTSUPP` for a driver that is information
+    /// only.
     pub fn set(&self, s: &Sleepable, target: Target, priority: i32) -> Result<(), Errno> {
+        if self.info_only() {
+            return Err(Errno::EOPNOTSUPP);
+        }
         if let Target::Level(f) = target
             && !self.levels.iter().any(|l| l.freq == f)
         {
@@ -294,7 +325,9 @@ pub fn all() -> Vec<Arc<Cpufreq>> {
 pub fn set_all(s: &Sleepable, freq: i32, priority: i32) -> Result<(), Errno> {
     let mut r = Ok(());
     for c in all() {
-        if let Some(f) = nearest(c.levels(), freq) {
+        if c.info_only() {
+            r = Err(Errno::EOPNOTSUPP);
+        } else if let Some(f) = nearest(c.levels(), freq) {
             r = c.set(s, Target::Level(f), priority);
         }
     }
@@ -422,7 +455,27 @@ impl Driver for CpufreqDevice {
             add_globals(t);
             if let Some(cpu) = bus::device_node(t, "cpu", cf.cpu) {
                 let rd = Arc::clone(&cf);
-                if let Ok(n) = t.add_writable(
+                if cf.info_only() {
+                    // Measured on its CPU at each read; nothing to set.
+                    if let Ok(n) = t.add_query(
+                        cpu,
+                        Number::Auto,
+                        "freq",
+                        "Current CPU frequency",
+                        ctltype::INT | ctlflag::RW | ctlflag::MPSAFE,
+                        "I",
+                        Arc::new(move |written, out| {
+                            if written.is_some() {
+                                return Err(Errno::EOPNOTSUPP);
+                            }
+                            let f = rd.get_on_cpu().unwrap_or(VAL_UNKNOWN);
+                            out.extend_from_slice(&f.to_ne_bytes());
+                            Ok(())
+                        }),
+                    ) {
+                        nodes.push(n);
+                    }
+                } else if let Ok(n) = t.add_writable(
                     cpu,
                     Number::Auto,
                     "freq",

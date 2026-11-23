@@ -3,7 +3,9 @@
 //! processor's unit is its CPU's ID, found through its UID in the MADT, so
 //! `dev.cpu.N` is CPU N. Under the first processor of each frequency domain whose
 //! `_CPC` controls frequency it adds `acpi_cppc` ([`crate::cppc`]), as
-//! that driver's identify routine does under FreeBSD's `cpu` devices.
+//! that driver's identify routine does under FreeBSD's `cpu` devices, and
+//! under every processor the drivers the platform names
+//! ([`crate::Ops::cpu_children`]).
 //!
 //! Behavior reference: sys/dev/acpica/acpi_cpu.c.
 
@@ -12,13 +14,24 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use bus::{
-    Announce, AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, StartCx, StopCx, StopReason,
+    Announce, AttachCx, AttachError, DeviceId, Driver, DriverDecl, Ident, Ids, StartCx, StopCx,
+    StopReason,
 };
 use devtree::ids::AcpiKind;
 
 use crate::bus::AcpiDevice;
 use crate::cppc::CppcChild;
 use crate::service::service;
+
+/// What `cpu` gives each driver the platform adds under it
+/// ([`crate::Ops::cpu_children`]).
+#[derive(Debug)]
+pub struct CpuChild {
+    /// The CPU.
+    pub cpu: u32,
+    /// The `cpu` device, the child's parent.
+    pub cpu_device: DeviceId,
+}
 
 /// `cpuN`.
 #[derive(Debug)]
@@ -79,6 +92,16 @@ impl Driver for AcpiCpu {
                     desc: "ACPI CPPC CPU frequency control",
                 },
                 Some(Arc::new(child)),
+                Vec::new(),
+            );
+        }
+        for &(class, desc) in ops.cpu_children() {
+            cx.add_child(
+                Ident::Child { class, desc },
+                Some(Arc::new(CpuChild {
+                    cpu: self.cpu,
+                    cpu_device: cx.node(),
+                })),
                 Vec::new(),
             );
         }

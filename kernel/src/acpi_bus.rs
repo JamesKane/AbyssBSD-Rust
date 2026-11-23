@@ -275,6 +275,11 @@ impl acpi::Ops for KernelAcpi {
         crate::topology::cpu_of_uid(uid).map(|c| c.0)
     }
 
+    #[cfg(target_arch = "x86_64")]
+    fn cpu_children(&self) -> &'static [(&'static str, &'static str)] {
+        &[("hwpstate_amd", "AMD CPU performance control")]
+    }
+
     #[cfg(target_arch = "aarch64")]
     fn ffh_read(&self, address: u64) -> Option<u64> {
         match address {

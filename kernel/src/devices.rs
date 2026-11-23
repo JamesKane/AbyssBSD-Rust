@@ -162,7 +162,11 @@ static TEST_DRIVERS: &[DriverDecl] = &[
 ];
 
 /// Drivers that call into the kernel itself (firmware services).
-static KERNEL_DRIVERS: &[DriverDecl] = &[crate::efirtc::DRIVER];
+static KERNEL_DRIVERS: &[DriverDecl] = &[
+    crate::efirtc::DRIVER,
+    #[cfg(target_arch = "x86_64")]
+    crate::hwpstate_amd::DRIVER,
+];
 
 /// The build's drivers (`driver-table`, checked on the host for ties),
 /// the kernel's own, and the test drivers in ktest builds.
