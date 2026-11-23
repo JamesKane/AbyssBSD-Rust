@@ -6,14 +6,26 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+acpi = { path = "../../sys/acpi" }
+addr = { path = "../../lib/addr" }
+bus = { path = "../../sys/bus" }
+devtree = { path = "../../lib/devtree" }
+irq = { path = "../../sys/irq" }
+regs = { path = "../../lib/regs" }
+vm = { path = "../../sys/vm" }
 abi = { path = "../../lib/abi" }
 drm = { path = "../../sys/drm" }
 drm-fourcc = { path = "../../lib/drm-fourcc" }
 kms-check = { path = "../../lib/kms-check" }
+sched = { path = "../../sys/sched" }
 sync = { path = "../../sys/sync" }
 
 [dev-dependencies]
-vm = { path = "../../sys/vm" }
+aml = { path = "../../lib/aml" }
+acpi-corpus = { path = "../../lib/acpi-corpus" }
+acpi-platform = { path = "../../lib/acpi-platform" }
+cix-sky1 = { path = "../../platform/cix-sky1" }
+hal = { path = "../../arch/hal" }
 
 [lints]
 workspace = true

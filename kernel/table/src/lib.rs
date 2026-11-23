@@ -110,6 +110,7 @@ pub static AARCH64: &[DriverDecl] = drivers![
     sky1_syscon::DRIVER,
     cix_mbox::DRIVER,
     cdns_gpio::DRIVER,
+    linlondp::komeda::DRIVER,
     gpiobus::GPIOBUS,
     gpiobus::GPIOC,
     cdnc_i2c::DRIVER,

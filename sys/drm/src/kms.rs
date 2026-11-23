@@ -125,6 +125,9 @@ pub struct CrtcUpdate<'a> {
     pub new: &'a CrtcSt,
     /// Whether the controller turns on or off, or changes mode.
     pub modeset: bool,
+    /// The requesting thread, for a commit (`None` while checking): a
+    /// controller that sets clocks may sleep on it.
+    pub s: Option<&'a sched::Sleepable>,
 }
 
 /// What a plane is being asked to do in a commit.

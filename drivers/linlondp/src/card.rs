@@ -22,6 +22,7 @@ use drm::kms::{
 };
 use drm::{DriverInfo, DrmDriver, DumbLimits, KmsBuilder};
 use drm_fourcc::{Fourcc, MOD_LINEAR, lookup};
+use sched::Sleepable;
 use sync::SpinLock;
 
 use crate::format::{self, LayerKind};
@@ -59,9 +60,9 @@ pub trait Platform: Send + Sync {
     /// # Errors
     ///
     /// `EINVAL` when the clock cannot be made.
-    fn pixel_clock_on(&self, p: usize, khz: u32) -> Result<(), Errno>;
+    fn pixel_clock_on(&self, s: &Sleepable, p: usize, khz: u32) -> Result<(), Errno>;
     /// Stops pipeline `p`'s pixel clock.
-    fn pixel_clock_off(&self, p: usize);
+    fn pixel_clock_off(&self, s: &Sleepable, p: usize);
     /// The main clock's rate in kHz.
     fn aclk_khz(&self) -> u64;
     /// The time, in nanoseconds, for frame stamps.
@@ -117,16 +118,21 @@ impl CrtcHw for Crtc {
 
     fn commit(&self, u: &CrtcUpdate<'_>) {
         let (d, p) = (&self.inner.dpu, self.pipe);
-        if u.modeset && d.running(p) {
+        // A mode change needs the requesting thread, for the clocks.
+        if u.modeset && u.s.is_none() {
+            return;
+        }
+        if let (true, true, Some(s)) = (u.modeset, d.running(p), u.s) {
             // Changing mode, or turning off: stop first.
             if d.disable(p).is_err() {
                 // The log is the platform's; the state is marked stopped.
             }
-            self.inner.plat.pixel_clock_off(p);
+            self.inner.plat.pixel_clock_off(s, p);
         }
         match (u.new.active, u.new.mode.as_ref()) {
             (true, Some(m)) if u.modeset => {
-                if self.inner.plat.pixel_clock_on(p, m.clock_khz).is_err()
+                let Some(s) = u.s else { return };
+                if self.inner.plat.pixel_clock_on(s, p, m.clock_khz).is_err()
                     || d.enable(p, m).is_err()
                 {
                     return;

@@ -178,6 +178,25 @@ impl Gem {
         Ok((Arc::clone(&self.object), self.offset + page))
     }
 
+    /// The physical frames of every page, populating those not yet
+    /// touched: what a device that reads the buffer by itself needs
+    /// (scanout). The pages stay as long as the buffer does; nothing
+    /// reclaims anonymous pages yet, so no pin is needed, and one is owed
+    /// when swapping comes.
+    ///
+    /// # Errors
+    ///
+    /// `ENOMEM` when a page cannot be had.
+    pub fn frames(&self) -> Result<alloc::vec::Vec<vm::Pfn>, Errno> {
+        (0..self.pages())
+            .map(|i| {
+                self.object
+                    .page_for_write(self.offset + i)
+                    .map_err(|_| Errno::ENOMEM)
+            })
+            .collect()
+    }
+
     /// Calls `f` with page `index` (0 is the first) of the buffer,
     /// populating it if nothing touched it yet.
     ///

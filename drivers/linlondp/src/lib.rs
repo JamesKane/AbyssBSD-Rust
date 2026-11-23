@@ -10,7 +10,8 @@
 //! simulated device.
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![cfg_attr(not(test), forbid(unsafe_code))]
+#![cfg_attr(test, deny(unsafe_code))]
 
 extern crate alloc;
 #[cfg(test)]
@@ -20,6 +21,7 @@ pub mod card;
 pub mod discover;
 pub mod format;
 pub mod hw;
+pub mod komeda;
 pub mod regs;
 pub mod timing;
 

@@ -316,6 +316,7 @@ impl Kms {
                 old: &old.crtcs[i],
                 new: c,
                 modeset: modeset[i],
+                s: None,
             })?;
         }
         for (i, p) in new.planes.iter().enumerate() {
@@ -446,7 +447,7 @@ impl Kms {
                     }
                 }
             }
-            self.program(&old, new, &planes, &modeset, flags.force);
+            self.program(&old, new, &planes, &modeset, flags.force, Some(s));
             *self.state.lock() = new.clone();
             {
                 let mut shown = self.shown.lock();
@@ -524,6 +525,7 @@ impl Kms {
         planes: &[(Visible, Option<Arc<crate::kms::Fb>>)],
         modeset: &[bool],
         force: Option<usize>,
+        s: Option<&Sleepable>,
     ) {
         let crtc_of = |id: Option<ObjId>| id.and_then(|id| self.crtc_index(id));
         let first_encoder = |k: usize| {
@@ -571,6 +573,7 @@ impl Kms {
                     old: &old.crtcs[i],
                     new: c,
                     modeset: modeset[i],
+                    s,
                 });
             }
         }

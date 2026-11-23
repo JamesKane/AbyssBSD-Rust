@@ -81,11 +81,11 @@ impl Platform for TestPlatform {
     fn clean(&self, _: &Gem, _: core::ops::Range<u64>) {
         self.cleaned.fetch_add(1, Ordering::SeqCst);
     }
-    fn pixel_clock_on(&self, p: usize, khz: u32) -> Result<(), Errno> {
+    fn pixel_clock_on(&self, _: &Sleepable, p: usize, khz: u32) -> Result<(), Errno> {
         self.pixel.lock().unwrap().push((p, Some(khz)));
         Ok(())
     }
-    fn pixel_clock_off(&self, p: usize) {
+    fn pixel_clock_off(&self, _: &Sleepable, p: usize) {
         self.pixel.lock().unwrap().push((p, None));
     }
     fn aclk_khz(&self) -> u64 {
@@ -222,6 +222,7 @@ fn turn_on(r: &Rig) {
         old: &old,
         new: &new,
         modeset: true,
+        s: Some(&sl()),
     };
     r.crtc.check(&u).unwrap();
     r.crtc.commit(&u);
@@ -286,6 +287,7 @@ fn a_pipeline_turns_on_with_its_clock_and_off_again() {
         old: &old,
         new: &new,
         modeset: true,
+        s: Some(&sl()),
     });
     assert!(!r.card.dpu().running(0));
     assert_eq!(r.plat.pixel.lock().unwrap().last(), Some(&(0, None)));
@@ -310,6 +312,7 @@ fn a_mode_the_clocks_cannot_serve_is_refused() {
         old: &old,
         new: &new,
         modeset: true,
+        s: Some(&sl()),
     };
     assert_eq!(r.crtc.check(&u), Err(Errno::EINVAL));
 }
@@ -339,6 +342,7 @@ fn a_plane_shows_a_buffer_at_its_mapped_address_and_hides() {
             ..CrtcSt::default()
         },
         modeset: false,
+        s: None,
     });
     r.sim.frame();
     let p = &r.card.dpu().layout().pipes[0];
@@ -420,6 +424,7 @@ fn a_mode_change_shows_the_layers_again() {
         old: &old,
         new: &new,
         modeset: true,
+        s: Some(&sl()),
     });
     let p = &r.card.dpu().layout().pipes[0];
     assert!(r.card.dpu().running(0));
@@ -458,4 +463,10 @@ fn the_card_reads_as_the_specification_describes_it() {
     let d = r.card.dumb().unwrap();
     assert_eq!(d.pitch_align, 16);
     assert!(!r.card.dumb_placement().coherent);
+}
+
+#[allow(unsafe_code)]
+fn sl() -> Sleepable {
+    // SAFETY: host tests run on threads that may block.
+    unsafe { Sleepable::assume() }
 }
