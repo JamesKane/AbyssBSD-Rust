@@ -591,7 +591,14 @@ fn ufs_root(
             // 10,000 files). `-b` counts bytes.
             .args(match root {
                 Root::Kyua => ["-b", "1g", "-f", "30000"],
-                _ => ["-b", "25%", "-f", "25%"],
+                // `ABYSS_ROOT_FREE=6g`: room for a package set (a graphics
+                // stack is a few gigabytes), for a development image.
+                _ => match std::env::var("ABYSS_ROOT_FREE") {
+                    Ok(v) if !v.is_empty() => {
+                        ["-b", Box::leak(v.into_boxed_str()) as &str, "-f", "100000"]
+                    }
+                    _ => ["-b", "25%", "-f", "25%"],
+                },
             })
             .arg("-F")
             .arg(&spec_path)

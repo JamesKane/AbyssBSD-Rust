@@ -225,6 +225,19 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
     let iommu = args.take_flag("--iommu");
     let usb = args.take_flag("--usb");
     let qmp = args.take_value("--qmp")?;
+    // An image made elsewhere (an installed root from the build
+    // server), and the guest's network: `--forward HOST:GUEST` forwards
+    // a port of the host's loopback to one of the guest's.
+    let disk_arg = args.take_value("--disk")?;
+    let mut forwards = Vec::new();
+    while let Some(f) = args.take_value("--forward")? {
+        let (h, g) = f.split_once(':').ok_or("--forward wants HOST:GUEST")?;
+        forwards.push((
+            h.parse().map_err(|_| "bad --forward host port")?,
+            g.parse().map_err(|_| "bad --forward guest port")?,
+        ));
+    }
+    let net = args.take_flag("--net") || !forwards.is_empty();
     let vmm = Vmm::parse(&args.take_value("--vmm")?.unwrap_or_else(|| "qemu".into()))?;
     if !vmm.available(arch) {
         return Err(format!("{vmm:?} cannot run {arch} guests on this host").into());
@@ -236,8 +249,12 @@ pub(crate) fn cmd_run(mut args: Args) -> Result<()> {
         .unwrap_or_else(|| default_cmdline.into());
     args.finish()?;
 
-    let disk = image::build(arch, opts, &cmdline)?;
+    let disk = match disk_arg {
+        Some(p) => PathBuf::from(p),
+        None => image::build(arch, opts, &cmdline)?,
+    };
     let vm = Vm {
+        net: net.then_some(Net::User { forwards }),
         smp,
         mem,
         gdb,

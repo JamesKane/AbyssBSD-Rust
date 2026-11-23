@@ -57,6 +57,7 @@ cargo xtask image   --arch <a> [--release] [--ktest] [--cmdline "..."] [--root m
                     # boot's UFS2 root (disk-installed.img; makefs, so with --remote)
 cargo xtask run     --arch <a> [--release] [--ktest] [--cmdline "..."] [--smp N] [--mem SIZE]
                     [--gdb] [--display] [--el2] [--iommu] [--vmm qemu|bhyve]
+                    [--disk IMAGE] [--net] [--forward HOST:GUEST]...   # a made image; user-mode network
 cargo xtask test    [--tier unit|boot|stress|all] [--arch <a|all>] [--duration S] [--verbose]
 cargo xtask check                                        # rustfmt, clippy (host, loader, kernel), policy
 cargo xtask policy                                       # path-only dependencies, SPDX headers

@@ -89,6 +89,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
         "ABYSS_DIFF",
         "ABYSS_TEST_ONLY",
         "ABYSS_NTP",
+        "ABYSS_ROOT_FREE",
     ]
     .iter()
     .filter_map(|k| std::env::var(k).ok().map(|v| format!("{k}={} ", quote(&v))))
