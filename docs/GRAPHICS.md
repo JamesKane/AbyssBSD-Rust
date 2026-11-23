@@ -533,3 +533,30 @@ to control 4; the vendor's text writes control 3 twice); whether PLL1's lock bit
 valid (recorded, not required); the PMA lane map encoding on a flipped cable in DP-only mode; whether
 the orientation reaches the S5 bit after a hot plug under ACPI; whether lane 0's drive suits all lanes.
 The board's boot display (DP 4) is PHY 3 in DP-only mode.
+
+### 15.3 Kernel glue: state and what the firmware tables showed
+
+Built: `linlondp::komeda`, the ACPI driver for `CIXH5010`, registered in the arm64 driver table. It pins
+`aclk` from the firmware property, takes the pipeline clocks by their `CLKT` names, maps the registers
+and interrupt, takes a DMA tag (non-coherent, 40 bits), discovers and initialises the blocks, and builds
+the card. Scanout memory maps through the unit's translation domain, or as one contiguous run if the
+stream bypasses translation (`Gem::frames`). A unit the firmware left scanning out is declined, so the
+boot console stays (adoption is not built). The card is not registered until an output joins it. A
+corpus test checks all five units' registers, clocks and resets against the board's firmware.
+
+From the DSDT (`tests/corpus/opi6p/freebsd/acpidump-dt.txt`), for the next drivers:
+
+- `CIXH502F` (DP 4): memory 0 `dp` `0x14224000`, 1 `dsc`, 2 `dp_phy` `0x1422FF00` (256 B), 3 `dp_rcsu`
+  `0x14210000` (`0x304` B); clocks `vid_clk0`, `vid_clk1`, `apb_clk` (SCMI 57, 58, 63); reset
+  `dp_reset` (index 28); `_DSD` `dp_phy` references `\_SB.UCP3.UDPP`, and graph ports 0 and 1 lead to
+  `DPU4` `pipeline@0` and `pipeline@1`. The graph builder already makes `dp_phy` a required edge.
+- `CIXH2033` (PHY 3): `_DSD` `id` 3, `default_conf` 2 (DP only), **`cix,usbphy_syscon` references
+  `CRU0`** (the specification says ACPI has no syscon reference: it does), `phy-status` `"usb"`;
+  clock `pclk` (119); resets `preset` (index 54) and `reset` (58); children `USBP` and `UDPP`.
+
+Not built, in the order they are needed: a lease on the system controller's orientation register
+(`sky1-syscon` has none yet); the PHY and DP-TX ACPI drivers and the hand-over of the PHY object between
+them (a registry keyed by unit stands in until the M-G PHY provider is designed); the RCSU video
+adapter; encoder and connector objects over the transmitter; the hot-plug interrupt thread; the
+aggregate that registers the card when its output attaches; and adoption of the firmware's running
+display, which the boot display (DP 4) needs before any of it can drive that connector.
