@@ -283,10 +283,16 @@ fn account(inner: &mut thread::Inner, ev: thread::Event, now: u64) -> Priority {
 }
 
 /// A run queue whose length can be read without its lock.
+///
+/// The length comes first, on the lock's cache line (ULE's `tdq_load` shares
+/// `tdq_lock`'s): an idle CPU spinning on the length takes the line, with
+/// the lock, from the CPU that queued a thread, and its `lock` then finds
+/// it.
+#[repr(C, align(64))]
 struct LockedRunQueue {
-    q: SpinLock<RunQueue>,
     /// The queue's length as of the last unlock.
     len: AtomicUsize,
+    q: SpinLock<RunQueue>,
 }
 
 impl LockedRunQueue {
@@ -1659,7 +1665,7 @@ fn idle_loop() {
             // A waker sees `halted` clear and sets `need_resched` instead
             // of sending an IPI.
             for _ in 0..spins {
-                if c.need_resched.load(Ordering::Relaxed) {
+                if c.need_resched.load(Ordering::Relaxed) || c.runq.len_hint() != 0 {
                     break;
                 }
                 hal::spin_hint();
