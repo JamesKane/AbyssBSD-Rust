@@ -11,6 +11,8 @@ Stock Wayland and Sway from FreeBSD 15.1 packages, unmodified, on the card under
 - `accept-x86_64-gop-kms.png`: the capture, taken with `grim` on the machine under test:
   `simpledrm` (`drivers/gop-kms`) in QEMU on x86_64, 1280x800, Sway 1.12, wlroots 0.20.2, Mesa
   26.2.2 llvmpipe. The jellyfish runs at about 400 frames a second.
+- `accept-aarch64-gop-kms.png`: the same on arm64 (`virt` with `ramfb`, 800x600, under emulation, so
+  the jellyfish runs at about 7 frames a second).
 
 ## Running it
 
