@@ -3,6 +3,8 @@
 
 use abi::errno::Errno;
 
+use crate::gem::{Gem, Placement};
+
 /// What `DRM_IOCTL_VERSION` reports. Mesa's loader picks its driver by
 /// `name`, so it is the Linux driver's name (`virtio_gpu`, `panthor`),
 /// not the kernel module's.
@@ -61,6 +63,28 @@ pub trait DrmDriver: Send + Sync {
     /// Its dumb-buffer limits, or `None` if it has no dumb buffers.
     fn dumb(&self) -> Option<DumbLimits> {
         None
+    }
+
+    /// Where its dumb buffers live and how they are cached. A chip whose
+    /// display snoops the processor's caches keeps the default; one that
+    /// does not says so, and the core calls [`DrmDriver::sync_for_device`]
+    /// before it shows one.
+    fn dumb_placement(&self) -> Placement {
+        Placement::SYSTEM_COHERENT
+    }
+
+    /// Cleans the processor's caches for `range` (bytes) of `gem`, so a
+    /// device that does not snoop reads what was written. Called for
+    /// buffers whose placement is not coherent, before a commit shows
+    /// them.
+    fn sync_for_device(&self, gem: &Gem, range: core::ops::Range<u64>) {
+        let _ = (gem, range);
+    }
+
+    /// Invalidates the processor's caches for `range` of `gem`, so the
+    /// processor reads what a device wrote.
+    fn sync_for_cpu(&self, gem: &Gem, range: core::ops::Range<u64>) {
+        let _ = (gem, range);
     }
 
     /// The value of capability `cap` beyond the core's (`GET_CAP`):

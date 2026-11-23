@@ -426,6 +426,18 @@ pub(crate) fn add_fb2(f: &Open, a: &mut DrmModeFbCmd2) -> Result<usize, Errno> {
     Ok(0)
 }
 
+/// `DIRTYFB`: the buffer under a framebuffer changed. Clip rectangles
+/// are accepted and the whole framebuffer is refreshed.
+pub(crate) fn dirty_fb(f: &Open, a: &mut DrmModeFbDirtyCmd) -> Result<usize, Errno> {
+    let k = kms_of(f)?;
+    if a.flags & !DRM_MODE_FB_DIRTY_FLAGS != 0 || a.num_clips > DRM_MODE_FB_DIRTY_MAX_CLIPS {
+        return Err(Errno::EINVAL);
+    }
+    let fb = k.fb(ObjId(a.fb_id)).ok_or(Errno::ENOENT)?;
+    k.refresh(fb.id);
+    Ok(0)
+}
+
 pub(crate) fn rm_fb(f: &Open, a: &mut Id) -> Result<usize, Errno> {
     kms_of(f)?.remove_fb(ObjId(a.0), f.id).map(|()| 0)
 }

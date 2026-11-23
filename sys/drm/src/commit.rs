@@ -436,7 +436,17 @@ impl Kms {
                     events.push(None);
                 }
             }
-            self.program(&old, new, &planes, &modeset);
+            // Buffers a device reads without snooping the processor's
+            // caches are cleaned before it looks (the producer's part of
+            // the hand-off, GRAPHICS.md §4.4).
+            for (_, fb) in &planes {
+                for g in fb.iter().flat_map(|f| f.gems.iter().flatten()) {
+                    if !g.placement().coherent {
+                        file.card.driver().sync_for_device(g, 0..g.size());
+                    }
+                }
+            }
+            self.program(&old, new, &planes, &modeset, flags.force);
             *self.state.lock() = new.clone();
             {
                 let mut shown = self.shown.lock();
@@ -511,6 +521,7 @@ impl Kms {
         new: &State,
         planes: &[(Visible, Option<Arc<crate::kms::Fb>>)],
         modeset: &[bool],
+        force: Option<usize>,
     ) {
         let crtc_of = |id: Option<ObjId>| id.and_then(|id| self.crtc_index(id));
         let first_encoder = |k: usize| {
@@ -533,7 +544,10 @@ impl Kms {
                 .into_iter()
                 .flatten()
                 .any(|c| modeset[c]);
-            if *p != old.planes[i] || touches_modeset {
+            // A flip to the buffer already shown still reaches a layer
+            // that must be told to read it again.
+            let forced = force.is_some() && force == crtc_of(p.crtc);
+            if *p != old.planes[i] || touches_modeset || forced {
                 self.planes[i].hw.commit(&PlaneUpdate {
                     index: i,
                     crtc: crtc_of(p.crtc),
@@ -545,7 +559,11 @@ impl Kms {
             }
         }
         for (i, c) in new.crtcs.iter().enumerate() {
-            if *c != old.crtcs[i] || modeset[i] || self.touched_by_planes(old, new, i) {
+            if *c != old.crtcs[i]
+                || modeset[i]
+                || force == Some(i)
+                || self.touched_by_planes(old, new, i)
+            {
                 self.crtcs[i].hw.commit(&CrtcUpdate {
                     index: i,
                     old: &old.crtcs[i],
@@ -605,6 +623,61 @@ impl Kms {
             }
         }
         self.done.wake_all();
+    }
+
+    /// Tells the layers that show framebuffer `fb` that its contents
+    /// changed (the dirty-framebuffer call: for hardware that does not
+    /// scan the buffer by itself, this is when it reads it).
+    pub(crate) fn refresh(&self, fb: ObjId) {
+        let _guard = self.commit_lock.lock();
+        let st = self.state.lock().clone();
+        let shown = self.shown.lock().clone();
+        for (i, p) in st.planes.iter().enumerate() {
+            if p.fb != Some(fb) {
+                continue;
+            }
+            let Some(buf) = &shown[i] else { continue };
+            let Some(c) = p.crtc.and_then(|id| self.crtc_index(id)) else {
+                continue;
+            };
+            let crtc_state = kms_check::CrtcState {
+                active: st.crtcs[c].active,
+                mode: st.crtcs[c].mode,
+            };
+            let caps = PlaneCaps {
+                possible_crtcs: self.planes[i].possible_crtcs,
+                formats: self.planes[i].hw.formats(),
+                scale: self.planes[i].hw.scale(),
+            };
+            let info = FbInfo {
+                id: buf.id,
+                format: buf.format,
+                modifier: buf.modifier,
+                width: buf.width,
+                height: buf.height,
+            };
+            let ps = PlaneState {
+                crtc: p.crtc,
+                fb: Some(info),
+                src: p.src,
+                dst: p.dst,
+            };
+            let Ok(visible) = check_plane(
+                &caps,
+                &ps,
+                Some((u32::try_from(c).unwrap_or(32), &crtc_state)),
+            ) else {
+                continue;
+            };
+            self.planes[i].hw.commit(&PlaneUpdate {
+                index: i,
+                crtc: Some(c),
+                fb: Some(buf),
+                visible,
+                old: p,
+                new: p,
+            });
+        }
     }
 
     /// The number of frames display controller `crtc` has had.

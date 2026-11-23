@@ -193,6 +193,12 @@ const TABLE: &[Def] = &[
     ),
     def!(DRM_IOCTL_MODE_RMFB, "MODE_RMFB", k::Id, k::rm_fb),
     def!(
+        DRM_IOCTL_MODE_DIRTYFB,
+        "MODE_DIRTYFB",
+        DrmModeFbDirtyCmd,
+        k::dirty_fb
+    ),
+    def!(
         DRM_IOCTL_MODE_CLOSEFB,
         "MODE_CLOSEFB",
         DrmModeClosefb,
@@ -446,7 +452,7 @@ fn create_dumb(f: &Open, a: &mut DrmModeCreateDumb) -> Result<usize, Errno> {
     }
     let pages = size.div_ceil(PAGE_SIZE);
     let offset = f.card.alloc_offset(pages)?;
-    let gem = Gem::new(env.pages, size, offset)?;
+    let gem = Gem::new(env.pages, size, offset, f.card.driver().dumb_placement())?;
     a.size = gem.size();
     a.handle = f.handles.lock().insert(Arc::clone(&gem))?;
     a.pitch = u32::try_from(pitch).map_err(|_| Errno::EINVAL)?;

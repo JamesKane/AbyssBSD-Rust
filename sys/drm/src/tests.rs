@@ -196,6 +196,9 @@ pub(crate) fn idle(unit: u32) {
 struct Mock {
     dumb: Option<DumbLimits>,
     kms: Option<crate::kms::Kms>,
+    placement: crate::gem::Placement,
+    /// The byte ranges the core asked to clean, by buffer size.
+    cleaned: Arc<Mutex<Vec<u64>>>,
 }
 
 impl DrmDriver for Mock {
@@ -215,6 +218,12 @@ impl DrmDriver for Mock {
     fn dumb(&self) -> Option<DumbLimits> {
         self.dumb
     }
+    fn dumb_placement(&self) -> crate::gem::Placement {
+        self.placement
+    }
+    fn sync_for_device(&self, _: &crate::gem::Gem, range: core::ops::Range<u64>) {
+        self.cleaned.lock().unwrap().push(range.end - range.start);
+    }
     fn cap(&self, cap: u64) -> Option<u64> {
         (cap == 0x1000).then_some(7)
     }
@@ -225,6 +234,8 @@ fn card(dumb: bool, kms: bool) -> Arc<crate::Card> {
     crate::register(Arc::new(Mock {
         dumb: dumb.then(DumbLimits::default),
         kms: kms.then(|| mock_display(&Calls::default())),
+        placement: crate::gem::Placement::SYSTEM_COHERENT,
+        cleaned: Arc::default(),
     }))
     .unwrap()
 }
@@ -236,6 +247,8 @@ fn card_logged() -> (Arc<crate::Card>, Calls) {
     let c = crate::register(Arc::new(Mock {
         dumb: Some(DumbLimits::default()),
         kms: Some(mock_display(&calls)),
+        placement: crate::gem::Placement::SYSTEM_COHERENT,
+        cleaned: Arc::default(),
     }))
     .unwrap();
     (c, calls)
@@ -1885,4 +1898,143 @@ fn a_descriptor_maps_from_its_own_first_page() {
     assert_eq!(buf.mapping(0, pages + 1).err(), Some(Errno::EINVAL));
     assert_eq!(buf.mapping(pages, 1).err(), Some(Errno::EINVAL));
     c.unregister(&s());
+}
+
+#[test]
+fn a_framebuffer_drawn_in_place_is_reread_on_a_flip_to_itself_and_on_dirty() {
+    let (c, calls) = card_logged();
+    let f = open(&c);
+    let i = ids(&f);
+    let fb = make_fb(&f, 1920, 1080);
+    set_crtc(&f, &i, fb).unwrap();
+    take(&calls);
+
+    // The same framebuffer again: nothing about the state changed, but
+    // the layer must read it.
+    let a = DrmModeCrtcPageFlip {
+        crtc_id: i.crtc,
+        fb_id: fb,
+        flags: 0,
+        reserved: 0,
+        user_data: 0,
+    };
+    ctl(&f, DRM_IOCTL_MODE_PAGE_FLIP, &a).unwrap();
+    assert_eq!(
+        take(&calls),
+        [
+            std::format!("plane0 fb={fb} shown=true"),
+            "crtc0 active=true".into()
+        ]
+    );
+    fire(c.unit());
+
+    // Dirty: the layers showing it read it, and nothing else is touched.
+    let dirty = DrmModeFbDirtyCmd {
+        fb_id: fb,
+        ..Default::default()
+    };
+    ctl(&f, DRM_IOCTL_MODE_DIRTYFB, &dirty).unwrap();
+    assert_eq!(take(&calls), [std::format!("plane0 fb={fb} shown=true")]);
+    // A buffer no plane shows costs nothing; an unknown one is refused.
+    let other = make_fb(&f, 64, 64);
+    ctl(
+        &f,
+        DRM_IOCTL_MODE_DIRTYFB,
+        &DrmModeFbDirtyCmd {
+            fb_id: other,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(take(&calls).is_empty());
+    let nope = DrmModeFbDirtyCmd {
+        fb_id: 9999,
+        ..Default::default()
+    };
+    assert_eq!(
+        ctl(&f, DRM_IOCTL_MODE_DIRTYFB, &nope).err(),
+        Some(Errno::ENOENT)
+    );
+    c.unregister(&s());
+}
+
+// ---- where buffers live ----
+
+use crate::gem::{Backing, CacheMode, Placement};
+
+fn card_placed(placement: Placement) -> (Arc<crate::Card>, Arc<Mutex<Vec<u64>>>) {
+    setup();
+    let cleaned = Arc::<Mutex<Vec<u64>>>::default();
+    let c = crate::register(Arc::new(Mock {
+        dumb: Some(DumbLimits::default()),
+        kms: Some(mock_display(&Calls::default())),
+        placement,
+        cleaned: cleaned.clone(),
+    }))
+    .unwrap();
+    (c, cleaned)
+}
+
+#[test]
+fn a_buffer_a_device_does_not_snoop_is_cleaned_before_it_is_shown() {
+    // A chip whose display does not snoop the processor's caches.
+    let (c, cleaned) = card_placed(Placement::SYSTEM_NONCOHERENT);
+    let f = open(&c);
+    let i = ids(&f);
+    let fb = make_fb(&f, 1920, 1080);
+    assert_eq!(f.gem(1).unwrap().placement(), Placement::SYSTEM_NONCOHERENT);
+    assert!(
+        cleaned.lock().unwrap().is_empty(),
+        "making a buffer cleans nothing"
+    );
+    set_crtc(&f, &i, fb).unwrap();
+    // Cleaned in full, once, before the layer reads it.
+    let size = 1920u64 * 4 * 1080;
+    assert_eq!(*cleaned.lock().unwrap(), [size.next_multiple_of(PAGE_SIZE)]);
+    c.unregister(&s());
+}
+
+#[test]
+fn a_coherent_buffer_needs_no_cleaning() {
+    let (c, cleaned) = card_placed(Placement::SYSTEM_COHERENT);
+    let f = open(&c);
+    let i = ids(&f);
+    let fb = make_fb(&f, 1920, 1080);
+    set_crtc(&f, &i, fb).unwrap();
+    assert!(cleaned.lock().unwrap().is_empty());
+    c.unregister(&s());
+}
+
+#[test]
+fn placements_not_built_yet_are_refused_with_a_clear_error() {
+    // A discrete card's own memory, and uncached or write-combined pages,
+    // need virtual memory support that is not there.
+    for p in [
+        Placement {
+            backing: Backing::DeviceLocal,
+            ..Placement::SYSTEM_COHERENT
+        },
+        Placement {
+            backing: Backing::Contiguous,
+            ..Placement::SYSTEM_COHERENT
+        },
+        Placement {
+            cache: CacheMode::WriteCombine,
+            ..Placement::SYSTEM_COHERENT
+        },
+        Placement {
+            cache: CacheMode::Uncached,
+            ..Placement::SYSTEM_NONCOHERENT
+        },
+    ] {
+        let (c, _) = card_placed(p);
+        let f = open(&c);
+        let mut d = create_dumb_arg(16, 16, 32);
+        assert_eq!(
+            call(&f, DRM_IOCTL_MODE_CREATE_DUMB, &mut d),
+            Err(Errno::EOPNOTSUPP),
+            "{p:?}"
+        );
+        c.unregister(&s());
+    }
 }

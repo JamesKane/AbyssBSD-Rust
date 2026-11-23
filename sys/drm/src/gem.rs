@@ -11,6 +11,62 @@ use abi::errno::Errno;
 use addr::PAGE_SIZE;
 use vm::object::{Object, PageIndex, PageOps};
 
+/// Where a buffer's pages live.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backing {
+    /// Ordinary pages from the system's memory, allocated when first
+    /// touched: the buffers of a system on a chip whose display and
+    /// graphics engines share the processor's memory (unified memory).
+    System,
+    /// A contiguous run of the system's memory, for hardware that cannot
+    /// gather pages and has no address translation of its own.
+    Contiguous,
+    /// Memory on the device, reached through a window onto it: a discrete
+    /// graphics card's own memory. Moves to system memory when shared.
+    DeviceLocal,
+}
+
+/// How the processor's caches treat a buffer's pages in user and kernel
+/// mappings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheMode {
+    WriteBack,
+    WriteCombine,
+    Uncached,
+}
+
+/// Where a buffer lives and how it is cached: what a driver decides per
+/// buffer, and what the core then does for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placement {
+    pub backing: Backing,
+    pub cache: CacheMode,
+    /// Whether the devices that use the buffer see what the processor
+    /// wrote without cache maintenance. Not on a chip whose display or
+    /// graphics engine does not snoop the processor's caches: the core
+    /// then asks the driver to clean them before the device reads
+    /// ([`crate::DrmDriver::sync_for_device`]).
+    pub coherent: bool,
+}
+
+impl Placement {
+    /// System pages, cached, that devices see coherently: the usual case
+    /// on a processor whose devices snoop its caches.
+    pub const SYSTEM_COHERENT: Self = Self {
+        backing: Backing::System,
+        cache: CacheMode::WriteBack,
+        coherent: true,
+    };
+
+    /// System pages, cached, that a device which does not snoop reads
+    /// only after the processor's caches are cleaned.
+    pub const SYSTEM_NONCOHERENT: Self = Self {
+        backing: Backing::System,
+        cache: CacheMode::WriteBack,
+        coherent: false,
+    };
+}
+
 /// The first fake offset, in pages (`DRM_FILE_PAGE_OFFSET_START`: 4 GiB,
 /// above any offset a driver might give a register window).
 pub const OFFSET_START: PageIndex = 0x1_0000_0000 / PAGE_SIZE;
@@ -28,6 +84,7 @@ pub struct Gem {
     object: Arc<Object>,
     /// Size in bytes: a whole number of pages.
     size: u64,
+    placement: Placement,
     /// The fake file offset of its first page, in pages.
     offset: PageIndex,
 }
@@ -43,7 +100,14 @@ impl Gem {
         pages: &'static dyn PageOps,
         size: u64,
         offset: PageIndex,
+        placement: Placement,
     ) -> Result<Arc<Self>, Errno> {
+        // Only cached system pages are built so far; the other
+        // placements come with the virtual memory support they need
+        // (cache attributes on user mappings, device windows).
+        if placement.backing != Backing::System || placement.cache != CacheMode::WriteBack {
+            return Err(Errno::EOPNOTSUPP);
+        }
         if size == 0 {
             return Err(Errno::EINVAL);
         }
@@ -56,8 +120,15 @@ impl Gem {
         Ok(Arc::new(Self {
             object,
             size,
+            placement,
             offset,
         }))
+    }
+
+    /// Where it lives and how it is cached.
+    #[must_use]
+    pub fn placement(&self) -> Placement {
+        self.placement
     }
 
     /// Its size in bytes.

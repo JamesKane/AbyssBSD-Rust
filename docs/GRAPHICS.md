@@ -112,6 +112,19 @@ single type behind GEM handles, dma-bufs, scanout buffers, and GPU allocations.
 | `DeviceLocal` | VRAM on discrete GPUs | A range of a BAR, managed by the driver's allocator; evicted to `System` |
 | `Imported` | A dma-buf from another device | The exporter's object, attached (§4.4) |
 
+- **Unified and discrete memory.** The same buffer type serves both kinds of machine. On a
+  system on a chip whose display and graphics engines share the processor's memory (Sky1, the Q8B,
+  the Radeon iGPU), a buffer is `System` pages and moving it between devices is a matter of mapping
+  the same pages, not copying. On a discrete card it may be `DeviceLocal`, and sharing it makes it
+  `System`. Two more properties are chosen **per buffer by the driver**, not assumed from the
+  architecture: the **cache mode** of its CPU mappings (write-back, write-combined, uncached) and
+  whether devices see the processor's writes without cache maintenance (**coherent**). The Sky1 and
+  Q8B display and graphics engines do not snoop, so their buffers are `System` and not coherent:
+  the core calls the driver's `sync_for_device` before a commit shows one, and `sync_for_cpu`
+  before the processor reads what a device wrote. A snooping device (any x86 machine's) is
+  coherent and costs nothing. `Placement` (backing, cache mode, coherent) is data the driver gives
+  when a buffer is made; only cached `System` pages are built so far, and the others refuse with
+  `EOPNOTSUPP` until the virtual memory support they need exists.
 - **Lifetime.** A buffer is counted, held by GEM handles, dma-buf files, CPU mappings, device
   mappings, and in-flight jobs. It is **not** binding memory: it may outlive the driver that made
   it (DRIVER-MODEL.md §4.1). After the binding goes, its device mappings are gone (§4.3) and CPU

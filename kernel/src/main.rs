@@ -48,6 +48,7 @@ mod firstuse;
 mod fs;
 mod geom_ctl;
 mod geom_kern;
+mod gopkms;
 #[cfg(target_arch = "aarch64")]
 mod idregs;
 mod iic;

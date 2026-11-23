@@ -279,6 +279,7 @@ pub(crate) fn init(s: &Sleepable) {
     let _ = uart::TERMINALS.set(&crate::tty::serial::HOST);
     // `vt` takes the framebuffer; keyboards type into its windows.
     crate::vtcons::start();
+    crate::gopkms::start();
     input::set_consumer(alloc::sync::Arc::new(crate::tty::ConsoleInput));
     bus::set_bootverbose(crate::console::loader_flag("boot_verbose").unwrap_or(false));
     // `hw.nvme.*` (`TUNABLE_INT_FETCH`), before any controller attaches.

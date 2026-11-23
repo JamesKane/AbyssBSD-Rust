@@ -400,6 +400,12 @@ pub fn hold(on: bool) {
 pub fn panic_write(bytes: &[u8]) {
     let Some(vt) = VT.get() else { return };
     vt.active.store(CONSWINDOW, Ordering::Release);
+    // The panic message is for the screen even if a client held it: take
+    // the display back.
+    if let Some(mut st) = vt.state.try_lock() {
+        st.win[CONSWINDOW].graphics = false;
+    }
+    vt.invalid.store(true, Ordering::Release);
     if let Some(mut t) = vt.windows[CONSWINDOW].try_lock() {
         for line in bytes.split_inclusive(|&b| b == b'\n') {
             match line.split_last() {
@@ -739,16 +745,24 @@ impl Vt {
             };
             // The font and the cells together: a font change resizes
             // the window under its lock.
-            let face = if s.is_some() {
-                self.state.lock().fonts[a].clone()
+            let (face, graphics) = if s.is_some() {
+                let st = self.state.lock();
+                (st.fonts[a].clone(), st.win[a].graphics)
             } else {
                 let Some(st) = self.state.try_lock() else {
                     self.invalid.fetch_or(invalid, Ordering::AcqRel);
                     self.moved.fetch_or(moved, Ordering::AcqRel);
                     return;
                 };
-                st.fonts[a].clone()
+                (st.fonts[a].clone(), st.win[a].graphics)
             };
+            // A window in graphics mode (`KD_GRAPHICS`: a compositor or
+            // display server owns the screen) is not drawn on, as
+            // `vt_flush` skips it. Leaving the mode invalidates the
+            // window, so the whole screen is drawn again then.
+            if graphics {
+                return;
+            }
             invalid |= renderer.set_face(&face);
             if !invalid && !moved && !t.buf.damaged() {
                 return;

@@ -406,6 +406,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gop-kms"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "drm",
+ "drm-fourcc",
+ "kms-check",
+]
+
+[[package]]
 name = "gpiobus"
 version = "0.0.0"
 dependencies = [
@@ -650,6 +660,7 @@ dependencies = [
  "fat",
  "fb-console",
  "geom",
+ "gop-kms",
  "gpt",
  "guid",
  "hal",
