@@ -21,6 +21,7 @@ use addr::PAGE_SIZE;
 
 use crate::card::{Open, client};
 use crate::gem::Gem;
+use crate::kms_ioctl as k;
 
 type Handler = fn(&Open, &mut [u8]) -> Result<usize, Errno>;
 
@@ -97,6 +98,85 @@ const TABLE: &[Def] = &[
         "MODE_DESTROY_DUMB",
         DrmModeDestroyDumb,
         destroy_dumb
+    ),
+    def!(
+        DRM_IOCTL_MODE_GETRESOURCES,
+        "MODE_GETRESOURCES",
+        DrmModeCardRes,
+        k::get_resources
+    ),
+    def!(
+        DRM_IOCTL_MODE_GETCRTC,
+        "MODE_GETCRTC",
+        DrmModeCrtc,
+        k::get_crtc
+    ),
+    def!(
+        DRM_IOCTL_MODE_GETENCODER,
+        "MODE_GETENCODER",
+        DrmModeGetEncoder,
+        k::get_encoder
+    ),
+    def!(
+        DRM_IOCTL_MODE_GETCONNECTOR,
+        "MODE_GETCONNECTOR",
+        DrmModeGetConnector,
+        k::get_connector
+    ),
+    def!(
+        DRM_IOCTL_MODE_GETPLANERESOURCES,
+        "MODE_GETPLANERESOURCES",
+        DrmModeGetPlaneRes,
+        k::get_plane_resources
+    ),
+    def!(
+        DRM_IOCTL_MODE_GETPLANE,
+        "MODE_GETPLANE",
+        DrmModeGetPlane,
+        k::get_plane
+    ),
+    def!(
+        DRM_IOCTL_MODE_GETPROPERTY,
+        "MODE_GETPROPERTY",
+        DrmModeGetProperty,
+        k::get_property
+    ),
+    def!(
+        DRM_IOCTL_MODE_GETPROPBLOB,
+        "MODE_GETPROPBLOB",
+        DrmModeGetBlob,
+        k::get_blob
+    ),
+    def!(
+        DRM_IOCTL_MODE_OBJ_GETPROPERTIES,
+        "MODE_OBJ_GETPROPERTIES",
+        DrmModeObjGetProperties,
+        k::obj_get_properties
+    ),
+    def!(
+        DRM_IOCTL_MODE_CREATEPROPBLOB,
+        "MODE_CREATEPROPBLOB",
+        DrmModeCreateBlob,
+        k::create_blob
+    ),
+    def!(
+        DRM_IOCTL_MODE_DESTROYPROPBLOB,
+        "MODE_DESTROYPROPBLOB",
+        DrmModeDestroyBlob,
+        k::destroy_blob
+    ),
+    def!(
+        DRM_IOCTL_MODE_ADDFB2,
+        "MODE_ADDFB2",
+        DrmModeFbCmd2,
+        k::add_fb2
+    ),
+    def!(DRM_IOCTL_MODE_RMFB, "MODE_RMFB", k::Id, k::rm_fb),
+    def!(
+        DRM_IOCTL_MODE_CLOSEFB,
+        "MODE_CLOSEFB",
+        DrmModeClosefb,
+        k::close_fb
     ),
 ];
 

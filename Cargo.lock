@@ -330,6 +330,7 @@ dependencies = [
  "abi",
  "addr",
  "drm-fourcc",
+ "kms-check",
  "sched",
  "sync",
  "vfs",

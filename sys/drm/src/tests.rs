@@ -142,7 +142,7 @@ static USER: std::sync::OnceLock<&'static Arena> = std::sync::OnceLock::new();
 
 struct Mock {
     dumb: Option<DumbLimits>,
-    kms: bool,
+    kms: Option<crate::kms::Kms>,
 }
 
 impl DrmDriver for Mock {
@@ -156,8 +156,8 @@ impl DrmDriver for Mock {
             patch: 3,
         }
     }
-    fn has_kms(&self) -> bool {
-        self.kms
+    fn kms(&self) -> Option<&crate::kms::Kms> {
+        self.kms.as_ref()
     }
     fn dumb(&self) -> Option<DumbLimits> {
         self.dumb
@@ -171,7 +171,7 @@ fn card(dumb: bool, kms: bool) -> Arc<crate::Card> {
     setup();
     crate::register(Arc::new(Mock {
         dumb: dumb.then(DumbLimits::default),
-        kms,
+        kms: kms.then(mock_display),
     }))
     .unwrap()
 }
@@ -430,16 +430,16 @@ fn unknown_requests_are_logged_and_refused() {
     let c = card(false, false);
     let f = open(&c);
     LOG.lock().unwrap().clear();
-    // _IOWR('d', 0xA7, ...) is GETCONNECTOR: not in this slice.
+    // _IOWR('d', 0xA2, ...) is SETCRTC: not in this slice.
     assert_eq!(
-        call(&f, DRM_IOCTL_MODE_GETCONNECTOR, &mut [0; 80]),
+        call(&f, DRM_IOCTL_MODE_SETCRTC, &mut [0; 104]),
         Err(Errno::ENOTTY)
     );
     assert!(
         LOG.lock()
             .unwrap()
             .iter()
-            .any(|l| l.contains("0xa7") && l.contains("not implemented"))
+            .any(|l| l.contains("0xa2") && l.contains("not implemented"))
     );
     // Not a DRM request at all.
     assert_eq!(
@@ -517,4 +517,539 @@ fn unregistering_kills_open_files() {
         f.read(&s(), &mut vfs::ReadBuf::new(&mut buf), 0, true),
         Err(Errno::ENODEV)
     );
+}
+
+// ---- the display ----
+
+use crate::KmsBuilder;
+use crate::kms::{
+    Connection, ConnectorHw, CrtcHw, EncoderHw, KmsLimits, PlaneHw, PlaneKind, PropKind, PropSpec,
+};
+use abi::drm::Wire;
+use drm_fourcc::{Fourcc, format};
+use kms_check::Mode;
+
+struct MockCrtc;
+impl CrtcHw for MockCrtc {}
+
+const PLANE_FORMATS: &[Fourcc] = &[format::XRGB8888, format::ARGB8888];
+
+struct MockPlane;
+impl PlaneHw for MockPlane {
+    fn formats(&self) -> &[Fourcc] {
+        PLANE_FORMATS
+    }
+    fn properties(&self) -> &[PropSpec] {
+        &[PropSpec {
+            name: "zpos",
+            kind: PropKind::Range { min: 0, max: 3 },
+            default: 1,
+            immutable: false,
+        }]
+    }
+}
+
+struct MockEncoder;
+impl EncoderHw for MockEncoder {
+    fn kind(&self) -> u32 {
+        DRM_MODE_ENCODER_TMDS
+    }
+}
+
+struct MockConnector;
+impl ConnectorHw for MockConnector {
+    fn kind(&self) -> u32 {
+        DRM_MODE_CONNECTOR_EDP
+    }
+    fn detect(&self) -> Connection {
+        Connection::Connected
+    }
+    fn modes(&self) -> Vec<Mode> {
+        std::vec![Mode {
+            clock_khz: 148_500,
+            hdisplay: 1920,
+            hsync_start: 2008,
+            hsync_end: 2052,
+            htotal: 2200,
+            vdisplay: 1080,
+            vsync_start: 1084,
+            vsync_end: 1089,
+            vtotal: 1125,
+            kind: DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER,
+            ..Mode::default()
+        }]
+    }
+    fn size_mm(&self) -> (u32, u32) {
+        (344, 194)
+    }
+}
+
+/// One display controller, a primary and an overlay plane, an encoder
+/// and an embedded DisplayPort connector.
+fn mock_display() -> crate::kms::Kms {
+    let mut b = KmsBuilder::new(KmsLimits {
+        min_width: 16,
+        max_width: 4096,
+        min_height: 16,
+        max_height: 4096,
+    });
+    let c = b.crtc(Arc::new(MockCrtc));
+    b.plane(Arc::new(MockPlane), PlaneKind::Primary, 1 << c);
+    b.plane(Arc::new(MockPlane), PlaneKind::Overlay, 1 << c);
+    let e = b.encoder(Arc::new(MockEncoder), 1 << c, 0);
+    b.connector(Arc::new(MockConnector), &[e]);
+    b.build().unwrap()
+}
+
+fn enc<T: Wire>(v: &T) -> Vec<u8> {
+    let mut b = std::vec![0u8; T::SIZE];
+    v.encode(&mut b);
+    b
+}
+
+/// Calls a request with a typed argument; returns the argument as the
+/// call left it.
+fn ctl<T: Wire>(f: &Arc<crate::Open>, req: u32, v: &T) -> Result<T, Errno> {
+    let mut b = enc(v);
+    call(f, req, &mut b)?;
+    Ok(T::decode(&b))
+}
+
+fn put(at: u64, bytes: &[u8]) {
+    USER.get().unwrap().copy_out(BASE + at, bytes).unwrap();
+}
+
+fn get(at: u64, len: usize) -> Vec<u8> {
+    let mut v = std::vec![0u8; len];
+    USER.get().unwrap().copy_in(&mut v, BASE + at).unwrap();
+    v
+}
+
+fn ids_at(at: u64, n: usize) -> Vec<u32> {
+    get(at, n * 4)
+        .chunks(4)
+        .map(|c| u32::from_ne_bytes(c.try_into().unwrap()))
+        .collect()
+}
+
+#[test]
+fn resources_are_sized_then_fetched() {
+    let c = card(true, true);
+    let f = open(&c);
+    // First call: no room, true counts.
+    let r = ctl(&f, DRM_IOCTL_MODE_GETRESOURCES, &DrmModeCardRes::default()).unwrap();
+    assert_eq!(
+        (
+            r.count_crtcs,
+            r.count_connectors,
+            r.count_encoders,
+            r.count_fbs
+        ),
+        (1, 1, 1, 0)
+    );
+    assert_eq!(
+        (r.min_width, r.max_width, r.min_height, r.max_height),
+        (16, 4096, 16, 4096)
+    );
+    // Second: room at 0x4000.
+    let r2 = ctl(
+        &f,
+        DRM_IOCTL_MODE_GETRESOURCES,
+        &DrmModeCardRes {
+            crtc_id_ptr: BASE + 0x4000,
+            connector_id_ptr: BASE + 0x4100,
+            encoder_id_ptr: BASE + 0x4200,
+            count_crtcs: 1,
+            count_connectors: 1,
+            count_encoders: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(r2.count_crtcs, 1);
+    let crtc = ids_at(0x4000, 1)[0];
+    let conn = ids_at(0x4100, 1)[0];
+    let enc_id = ids_at(0x4200, 1)[0];
+    // Distinct, nonzero object numbers.
+    assert!(crtc != 0 && conn != 0 && enc_id != 0);
+    assert!(crtc != conn && conn != enc_id && crtc != enc_id);
+    // A list too small for the answer is left alone.
+    put(0x4300, &[0xee; 8]);
+    let small = DrmModeCardRes {
+        crtc_id_ptr: BASE + 0x4300,
+        count_crtcs: 0,
+        ..Default::default()
+    };
+    let small = ctl(&f, DRM_IOCTL_MODE_GETRESOURCES, &small).unwrap();
+    assert_eq!(small.count_crtcs, 1);
+    assert_eq!(get(0x4300, 8), [0xee; 8]);
+    c.unregister(&s());
+}
+
+#[test]
+fn the_connector_reports_its_mode() {
+    let c = card(true, true);
+    let f = open(&c);
+    put(0x5000, &[0; 8]);
+    let res = ctl(
+        &f,
+        DRM_IOCTL_MODE_GETRESOURCES,
+        &DrmModeCardRes {
+            connector_id_ptr: BASE + 0x5000,
+            count_connectors: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(res.count_connectors, 1);
+    let conn = ids_at(0x5000, 1)[0];
+
+    let ask = |connector_id, modes_ptr, count_modes| DrmModeGetConnector {
+        connector_id,
+        modes_ptr,
+        count_modes,
+        ..Default::default()
+    };
+    let probe = ctl(&f, DRM_IOCTL_MODE_GETCONNECTOR, &ask(conn, 0, 0)).unwrap();
+    assert_eq!(probe.count_modes, 1);
+    assert_eq!(probe.count_encoders, 1);
+    assert_eq!(probe.connection, DRM_MODE_CONNECTED);
+    assert_eq!(probe.connector_type, DRM_MODE_CONNECTOR_EDP);
+    assert_eq!(probe.connector_type_id, 1);
+    assert_eq!((probe.mm_width, probe.mm_height), (344, 194));
+    // Standard properties: DPMS, EDID, CRTC_ID.
+    assert_eq!(probe.count_props, 3);
+
+    let full = ctl(
+        &f,
+        DRM_IOCTL_MODE_GETCONNECTOR,
+        &ask(conn, BASE + 0x6000, 1),
+    )
+    .unwrap();
+    assert_eq!(full.count_modes, 1);
+    let m = DrmModeModeinfo::decode(&get(0x6000, 68));
+    assert_eq!((m.hdisplay, m.vdisplay, m.vrefresh), (1920, 1080, 60));
+    assert_eq!(&m.name[..9], b"1920x1080");
+    assert_eq!(m.kind & DRM_MODE_TYPE_PREFERRED, DRM_MODE_TYPE_PREFERRED);
+
+    assert_eq!(
+        ctl(&f, DRM_IOCTL_MODE_GETCONNECTOR, &ask(9999, 0, 0)).err(),
+        Some(Errno::ENOENT)
+    );
+    c.unregister(&s());
+}
+
+#[test]
+fn planes_are_hidden_until_universal_planes_is_asked_for() {
+    let c = card(true, true);
+    let f = open(&c);
+    let n = ctl(
+        &f,
+        DRM_IOCTL_MODE_GETPLANERESOURCES,
+        &DrmModeGetPlaneRes::default(),
+    )
+    .unwrap();
+    // Only the overlay.
+    assert_eq!(n.count_planes, 1);
+    let set = DrmSetClientCap {
+        capability: DRM_CLIENT_CAP_UNIVERSAL_PLANES,
+        value: 1,
+    };
+    ctl(&f, DRM_IOCTL_SET_CLIENT_CAP, &set).unwrap();
+    let n = ctl(
+        &f,
+        DRM_IOCTL_MODE_GETPLANERESOURCES,
+        &DrmModeGetPlaneRes::default(),
+    )
+    .unwrap();
+    assert_eq!(n.count_planes, 2);
+    ctl(
+        &f,
+        DRM_IOCTL_MODE_GETPLANERESOURCES,
+        &DrmModeGetPlaneRes {
+            plane_id_ptr: BASE + 0x7000,
+            count_planes: 2,
+        },
+    )
+    .unwrap();
+    let planes = ids_at(0x7000, 2);
+
+    let q = |plane_id, ptr, count| DrmModeGetPlane {
+        plane_id,
+        format_type_ptr: ptr,
+        count_format_types: count,
+        ..Default::default()
+    };
+    let p = ctl(&f, DRM_IOCTL_MODE_GETPLANE, &q(planes[0], 0, 0)).unwrap();
+    assert_eq!(p.possible_crtcs, 1);
+    assert_eq!(p.count_format_types, 2);
+    assert_eq!((p.crtc_id, p.fb_id), (0, 0));
+    ctl(&f, DRM_IOCTL_MODE_GETPLANE, &q(planes[0], BASE + 0x7100, 2)).unwrap();
+    assert_eq!(ids_at(0x7100, 2), [format::XRGB8888.0, format::ARGB8888.0]);
+    c.unregister(&s());
+}
+
+/// The (id, value, name) of each of an object's properties.
+fn props_of(f: &Arc<crate::Open>, obj: u32, kind: u32) -> Vec<(u32, u64, String)> {
+    let n = ctl(
+        f,
+        DRM_IOCTL_MODE_OBJ_GETPROPERTIES,
+        &DrmModeObjGetProperties {
+            obj_id: obj,
+            obj_type: kind,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .count_props as usize;
+    ctl(
+        f,
+        DRM_IOCTL_MODE_OBJ_GETPROPERTIES,
+        &DrmModeObjGetProperties {
+            obj_id: obj,
+            obj_type: kind,
+            props_ptr: BASE + 0x8000,
+            prop_values_ptr: BASE + 0x8400,
+            count_props: u32::try_from(n).unwrap(),
+        },
+    )
+    .unwrap();
+    let ids = ids_at(0x8000, n);
+    let vals: Vec<u64> = get(0x8400, n * 8)
+        .chunks(8)
+        .map(|c| u64::from_ne_bytes(c.try_into().unwrap()))
+        .collect();
+    ids.iter()
+        .zip(vals)
+        .map(|(id, v)| {
+            let p = ctl(
+                f,
+                DRM_IOCTL_MODE_GETPROPERTY,
+                &DrmModeGetProperty {
+                    prop_id: *id,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let name = p.name.iter().take_while(|b| **b != 0).copied().collect();
+            (*id, v, String::from_utf8(name).unwrap())
+        })
+        .collect()
+}
+
+#[test]
+fn plane_properties_and_in_formats() {
+    let c = card(true, true);
+    let f = open(&c);
+    let set = DrmSetClientCap {
+        capability: DRM_CLIENT_CAP_UNIVERSAL_PLANES,
+        value: 1,
+    };
+    ctl(&f, DRM_IOCTL_SET_CLIENT_CAP, &set).unwrap();
+    let list = DrmModeGetPlaneRes {
+        plane_id_ptr: BASE + 0x7000,
+        count_planes: 2,
+    };
+    ctl(&f, DRM_IOCTL_MODE_GETPLANERESOURCES, &list).unwrap();
+    let planes = ids_at(0x7000, 2);
+    // Planes are listed primary first, as built.
+    let props = props_of(&f, planes[0], DRM_MODE_OBJECT_PLANE);
+    let names: Vec<&str> = props.iter().map(|(_, _, n)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "type",
+            "FB_ID",
+            "CRTC_ID",
+            "SRC_X",
+            "SRC_Y",
+            "SRC_W",
+            "SRC_H",
+            "CRTC_X",
+            "CRTC_Y",
+            "CRTC_W",
+            "CRTC_H",
+            "IN_FORMATS",
+            "zpos"
+        ]
+    );
+    let value = |n: &str| props.iter().find(|(_, _, x)| x == n).unwrap().1;
+    assert_eq!(value("type"), 1, "the first plane is primary");
+    assert_eq!(value("zpos"), 1, "a driver property starts at its default");
+    let overlay = props_of(&f, planes[1], DRM_MODE_OBJECT_PLANE);
+    assert_eq!(overlay.iter().find(|(_, _, n)| n == "type").unwrap().1, 0);
+
+    // `type` is an immutable enum with the three names.
+    let prop = |prop_id| {
+        let q = DrmModeGetProperty {
+            prop_id,
+            ..Default::default()
+        };
+        ctl(&f, DRM_IOCTL_MODE_GETPROPERTY, &q).unwrap()
+    };
+    let enums = prop(props[0].0);
+    assert_eq!(enums.count_enum_blobs, 3);
+    assert_eq!(enums.flags & DRM_MODE_PROP_ENUM, DRM_MODE_PROP_ENUM);
+    assert_eq!(
+        enums.flags & DRM_MODE_PROP_IMMUTABLE,
+        DRM_MODE_PROP_IMMUTABLE
+    );
+    // Atomic-only properties say so.
+    let fbp = prop(props[1].0);
+    assert_eq!(fbp.flags & DRM_MODE_PROP_ATOMIC, DRM_MODE_PROP_ATOMIC);
+    assert_eq!(fbp.flags & DRM_MODE_PROP_OBJECT, DRM_MODE_PROP_OBJECT);
+
+    // IN_FORMATS is a blob holding the formats and a linear modifier.
+    let blob_id = u32::try_from(value("IN_FORMATS")).unwrap();
+    let size = ctl(
+        &f,
+        DRM_IOCTL_MODE_GETPROPBLOB,
+        &DrmModeGetBlob {
+            blob_id,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let blob = ctl(
+        &f,
+        DRM_IOCTL_MODE_GETPROPBLOB,
+        &DrmModeGetBlob {
+            blob_id,
+            length: size.length,
+            data: BASE + 0x9000,
+        },
+    )
+    .unwrap();
+    let raw = get(0x9000, blob.length as usize);
+    let h = DrmFormatModifierBlob::decode(&raw);
+    assert_eq!((h.version, h.count_formats, h.count_modifiers), (1, 2, 1));
+    let m = DrmFormatModifier::decode(&raw[h.modifiers_offset as usize..]);
+    assert_eq!((m.formats, m.modifier), (0b11, 0));
+    c.unregister(&s());
+}
+
+#[test]
+fn framebuffers() {
+    let c = card(true, true);
+    let f = open(&c);
+    let mut d = create_dumb_arg(64, 128, 32);
+    call(&f, DRM_IOCTL_MODE_CREATE_DUMB, &mut d).unwrap();
+    let handle = u32_of(&d, 16);
+    let pitch = u32_of(&d, 20);
+    assert_eq!(pitch, 512);
+
+    let fb = |w: u32, h: u32, pitch: u32, handle: u32, fmt: Fourcc| {
+        let mut a = DrmModeFbCmd2 {
+            width: w,
+            height: h,
+            pixel_format: fmt.0,
+            ..Default::default()
+        };
+        a.handles[0] = handle;
+        a.pitches[0] = pitch;
+        ctl(&f, DRM_IOCTL_MODE_ADDFB2, &a)
+    };
+    let x = format::XRGB8888;
+    let good = fb(128, 64, 512, handle, x).unwrap();
+    assert_ne!(good.fb_id, 0);
+    assert_eq!(
+        fb(128, 64, 400, handle, x).err(),
+        Some(Errno::EINVAL),
+        "pitch too small"
+    );
+    assert_eq!(
+        fb(128, 64, 512, handle, Fourcc(0x1111_1111)).err(),
+        Some(Errno::EINVAL),
+        "unknown format"
+    );
+    assert_eq!(
+        fb(128, 64, 512, 77, x).err(),
+        Some(Errno::ENOENT),
+        "no such buffer"
+    );
+    assert_eq!(
+        fb(128, 200, 512, handle, x).err(),
+        Some(Errno::EINVAL),
+        "taller than the buffer"
+    );
+    assert_eq!(
+        fb(8, 8, 512, handle, x).err(),
+        Some(Errno::EINVAL),
+        "below the device minimum"
+    );
+
+    // The file lists its framebuffers.
+    let r = ctl(&f, DRM_IOCTL_MODE_GETRESOURCES, &DrmModeCardRes::default()).unwrap();
+    assert_eq!(r.count_fbs, 1);
+    // Another file cannot remove it; its owner can.
+    let other = open(&c);
+    let mut id = good.fb_id.to_ne_bytes().to_vec();
+    assert_eq!(
+        call(&other, DRM_IOCTL_MODE_RMFB, &mut id),
+        Err(Errno::EINVAL)
+    );
+    assert_eq!(call(&f, DRM_IOCTL_MODE_RMFB, &mut id), Ok(0));
+    assert_eq!(call(&f, DRM_IOCTL_MODE_RMFB, &mut id), Err(Errno::ENOENT));
+
+    // Closing the file takes its framebuffers along.
+    let g = fb(128, 64, 512, handle, x).unwrap();
+    let k = c.driver().kms().unwrap();
+    assert!(k.fb(kms_check::ObjId(g.fb_id)).is_some());
+    drop(f);
+    assert!(k.fb(kms_check::ObjId(g.fb_id)).is_none());
+    c.unregister(&s());
+}
+
+#[test]
+fn blobs_belong_to_their_file() {
+    let c = card(false, true);
+    let f = open(&c);
+    put(0xa000, b"hello");
+    let make = DrmModeCreateBlob {
+        data: BASE + 0xa000,
+        length: 5,
+        blob_id: 0,
+    };
+    let b = ctl(&f, DRM_IOCTL_MODE_CREATEPROPBLOB, &make).unwrap();
+    assert_ne!(b.blob_id, 0);
+    let read = DrmModeGetBlob {
+        blob_id: b.blob_id,
+        length: 5,
+        data: BASE + 0xa100,
+    };
+    let got = ctl(&f, DRM_IOCTL_MODE_GETPROPBLOB, &read).unwrap();
+    assert_eq!(got.length, 5);
+    assert_eq!(get(0xa100, 5), b"hello");
+    let other = open(&c);
+    let kill = DrmModeDestroyBlob { blob_id: b.blob_id };
+    assert_eq!(
+        ctl(&other, DRM_IOCTL_MODE_DESTROYPROPBLOB, &kill).err(),
+        Some(Errno::EINVAL)
+    );
+    ctl(&f, DRM_IOCTL_MODE_DESTROYPROPBLOB, &kill).unwrap();
+    assert_eq!(
+        ctl(&f, DRM_IOCTL_MODE_GETPROPBLOB, &read).err(),
+        Some(Errno::ENOENT)
+    );
+    let empty = DrmModeCreateBlob {
+        data: BASE,
+        length: 0,
+        blob_id: 0,
+    };
+    assert_eq!(
+        ctl(&f, DRM_IOCTL_MODE_CREATEPROPBLOB, &empty).err(),
+        Some(Errno::EINVAL)
+    );
+    c.unregister(&s());
+}
+
+#[test]
+fn a_card_without_a_display_refuses_display_requests() {
+    let c = card(true, false);
+    let f = open(&c);
+    assert_eq!(
+        ctl(&f, DRM_IOCTL_MODE_GETRESOURCES, &DrmModeCardRes::default()).err(),
+        Some(Errno::ENOTTY)
+    );
+    c.unregister(&s());
 }

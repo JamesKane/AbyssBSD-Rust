@@ -3,7 +3,7 @@
 //! modes, plane geometry and clipping, plane and connector routing. A
 //! driver's own `check` adds its hardware limits on top.
 //!
-//! Behavior reference: the atomic KMS model of `docs/GRAPHICS.md` §7.3;
+//! Behavior reference: the atomic kernel mode setting model of `docs/GRAPHICS.md` §7.3;
 //! the rules are those every compositor already meets (a plane's source
 //! lies inside its framebuffer, an active CRTC has a mode, a connector
 //! reaches only a CRTC its encoder can).
@@ -14,8 +14,8 @@
 use abi::drm::{DRM_MODE_FLAG_DBLSCAN, DRM_MODE_FLAG_INTERLACE, DrmModeModeinfo};
 use drm_fourcc::{Fourcc, Modifier};
 
-/// A KMS object's number in a device (a CRTC, plane, connector, or
-/// framebuffer): 1 or more, 0 is "none".
+/// A display object's number in a device (a display controller, plane,
+/// connector, or framebuffer): 1 or more, 0 is "none".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObjId(pub u32);
 

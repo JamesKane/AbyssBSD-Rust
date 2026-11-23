@@ -242,6 +242,9 @@ impl core::fmt::Debug for Open {
 impl Drop for Open {
     fn drop(&mut self) {
         let _ = self.card.drop_master(self.id);
+        if let Some(k) = self.card.driver().kms() {
+            k.release_file(self.id);
+        }
     }
 }
 

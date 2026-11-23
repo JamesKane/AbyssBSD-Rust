@@ -48,9 +48,14 @@ pub trait DrmDriver: Send + Sync {
     /// Its identity.
     fn info(&self) -> DriverInfo;
 
-    /// Whether it publishes a display (modesetting, the KMS ioctls).
+    /// Its display (kernel mode setting: the ioctls that set display modes), if it has one.
+    fn kms(&self) -> Option<&crate::kms::Kms> {
+        None
+    }
+
+    /// Whether it publishes a display.
     fn has_kms(&self) -> bool {
-        false
+        self.kms().is_some()
     }
 
     /// Its dumb-buffer limits, or `None` if it has no dumb buffers.

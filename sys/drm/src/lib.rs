@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! The DRM core: `/dev/dri/card<N>`, its files, GEM handles, dumb
-//! buffers, events, and the ioctl dispatcher.
+//! The core of the Direct Rendering Manager (DRM): `/dev/dri/card<N>`,
+//! its open files, handles to graphics execution manager (GEM) buffers,
+//! dumb buffers, events, and the ioctl dispatcher.
 //!
 //! The user interface is DRM's as FreeBSD's ports see it
 //! (`docs/GRAPHICS.md` §2): FreeBSD's request encoding, DRM's structure
 //! rules, Linux driver names. A driver implements [`DrmDriver`] and calls
-//! [`register`]; the core does the rest. Modesetting objects arrive with
-//! the KMS core; fences, syncobj and dma-buf with M-G.2.
+//! [`register`]; the core does the rest. Display objects (the kernel
+//! mode setting core) arrive in `kms`; fences, syncobj and dma-buf with M-G.2.
 //!
 //! Behavior reference: `sys/dev/drm2` and `drm-kmod`'s device interface,
 //! as userland (libdrm) uses them; the MIT DRM uapi headers.
@@ -18,13 +19,17 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+mod build;
 pub mod card;
 pub mod driver;
 pub mod gem;
 mod ioctl;
+pub mod kms;
+mod kms_ioctl;
 #[cfg(test)]
 mod tests;
 
+pub use build::{KmsBuilder, in_formats_blob};
 pub use card::{Card, Open, register};
 pub use driver::{DriverInfo, DrmDriver, DumbLimits};
 

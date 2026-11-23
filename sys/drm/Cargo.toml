@@ -9,6 +9,7 @@ publish.workspace = true
 abi = { path = "../../lib/abi" }
 addr = { path = "../../lib/addr" }
 drm-fourcc = { path = "../../lib/drm-fourcc" }
+kms-check = { path = "../../lib/kms-check" }
 sched = { path = "../sched" }
 sync = { path = "../sync" }
 vfs = { path = "../vfs" }
