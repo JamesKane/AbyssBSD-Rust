@@ -29,6 +29,9 @@ unmodified as FreeBSD userland ([ADR-0018](docs/adr/0018-desktop-architecture.md
 | [docs/USB.md](docs/USB.md) | xHCI, USB bus and hubs, HID and input (`kbd`, `evdev`), `vt` terminals, and `umass` |
 | [docs/MULTIUSER.md](docs/MULTIUSER.md) | Phase 6 design: dynamic linking, threads, umtx, kqueue, sockets, ptys, security, and `init` |
 | [docs/NETWORKING.md](docs/NETWORKING.md) | Phase 7 design: mbufs, interfaces, IPv4/IPv6, TCP, UDP, netlink, kernel TLS, and virtio-net |
+| [docs/IOMMU.md](docs/IOMMU.md) | The IOMMU framework and the SMMUv3 driver |
+| [docs/GRAPHICS.md](docs/GRAPHICS.md) | Graphics design (DRM interface, `gop-kms`, Sky1 display stack) and board findings |
+| [docs/MODULES.md](docs/MODULES.md) | Driver selection and modules |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | The 2% performance parity gate, methodology, fairness rules, and benchmark suites |
 | [docs/ENGINEERING.md](docs/ENGINEERING.md) | Rust conventions: algebraic types, `unsafe` policy, errors, style |
 | [docs/BUILD-AND-TEST.md](docs/BUILD-AND-TEST.md) | Toolchain, `xtask`, QEMU/bhyve, the build server, the test pyramid |
@@ -38,10 +41,10 @@ unmodified as FreeBSD userland ([ADR-0018](docs/adr/0018-desktop-architecture.md
 
 ## Status
 
-Phases 0 through 7 and the QEMU exit of the USB and input track (U.0–U.6) are complete:
-unmodified FreeBSD 15.1 boots multi-user and networked on both architectures in QEMU and bhyve.
-Phase 8 (bring-up on the physical reference machines) is under way, with both machines' ACPI
-tables and FreeBSD and Linux ground truth captured (P8.0). See
+Phases 0 through 8 and the QEMU exit of the USB and input track (U.0–U.6) are complete:
+unmodified FreeBSD 15.1 boots multi-user and networked on both architectures in QEMU and bhyve,
+and on the Orange Pi 6 Plus (CIX Sky1, ARM64) from its own NVMe. Phase 9 (Sky1 hardening) is under
+way, and the Ryzen 9 7900X / X870E (AMD64) has had its first AbyssBSD boots (Phase 10). See
 [docs/ROADMAP.md](docs/ROADMAP.md) for the detail.
 
 - **Boot (Phase 1):** our UEFI loader boots our kernel on x86_64 and aarch64, in QEMU and bhyve.
@@ -93,9 +96,33 @@ tables and FreeBSD and Linux ground truth captured (P8.0). See
   suite (TCP and UDP throughput, latency, connection rate, `sendfile`, CPU per gigabit) takes
   0.935 of FreeBSD 15.1's time.
 
-Next, Phase 8: board bring-up on the two physical reference machines, the Ryzen 9 7900X / X870E
-(AMD64) and the Orange Pi 6 Plus (ARM64, CIX Sky1), starting with `ssh`, `scp`, and `pkg` on
-both.
+- **Orange Pi 6 Plus (Phase 8, done 2026-11-10):** multi-user and networked from its own Samsung
+  990 PRO NVMe, root over `ssh`, kernel updated in place, with CPU frequency (`acpi_cppc`) and
+  thermal zones as under FreeBSD. AbyssBSD's own drivers cover its firmware-described clocks,
+  resets, and power domains, GPIO and I2C, the RX8900 RTC, the PD controllers, and the Realtek NIC.
+- **Sky1 hardening (Phase 9, in progress):**
+  - An SMMUv3 ended the silent hangs, which were untranslated PCIe DMA: the board uses all its
+    RAM, and fsx with `fsck_ffs` passes on its NVMe and a USB disk.
+  - The device interfaces and system calls that desktop and development software need run
+    FreeBSD's own tools unmodified: `/dev/pci`, `ugen`, `hidraw`, CAM's `pass`, `geom.ctl`,
+    and the gaps in the system call table.
+  - Display: the Sky1's own stack (the `linlondp` display processor, the DisplayPort transmitter
+    and its USB-C PHY, EDID with CTA blocks) drives real monitors, and stock Sway runs on it.
+  - Performance is measured on the board per core class beside bhyve. Every component of `p4`,
+    `p5`, and `p6` passes on every class (overall about 0.56 to 0.62 of FreeBSD's time), and
+    the bhyve ten-run gate passes `p4` (0.657) and `p6` (0.508). Still open: `p2`, `p3`, `p5`,
+    and `p7` again, `p7` over the physical NIC, and the little cores' code-layout sensitivity.
+  - Also open: the board occasionally does not return from a reset (suspected firmware), and a few
+    hangs seen once.
+- **X870E (Phase 10, begun 2026-11-23):** the first boots on the AMD64 reference machine. The
+  loader now allocates only `EfiLoaderData`, because its AMI firmware never returns from
+  `ExitBootServices` otherwise. The `rge` driver programs the RTL8125D (the board's NIC), and
+  the console no longer assumes a COM1 the machine lacks. It boots unattended from its media NVMe
+  by `BootNext`; the rest of Phase 10 (the framebuffer and USB keyboard `multiuser` scenario,
+  fsx, the `devinfo` comparison, and the performance gate) is ahead.
+
+Next: finish Phase 9's open items and Phase 10, then self-hosting and hardening (Phase 11, v1.0),
+then RV64, the Rust userland, and the desktop.
 
 ## License
 
