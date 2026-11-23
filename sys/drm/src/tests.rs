@@ -134,6 +134,16 @@ fn setup() {
             log: |a| LOG.lock().unwrap().push(std::format!("{a}")),
             now_ns: || 5_000_000_000,
             ticker: || Box::new(TestTicker(Mutex::new(None))),
+            export_dmabuf: |_, buf, cloexec, rdwr| {
+                let mut t = DESCRIPTORS.lock().unwrap();
+                t.push((buf, cloexec, rdwr));
+                Ok(100 + i32::try_from(t.len()).unwrap())
+            },
+            import_dmabuf: |_, fd| {
+                let t = DESCRIPTORS.lock().unwrap();
+                let i = usize::try_from(fd - 101).map_err(|_| Errno::EBADF)?;
+                t.get(i).map(|(b, ..)| b.clone()).ok_or(Errno::EBADF)
+            },
         });
         vfs::devices::set_registry(Box::leak(Box::new(TestDevfs)));
         USER.set(arena).ok();
@@ -141,6 +151,9 @@ fn setup() {
 }
 
 static USER: std::sync::OnceLock<&'static Arena> = std::sync::OnceLock::new();
+
+/// The descriptors the mock kernel has handed out for dma-bufs, from 101.
+static DESCRIPTORS: Mutex<Vec<(Arc<crate::DmaBuf>, bool, bool)>> = Mutex::new(Vec::new());
 
 type Timer = (usize, fn(&Sleepable, usize));
 static TIMERS: Mutex<Vec<Timer>> = Mutex::new(Vec::new());
@@ -1746,5 +1759,130 @@ fn immutable_and_unknown_properties_are_refused() {
             .1,
         2
     );
+    c.unregister(&s());
+}
+
+// ---- sharing buffers ----
+
+fn prime(
+    f: &Arc<crate::Open>,
+    req: u32,
+    handle: u32,
+    flags: u32,
+    fd: i32,
+) -> Result<DrmPrimeHandle, Errno> {
+    ctl(f, req, &DrmPrimeHandle { handle, flags, fd })
+}
+
+/// A dumb buffer of `w` by `h` in `f`: its handle.
+fn dumb(f: &Arc<crate::Open>, w: u32, h: u32) -> u32 {
+    let mut d = create_dumb_arg(h, w, 32);
+    call(f, DRM_IOCTL_MODE_CREATE_DUMB, &mut d).unwrap();
+    u32_of(&d, 16)
+}
+
+#[test]
+fn a_buffer_crosses_to_another_file_through_a_descriptor() {
+    let c = card(true, true);
+    let a = open(&c);
+    let b = open(&c);
+    let handle = dumb(&a, 64, 64);
+    a.gem(handle)
+        .unwrap()
+        .with_page(0, &mut |p| p[..4].copy_from_slice(b"abcd"))
+        .unwrap();
+
+    let got = prime(
+        &a,
+        DRM_IOCTL_PRIME_HANDLE_TO_FD,
+        handle,
+        DRM_CLOEXEC | DRM_RDWR,
+        -1,
+    )
+    .unwrap();
+    assert!(got.fd > 100);
+    {
+        let t = DESCRIPTORS.lock().unwrap();
+        let (_, cloexec, rdwr) = &t[usize::try_from(got.fd - 101).unwrap()];
+        assert!(*cloexec && *rdwr);
+    }
+    // Importing it where it came from gives the handle it already has.
+    let back = prime(&a, DRM_IOCTL_PRIME_FD_TO_HANDLE, 0, 0, got.fd).unwrap();
+    assert_eq!(back.handle, handle);
+    // Another file gets a handle of its own for the same memory.
+    let there = prime(&b, DRM_IOCTL_PRIME_FD_TO_HANDLE, 0, 0, got.fd).unwrap();
+    assert_ne!(there.handle, 0);
+    let g = b.gem(there.handle).unwrap();
+    assert!(Arc::ptr_eq(&g, &a.gem(handle).unwrap()));
+    g.with_page(0, &mut |p| assert_eq!(&p[..4], b"abcd"))
+        .unwrap();
+    // Importing twice does not make a second handle.
+    assert_eq!(
+        prime(&b, DRM_IOCTL_PRIME_FD_TO_HANDLE, 0, 0, got.fd)
+            .unwrap()
+            .handle,
+        there.handle
+    );
+
+    // The buffer outlives the handle that made it.
+    let mut close = handle.to_ne_bytes().to_vec();
+    close.resize(8, 0);
+    call(&a, DRM_IOCTL_GEM_CLOSE, &mut close).unwrap();
+    g.with_page(0, &mut |p| assert_eq!(&p[..4], b"abcd"))
+        .unwrap();
+    c.unregister(&s());
+}
+
+#[test]
+fn prime_refuses_what_it_cannot_do() {
+    let c = card(true, true);
+    let f = open(&c);
+    let handle = dumb(&f, 16, 16);
+    assert_eq!(
+        prime(&f, DRM_IOCTL_PRIME_HANDLE_TO_FD, handle, 0x4000, -1).err(),
+        Some(Errno::EINVAL)
+    );
+    assert_eq!(
+        prime(&f, DRM_IOCTL_PRIME_HANDLE_TO_FD, 99, 0, -1).err(),
+        Some(Errno::ENOENT)
+    );
+    assert_eq!(
+        prime(&f, DRM_IOCTL_PRIME_FD_TO_HANDLE, 0, 1, 101).err(),
+        Some(Errno::EINVAL)
+    );
+    assert_eq!(
+        prime(&f, DRM_IOCTL_PRIME_FD_TO_HANDLE, 0, 0, 9999).err(),
+        Some(Errno::EBADF)
+    );
+    // The capability says both directions work.
+    let cap = ctl(
+        &f,
+        DRM_IOCTL_GET_CAP,
+        &DrmGetCap {
+            capability: DRM_CAP_PRIME,
+            value: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(cap.value, DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT);
+    c.unregister(&s());
+}
+
+#[test]
+fn a_descriptor_maps_from_its_own_first_page() {
+    let c = card(true, true);
+    let f = open(&c);
+    let handle = dumb(&f, 64, 128);
+    let buf = crate::DmaBuf::new(f.gem(handle).unwrap());
+    assert_eq!(buf.size(), 64 * 4 * 128);
+    let pages = buf.size() / PAGE_SIZE;
+    // Page 0 of the descriptor is the buffer's first page, wherever the
+    // buffer sits in its card's file offsets.
+    let (_, first) = buf.mapping(0, pages).unwrap();
+    assert_eq!(first, f.gem(handle).unwrap().mmap_offset() / PAGE_SIZE);
+    let (_, second) = buf.mapping(1, 1).unwrap();
+    assert_eq!(second, first + 1);
+    assert_eq!(buf.mapping(0, pages + 1).err(), Some(Errno::EINVAL));
+    assert_eq!(buf.mapping(pages, 1).err(), Some(Errno::EINVAL));
     c.unregister(&s());
 }

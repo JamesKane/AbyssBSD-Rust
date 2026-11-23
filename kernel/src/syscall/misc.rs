@@ -1056,6 +1056,7 @@ fn kcmp_object(f: &Arc<crate::fs::file::File>) -> (u8, usize) {
         K::Socket(_) | K::Inet(_) | K::Netlink(_) => (9, file),
         K::Kqueue(_) => (10, file),
         K::Inotify(_) => (11, file),
+        K::DmaBuf(d) => (12, Arc::as_ptr(d).addr()),
     }
 }
 

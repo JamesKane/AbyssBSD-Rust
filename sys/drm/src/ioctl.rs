@@ -199,6 +199,18 @@ const TABLE: &[Def] = &[
         k::close_fb
     ),
     defs!(
+        DRM_IOCTL_PRIME_HANDLE_TO_FD,
+        "PRIME_HANDLE_TO_FD",
+        DrmPrimeHandle,
+        prime_handle_to_fd
+    ),
+    defs!(
+        DRM_IOCTL_PRIME_FD_TO_HANDLE,
+        "PRIME_FD_TO_HANDLE",
+        DrmPrimeHandle,
+        prime_fd_to_handle
+    ),
+    defs!(
         DRM_IOCTL_MODE_ATOMIC,
         "MODE_ATOMIC",
         DrmModeAtomic,
@@ -299,6 +311,34 @@ fn version(f: &Open, a: &mut DrmVersion) -> Result<usize, Errno> {
     Ok(0)
 }
 
+/// `PRIME_HANDLE_TO_FD`: a descriptor for the buffer a handle names.
+fn prime_handle_to_fd(f: &Open, s: &Sleepable, a: &mut DrmPrimeHandle) -> Result<usize, Errno> {
+    let env = crate::env().ok_or(Errno::ENXIO)?;
+    if a.flags & !(DRM_CLOEXEC | DRM_RDWR) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let gem = f.gem(a.handle).ok_or(Errno::ENOENT)?;
+    let buf = crate::DmaBuf::new(gem);
+    a.fd = (env.export_dmabuf)(s, buf, a.flags & DRM_CLOEXEC != 0, a.flags & DRM_RDWR != 0)?;
+    Ok(0)
+}
+
+/// `PRIME_FD_TO_HANDLE`: a handle for the buffer a descriptor names;
+/// a buffer the file already has keeps its handle.
+fn prime_fd_to_handle(f: &Open, s: &Sleepable, a: &mut DrmPrimeHandle) -> Result<usize, Errno> {
+    let env = crate::env().ok_or(Errno::ENXIO)?;
+    if a.flags != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let buf = (env.import_dmabuf)(s, a.fd)?;
+    let mut h = f.handles.lock();
+    a.handle = match h.find(buf.gem()) {
+        Some(existing) => existing,
+        None => h.insert(Arc::clone(buf.gem()))?,
+    };
+    Ok(0)
+}
+
 fn gem_close(f: &Open, a: &mut DrmGemClose) -> Result<usize, Errno> {
     // The buffer may be the last holder: free it outside the lock.
     let gone = f.handles.lock().remove(a.handle);
@@ -313,8 +353,7 @@ fn get_cap(f: &Open, a: &mut DrmGetCap) -> Result<usize, Errno> {
         DRM_CAP_VBLANK_HIGH_CRTC => 1,
         DRM_CAP_DUMB_PREFERRED_DEPTH => dumb.map_or(0, |l| u64::from(l.preferred_depth)),
         DRM_CAP_DUMB_PREFER_SHADOW => dumb.map_or(0, |l| u64::from(l.prefer_shadow)),
-        // No dma-buf until M-G.2.
-        DRM_CAP_PRIME => 0,
+        DRM_CAP_PRIME => DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT,
         DRM_CAP_TIMESTAMP_MONOTONIC => 1,
         DRM_CAP_ASYNC_PAGE_FLIP | DRM_CAP_PAGE_FLIP_TARGET => 0,
         DRM_CAP_CURSOR_WIDTH | DRM_CAP_CURSOR_HEIGHT => 64,

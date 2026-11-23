@@ -252,6 +252,10 @@ pub(crate) enum FileKind {
     Inotify(super::inotify::InotifyFile),
     /// A pseudo-terminal's master.
     Pts(Arc<crate::tty::pts::Master>),
+    /// A buffer shared between graphics devices and processes (an
+    /// AbyssBSD addition: FreeBSD's `drm-kmod` keeps these inside its
+    /// Linux compatibility layer).
+    DmaBuf(Arc<drm::DmaBuf>),
 }
 
 /// An open file.
@@ -355,6 +359,7 @@ impl File {
             | FileKind::Timerfd(_)
             | FileKind::Eventfd(_)
             | FileKind::Inotify(_)
+            | FileKind::DmaBuf(_)
             | FileKind::Pts(_) => None,
         }
     }
@@ -427,6 +432,8 @@ impl File {
             FileKind::Timerfd(t) => t.read(s, uio, self.nonblock()),
             FileKind::Eventfd(e) => e.read(s, uio, self.nonblock()),
             FileKind::Inotify(i) => i.read(s, uio, self.nonblock()),
+            // Memory is reached by mapping it.
+            FileKind::DmaBuf(_) => Err(Errno::EINVAL),
         }
     }
 
@@ -461,6 +468,7 @@ impl File {
             | FileKind::Timerfd(_)
             | FileKind::Eventfd(_)
             | FileKind::Inotify(_)
+            | FileKind::DmaBuf(_)
             | FileKind::Pts(_) => Err(Errno::ESPIPE),
         }
     }
@@ -508,6 +516,7 @@ impl File {
             FileKind::Eventfd(e) => e.write(s, uio, self.nonblock()),
             // `invfo_rdwr`.
             FileKind::Inotify(_) => Err(Errno::EOPNOTSUPP),
+            FileKind::DmaBuf(_) => Err(Errno::EINVAL),
         }
     }
 
@@ -533,6 +542,7 @@ impl File {
             | FileKind::Timerfd(_)
             | FileKind::Eventfd(_)
             | FileKind::Inotify(_)
+            | FileKind::DmaBuf(_)
             | FileKind::Pts(_) => Err(Errno::ESPIPE),
             FileKind::Shm(m) => {
                 let at = u64::try_from(offset).map_err(|_| Errno::EINVAL)?;
@@ -564,6 +574,15 @@ impl File {
             let new = m.seek(s, *off, offset, whence)?;
             *off = new;
             return i64::try_from(new).map_err(|_| Errno::EOVERFLOW);
+        }
+        // A dma-buf answers only where it starts and how big it is, which is
+        // how a process learns the size of one it was handed.
+        if let FileKind::DmaBuf(d) = &self.kind {
+            return match (whence, offset) {
+                (SEEK_SET, 0) => Ok(0),
+                (SEEK_END, 0) => i64::try_from(d.size()).map_err(|_| Errno::EOVERFLOW),
+                _ => Err(Errno::EINVAL),
+            };
         }
         let FileKind::Vnode(f) = &self.kind else {
             return Err(Errno::ESPIPE);
@@ -624,6 +643,12 @@ impl File {
             FileKind::Eventfd(_) => Ok(super::eventfd::Eventfd::stat()),
             FileKind::Inotify(i) => Ok(i.stat()),
             FileKind::Pts(m) => Ok(m.stat()),
+            FileKind::DmaBuf(d) => Ok(Stat {
+                st_mode: abi::stat::S_IFREG | 0o600,
+                st_size: i64::try_from(d.size()).map_err(|_| Errno::EOVERFLOW)?,
+                st_blksize: 4096,
+                ..Stat::default()
+            }),
         }
     }
 
@@ -675,6 +700,8 @@ impl File {
             FileKind::Timerfd(t) => t.poll(events, w),
             FileKind::Eventfd(e) => e.poll(events, w),
             FileKind::Inotify(i) => i.poll(events, w),
+            // Always ready: there are no fences to wait on yet.
+            FileKind::DmaBuf(_) => vfs::node::poll_no_poll(events),
             FileKind::Pts(m) => m.poll(events, w),
         }
     }
@@ -704,7 +731,9 @@ impl File {
             FileKind::Inet(so) => inet::filter(&so.so, kev),
             FileKind::Netlink(nl) => nl.kqfilter(kev),
             // No `EVFILT_JAILDESC` yet (docs/compat-deviations.md).
-            FileKind::Process(_) | FileKind::Jail(_) | FileKind::Shm(_) => Err(Errno::EINVAL),
+            FileKind::Process(_) | FileKind::Jail(_) | FileKind::Shm(_) | FileKind::DmaBuf(_) => {
+                Err(Errno::EINVAL)
+            }
             FileKind::Kqueue(k) if kev.filter == abi::event::EVFILT_READ => Ok(
                 alloc::boxed::Box::new(event::KqueueFilter(Arc::clone(&k.kq))),
             ),
@@ -825,6 +854,14 @@ impl File {
             // `fcntl(F_SETFL)` must work (`shm_ioctl`).
             FileKind::Shm(_) => match req {
                 FIONBIO | FIOASYNC => Ok(0),
+                _ => Err(Errno::ENOTTY),
+            },
+            // Non-blocking and asynchronous mean nothing to memory. The
+            // sync request brackets CPU access to a buffer a device uses;
+            // memory the CPU shares coherently needs no maintenance.
+            FileKind::DmaBuf(_) => match req {
+                FIONBIO | FIOASYNC => Ok(0),
+                abi::drm::DMA_BUF_IOCTL_SYNC => Ok(0),
                 _ => Err(Errno::ENOTTY),
             },
             FileKind::Fifo(f) => match req {

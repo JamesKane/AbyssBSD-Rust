@@ -24,6 +24,7 @@
 //! sys/arm64/arm64/trap.c.
 
 mod acl;
+pub(crate) mod dmabuf;
 mod event;
 mod extattr;
 mod fsops;

@@ -318,6 +318,18 @@ pub const DRM_CLIENT_CAP_ASPECT_RATIO: u64 = 4;
 pub const DRM_CLIENT_CAP_WRITEBACK_CONNECTORS: u64 = 5;
 pub const DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT: u64 = 6;
 
+/// `DMA_BUF_BASE`: the group letter of the dma-buf requests.
+pub const DMA_BUF_BASE: u8 = b'b';
+/// `struct dma_buf_sync`: bracket CPU access with start and end.
+pub const DMA_BUF_SYNC_READ: u64 = 1;
+pub const DMA_BUF_SYNC_WRITE: u64 = 2;
+pub const DMA_BUF_SYNC_RW: u64 = DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE;
+pub const DMA_BUF_SYNC_START: u64 = 0;
+pub const DMA_BUF_SYNC_END: u64 = 1 << 2;
+/// `DMA_BUF_IOCTL_SYNC`: `_IOW('b', 0, struct dma_buf_sync)`, one
+/// 64-bit flags word.
+pub const DMA_BUF_IOCTL_SYNC: u32 = ioc_of(IOC_IN, DMA_BUF_BASE, 0, 8);
+
 pub const DRM_IOCTL_VERSION: u32 = iowr(0x00, size_of::<DrmVersion>());
 pub const DRM_IOCTL_GET_UNIQUE: u32 = iowr(0x01, size_of::<DrmUnique>());
 pub const DRM_IOCTL_GET_MAGIC: u32 = ior(0x02, size_of::<DrmAuth>());

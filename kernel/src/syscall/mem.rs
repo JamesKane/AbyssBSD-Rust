@@ -128,6 +128,26 @@ fn file_object(
             max,
         ));
     }
+    // A dma-buf maps as memory the buffer's pages, from its first page on;
+    // like a device it is shared, never private.
+    if let FileKind::DmaBuf(d) = f.kind() {
+        let mut max = Prot::EXEC;
+        if f.flags() & FREAD != 0 {
+            max = max.union(Prot::READ);
+        } else if prot.contains(Prot::READ) {
+            return Err(Errno::EACCES);
+        }
+        if f.flags() & FWRITE != 0 {
+            max = max.union(Prot::WRITE);
+        } else if prot.contains(Prot::WRITE) {
+            return Err(Errno::EACCES);
+        }
+        if flags & abi::mman::MAP_PRIVATE != 0 {
+            return Err(Errno::EINVAL);
+        }
+        let (object, first) = d.mapping(pos / PAGE_SIZE, len.div_ceil(PAGE_SIZE))?;
+        return Ok((Backing::Object(object, first, false, None), max));
+    }
     let FileKind::Vnode(vf) = f.kind() else {
         return Err(Errno::ENODEV);
     };

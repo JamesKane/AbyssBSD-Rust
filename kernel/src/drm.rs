@@ -40,5 +40,7 @@ pub(crate) fn init() {
         log: |args| kprintln!("{args}"),
         now_ns: crate::time::now_ns,
         ticker: || alloc::boxed::Box::new(FrameTimer(crate::softclock::Callout::new())),
+        export_dmabuf: crate::syscall::dmabuf::export,
+        import_dmabuf: crate::syscall::dmabuf::import,
     });
 }

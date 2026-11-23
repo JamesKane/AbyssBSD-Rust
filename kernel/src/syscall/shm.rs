@@ -222,6 +222,7 @@ pub(super) fn fspacectl(
         | FileKind::Timerfd(_)
         | FileKind::Eventfd(_)
         | FileKind::Inotify(_)
+        | FileKind::DmaBuf(_)
         | FileKind::Pts(_) => return Err(Errno::ESPIPE),
         FileKind::Vnode(_) => return Err(Errno::ENODEV),
     };

@@ -911,6 +911,9 @@ pub const KF_TYPE_EVENTFD: i32 = 13;
 pub const KF_TYPE_TIMERFD: i32 = 14;
 pub const KF_TYPE_INOTIFY: i32 = 15;
 pub const KF_TYPE_JAILDESC: i32 = 16;
+/// A dma-buf (`DTYPE_DMABUF`, 17): an AbyssBSD addition, so not in
+/// FreeBSD's `sys/user.h` and not checked against it.
+pub const KF_TYPE_DMABUF: i32 = 17;
 pub const KF_TYPE_UNKNOWN: i32 = 255;
 
 /// `kf_file_type` / `kf_vnode_type` (`KF_VTYPE_*`).

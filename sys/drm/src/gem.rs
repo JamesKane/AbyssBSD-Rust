@@ -50,8 +50,11 @@ impl Gem {
         let size = size
             .checked_next_multiple_of(PAGE_SIZE)
             .ok_or(Errno::EINVAL)?;
+        let object = Object::anonymous(pages);
+        // Several processes will map it, and none of them privately.
+        object.set_shared();
         Ok(Arc::new(Self {
-            object: Object::anonymous(pages),
+            object,
             size,
             offset,
         }))
@@ -87,6 +90,21 @@ impl Gem {
             return Err(Errno::EINVAL);
         }
         Ok(Arc::clone(&self.object))
+    }
+
+    /// Its memory for a mapping of `pages` pages from page `page` of
+    /// the buffer (page 0 is its first, as a dma-buf descriptor counts):
+    /// the object, and the object page the mapping starts at.
+    ///
+    /// # Errors
+    ///
+    /// `EINVAL` when the range leaves the buffer.
+    pub fn mapping(&self, page: u64, pages: u64) -> Result<(Arc<Object>, PageIndex), Errno> {
+        let end = page.checked_add(pages).ok_or(Errno::EINVAL)?;
+        if end > self.pages() {
+            return Err(Errno::EINVAL);
+        }
+        Ok((Arc::clone(&self.object), self.offset + page))
     }
 
     /// Calls `f` with page `index` (0 is the first) of the buffer,
@@ -158,6 +176,17 @@ impl HandleTable {
             self.slots.pop();
         }
         g
+    }
+
+    /// The handle that names `gem` in this file, if any: importing a
+    /// buffer the file already has gives back the same handle.
+    #[must_use]
+    pub fn find(&self, gem: &Arc<Gem>) -> Option<u32> {
+        let i = self
+            .slots
+            .iter()
+            .position(|s| s.as_ref().is_some_and(|g| Arc::ptr_eq(g, gem)))?;
+        u32::try_from(i + 1).ok()
     }
 
     /// The buffer whose fake offset range holds file page `page`.
