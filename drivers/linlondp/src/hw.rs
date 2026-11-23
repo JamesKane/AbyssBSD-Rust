@@ -252,6 +252,48 @@ impl Dpu {
         self.running.lock().on.get(p).copied().unwrap_or(false)
     }
 
+    /// Takes over a pipeline firmware left running (section 08 §8.5): its
+    /// timing generator is enabled, so it is marked running and nothing is
+    /// reset. The timing it runs is returned, in the registers' own
+    /// encoding. `None` if the pipeline is not running.
+    pub fn adopt(&self, p: usize) -> Option<timing::BsRegs> {
+        let pipe = self.layout.pipes.get(p)?;
+        let b = pipe.bs.offset;
+        let control = self.w.read(b + bs::CONTROL);
+        if control & bs::CTRL_EN == 0 {
+            return None;
+        }
+        self.running.lock().on[p] = true;
+        Some(timing::BsRegs {
+            active: self.w.read(b + bs::ACTIVESIZE),
+            hintervals: self.w.read(b + bs::HINTERVALS),
+            vintervals: self.w.read(b + bs::VINTERVALS),
+            sync: self.w.read(b + bs::SYNC),
+            prog_line: self.w.read(b + bs::PROG_LINE),
+            prefetch_line: self.w.read(b + bs::PREFETCH_LINE),
+            control,
+        })
+    }
+
+    /// Whether pipeline `p`'s timing generator runs exactly the timing
+    /// `mode` asks for, so a display already showing it can be kept (the
+    /// pixel clock is the caller's to compare).
+    #[must_use]
+    pub fn timing_matches(&self, p: usize, mode: &Mode) -> bool {
+        let Some(pipe) = self.layout.pipes.get(p) else {
+            return false;
+        };
+        let Ok(want) = timing::bs_regs(mode) else {
+            return false;
+        };
+        let b = pipe.bs.offset;
+        self.w.read(b + bs::CONTROL) & bs::CTRL_EN != 0
+            && self.w.read(b + bs::ACTIVESIZE) == want.active
+            && self.w.read(b + bs::HINTERVALS) == want.hintervals
+            && self.w.read(b + bs::VINTERVALS) == want.vintervals
+            && self.w.read(b + bs::SYNC) == want.sync
+    }
+
     /// Programs the timing, the compositor's size and the image processor
     /// of pipeline `p` for `mode`, with every compositor input off, and
     /// starts it (section 03 §3.8, from step 2; the clocks are the

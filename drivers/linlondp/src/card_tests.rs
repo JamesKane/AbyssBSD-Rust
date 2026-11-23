@@ -64,6 +64,9 @@ impl Drop for Token {
 
 struct TestPlatform {
     live_maps: Arc<AtomicU32>,
+    /// Buffers cannot be mapped (a display that sees only contiguous
+    /// memory, given scattered pages).
+    refuse: std::sync::atomic::AtomicBool,
     next_addr: AtomicU64,
     cleaned: AtomicU32,
     pixel: Mutex<Vec<(usize, Option<u32>)>>,
@@ -71,6 +74,9 @@ struct TestPlatform {
 
 impl Platform for TestPlatform {
     fn map(&self, _: &Arc<Gem>) -> Result<Mapped, Errno> {
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err(Errno::EINVAL);
+        }
         self.live_maps.fetch_add(1, Ordering::SeqCst);
         Ok(Mapped {
             addr: self.next_addr.fetch_add(0x100_0000, Ordering::SeqCst),
@@ -87,6 +93,9 @@ impl Platform for TestPlatform {
     }
     fn pixel_clock_off(&self, _: &Sleepable, p: usize) {
         self.pixel.lock().unwrap().push((p, None));
+    }
+    fn pixel_clock_adopt(&self, _: &Sleepable, _: usize) -> Option<u32> {
+        Some(148_500)
     }
     fn aclk_khz(&self) -> u64 {
         800_000
@@ -112,6 +121,7 @@ fn rig() -> Rig {
     dpu.init();
     let plat = Arc::new(TestPlatform {
         live_maps: Arc::new(AtomicU32::new(0)),
+        refuse: std::sync::atomic::AtomicBool::new(false),
         next_addr: AtomicU64::new(0x8000_0000),
         cleaned: AtomicU32::new(0),
         pixel: Mutex::new(Vec::new()),
@@ -469,4 +479,144 @@ fn the_card_reads_as_the_specification_describes_it() {
 fn sl() -> Sleepable {
     // SAFETY: host tests run on threads that may block.
     unsafe { Sleepable::assume() }
+}
+
+/// What firmware leaves: pipeline 0 scanning out `m`, layer 2 showing.
+fn lit_by_firmware(r: &Rig, m: &Mode) {
+    let p = r.card.dpu().layout().pipes[0].clone();
+    let t = crate::timing::bs_regs(m).unwrap();
+    r.sim.poke(p.bs.offset + bs::ACTIVESIZE, t.active);
+    r.sim.poke(p.bs.offset + bs::HINTERVALS, t.hintervals);
+    r.sim.poke(p.bs.offset + bs::VINTERVALS, t.vintervals);
+    r.sim.poke(p.bs.offset + bs::SYNC, t.sync);
+    r.sim.poke(p.bs.offset + bs::CONTROL, t.control);
+    r.sim
+        .poke(p.layers[2].block.offset + layer::CONTROL, layer::CTRL_EN);
+    r.sim.poke(
+        p.cu.offset + cu::INPUT_ID + 8,
+        p.layers[2].block.input_id(0),
+    );
+    r.sim.poke(p.cu.offset + cu::input_control(2), cu::IN_EN);
+}
+
+fn modeset(r: &Rig, m: &Mode) {
+    let (old, new) = (
+        CrtcSt::default(),
+        CrtcSt {
+            active: true,
+            mode: Some(*m),
+            ..CrtcSt::default()
+        },
+    );
+    let u = CrtcUpdate {
+        index: 0,
+        old: &old,
+        new: &new,
+        modeset: true,
+        s: Some(&sl()),
+    };
+    r.crtc.check(&u).unwrap();
+    r.crtc.commit(&u);
+}
+
+#[test]
+fn a_display_firmware_left_running_is_kept_when_its_mode_is_asked_for() {
+    let r = rig();
+    lit_by_firmware(&r, &hd());
+    assert!(r.card.adopt(&sl()));
+    assert!(r.card.dpu().running(0));
+    // Adopting touched no clock and changed no operating mode.
+    assert!(r.plat.pixel.lock().unwrap().is_empty());
+    assert_eq!(r.sim.live(gcu::CONTROL) & gcu::MODE_MASK, 0);
+    let (o, n) = (PlaneSt::default(), PlaneSt::default());
+    let f = fb(&r, format::XRGB8888, 1920, 1080, 7680);
+    r.layers[0].commit(&update(Some(&f), visible(1920, 1080, 0, 0), &o, &n));
+    modeset(&r, &hd());
+    let p = r.card.dpu().layout().pipes[0].clone();
+    // No stop, no restart, no clock change: the pipeline never went down.
+    assert!(r.plat.pixel.lock().unwrap().is_empty());
+    assert_eq!(r.sim.live(p.bs.offset + bs::CONTROL) & bs::CTRL_EN, 1);
+    // Our layer shows, and the firmware's other one is gone.
+    assert_eq!(
+        r.sim.live(p.layers[0].block.offset + layer::CONTROL) & layer::CTRL_EN,
+        1
+    );
+    assert_eq!(
+        r.sim.live(p.layers[2].block.offset + layer::CONTROL) & layer::CTRL_EN,
+        0
+    );
+    assert_eq!(r.sim.live(p.cu.offset + cu::INPUT_ID + 8), 0);
+}
+
+#[test]
+fn a_different_mode_or_clock_takes_the_firmwares_display_down_first() {
+    // A different size.
+    let r = rig();
+    lit_by_firmware(&r, &hd());
+    r.card.adopt(&sl());
+    let mut small = hd();
+    small.hdisplay = 1280;
+    small.hsync_start = 1390;
+    small.hsync_end = 1430;
+    small.htotal = 1650;
+    small.vdisplay = 720;
+    small.vsync_start = 725;
+    small.vsync_end = 730;
+    small.vtotal = 750;
+    small.clock_khz = 74_250;
+    modeset(&r, &small);
+    assert_eq!(
+        r.plat.pixel.lock().unwrap().as_slice(),
+        &[(0, None), (0, Some(74_250))]
+    );
+    // The same timing at a clock firmware is not running.
+    let r = rig();
+    lit_by_firmware(&r, &hd());
+    r.card.adopt(&sl());
+    let mut fast = hd();
+    fast.clock_khz = 160_000;
+    modeset(&r, &fast);
+    assert_eq!(
+        r.plat.pixel.lock().unwrap().as_slice(),
+        &[(0, None), (0, Some(160_000))]
+    );
+}
+
+#[test]
+fn only_the_first_mode_set_keeps_the_adopted_display() {
+    let r = rig();
+    lit_by_firmware(&r, &hd());
+    r.card.adopt(&sl());
+    modeset(&r, &hd());
+    assert!(r.plat.pixel.lock().unwrap().is_empty());
+    // A second mode set is an ordinary one: stop and start.
+    modeset(&r, &hd());
+    assert_eq!(r.plat.pixel.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn a_pipeline_that_is_not_running_is_not_adopted() {
+    let r = rig();
+    assert!(!r.card.adopt(&sl()));
+    assert!(!r.card.dpu().running(0));
+}
+
+#[test]
+fn a_buffer_that_cannot_be_mapped_leaves_the_firmwares_picture_alone() {
+    let r = rig();
+    lit_by_firmware(&r, &hd());
+    r.card.adopt(&sl());
+    r.plat.refuse.store(true, Ordering::SeqCst);
+    let (o, n) = (PlaneSt::default(), PlaneSt::default());
+    let f = fb(&r, format::XRGB8888, 1920, 1080, 7680);
+    r.layers[0].commit(&update(Some(&f), visible(1920, 1080, 0, 0), &o, &n));
+    modeset(&r, &hd());
+    let p = r.card.dpu().layout().pipes[0].clone();
+    // Firmware's layer is still showing, and the timing generator runs.
+    assert_eq!(
+        r.sim.live(p.layers[2].block.offset + layer::CONTROL) & layer::CTRL_EN,
+        1
+    );
+    assert_eq!(r.sim.live(p.bs.offset + bs::CONTROL) & bs::CTRL_EN, 1);
+    assert!(r.plat.pixel.lock().unwrap().is_empty());
 }

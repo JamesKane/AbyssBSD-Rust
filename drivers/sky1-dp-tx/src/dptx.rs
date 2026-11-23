@@ -237,6 +237,88 @@ impl Dptx {
         Ok(up)
     }
 
+    /// Takes over a link firmware left running (section 2.12): the source
+    /// is enabled and its video stream is on. Nothing is reset and nothing
+    /// is trained; only the interrupt mask is written, as the vendor does.
+    /// The link as found; `None` if no stream is running.
+    pub fn adopt(&self) -> Option<Up> {
+        let video = self.w.read(regs::source(0) + regs::VIDEO_STREAM_ENABLE) & 1 != 0;
+        if !video || self.w.read(regs::SOURCE_ENABLE) & 1 == 0 {
+            return None;
+        }
+        let rate = Rate::from_code(u8::try_from(self.w.read(regs::LINK_BW_SET) & 0xFF).ok()?)?;
+        let lanes = u8::try_from(self.w.read(regs::LANE_COUNT_SET)).ok()?;
+        if !matches!(lanes, 1 | 2 | 4) {
+            return None;
+        }
+        let bpc = match (self.w.read(regs::source(0) + regs::MAIN_STREAM_MISC0) >> 5) & 7 {
+            0 => 6,
+            2 => 10,
+            3 => 12,
+            4 => 16,
+            _ => 8,
+        };
+        let up = Up {
+            trained: Trained {
+                link: Link { rate, lanes },
+                drive: dpcd::Drive::default(),
+            },
+            bpc,
+        };
+        *self.up.lock() = Some(up);
+        self.w.write(regs::INTERRUPT_MASK, regs::IRQ_MASK_OPERATING);
+        Some(up)
+    }
+
+    /// Whether the stream that is running is exactly the one `mode` would
+    /// start: its timing, polarities and colour depth, on the link in
+    /// use. A display already showing it can then be kept.
+    #[must_use]
+    pub fn stream_matches(&self, mode: &Mode) -> bool {
+        let Some(up) = *self.up.lock() else {
+            return false;
+        };
+        let want = stream::stream_regs(
+            mode,
+            up.bpc,
+            up.trained.link,
+            stream::pixels_per_clock(mode.clock_khz),
+        );
+        // The timing and format registers; the transfer-unit and window
+        // values are the core's arithmetic on the same inputs.
+        const TIMING: [usize; 10] = [
+            regs::MAIN_STREAM_HTOTAL,
+            regs::MAIN_STREAM_VTOTAL,
+            regs::MAIN_STREAM_POLARITY,
+            regs::MAIN_STREAM_HSWIDTH,
+            regs::MAIN_STREAM_VSWIDTH,
+            regs::MAIN_STREAM_HRES,
+            regs::MAIN_STREAM_VRES,
+            regs::MAIN_STREAM_HSTART,
+            regs::MAIN_STREAM_VSTART,
+            regs::MAIN_STREAM_MISC0,
+        ];
+        let base = regs::source(0);
+        want.values
+            .iter()
+            .filter(|(r, _)| TIMING.contains(r))
+            .all(|&(r, v)| self.w.read(base + r) == v)
+    }
+
+    /// Makes sure the adopted stream's video and secondary data are on
+    /// (both written, which changes nothing that is already set).
+    pub fn keep_stream(&self) {
+        let base = regs::source(0);
+        self.w.write(base + regs::VIDEO_STREAM_ENABLE, 1);
+        self.w.write(base + regs::SECONDARY_STREAM_ENABLE, 1);
+    }
+
+    /// Forgets a link taken over from firmware, so the next bring-up
+    /// trains afresh (after the caller has reset the block).
+    pub fn forget_link(&self) {
+        *self.up.lock() = None;
+    }
+
     /// Sets the sink's power state: 1 awake, 2 asleep (section 2.5.8).
     fn sink_power(&self, state: u8) -> Result<(), Error> {
         let aux = self.aux();

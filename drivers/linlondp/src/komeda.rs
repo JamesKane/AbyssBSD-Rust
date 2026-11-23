@@ -186,6 +186,17 @@ impl Platform for Machine {
         *cell.lock() = slot;
     }
 
+    fn pixel_clock_adopt(&self, s: &Sleepable, p: usize) -> Option<u32> {
+        let mut slot = self.pixel.get(p)?.lock().take();
+        let khz = slot.as_mut().and_then(|c| {
+            let hz = c.rate(s).ok()?;
+            c.enable(s).ok()?;
+            u32::try_from(hz.0 / 1000).ok()
+        });
+        *self.pixel[p].lock() = slot;
+        khz
+    }
+
     fn aclk_khz(&self) -> u64 {
         self.aclk_khz
     }
@@ -259,7 +270,19 @@ impl Driver for Komeda {
             return Err(AttachError::Device("register window too small"));
         }
         let irq = cx.irq(0)?;
-        let tag = cx.dma_tag(DmaConstraints {
+        let words = Arc::new(Regs(regs));
+        let delay = Arc::new(KernelDelay);
+        let layout = discover::walk(&*words, WINDOW)
+            .map_err(|_| AttachError::Device("not a Linlon display processor"))?;
+        // Pipelines the firmware left scanning out are taken over as they
+        // are: no reset, and their memory path stays as it is.
+        let lit: Vec<bool> = layout
+            .pipes
+            .iter()
+            .map(|p| words.read(p.bs.offset + bs::CONTROL) & bs::CTRL_EN != 0)
+            .collect();
+        let any_lit = lit.iter().any(|l| *l);
+        let constraints = DmaConstraints {
             addr_bits: 40,
             align: 1,
             boundary: None,
@@ -267,19 +290,17 @@ impl Driver for Komeda {
             max_segments: u16::MAX,
             // `_CCA` is 0 on this board and the unit does not snoop.
             coherency: Coherency::NonCoherent,
-        })?;
-        let words = Arc::new(Regs(regs));
-        let delay = Arc::new(KernelDelay);
-        let layout = discover::walk(&*words, WINDOW)
-            .map_err(|_| AttachError::Device("not a Linlon display processor"))?;
-        // A pipeline the firmware left scanning out is not ours yet.
-        if layout
-            .pipes
-            .iter()
-            .any(|p| words.read(p.bs.offset + bs::CONTROL) & bs::CTRL_EN != 0)
-        {
-            return Err(AttachError::Decline);
-        }
+        };
+        // The firmware's scanout streams bypass the SMMU (an RMR node), and
+        // a translated context would cut it off. Until the reserved range
+        // is identity-mapped for a translated one (docs/IOMMU.md §4.9, not
+        // built), a unit taken over keeps passing through, which scans out
+        // only buffers that are one run of memory.
+        let tag = if any_lit {
+            cx.dma_tag_pass_through(constraints)?
+        } else {
+            cx.dma_tag(constraints)?
+        };
         // The transmitter of the same number gives the output; until it
         // has attached there is nothing to build the card for.
         let Some(out) = sky1_dp::outputs::lookup(unit) else {
@@ -287,11 +308,16 @@ impl Driver for Komeda {
                 "\\_SB_.DP0{unit}"
             ))));
         };
-        discover::soft_reset(&*words, &*delay).map_err(|_| AttachError::Device("soft reset"))?;
+        if !any_lit {
+            discover::soft_reset(&*words, &*delay)
+                .map_err(|_| AttachError::Device("soft reset"))?;
+        }
         let dpu = Dpu::new(words.clone(), delay, layout);
         dpu.init();
-        for p in 0..dpu.layout().pipes.len() {
-            dpu.clear(p);
+        for (p, is_lit) in lit.iter().enumerate() {
+            if !is_lit {
+                dpu.clear(p);
+            }
         }
         let machine = Arc::new(Machine {
             tag,
@@ -305,6 +331,9 @@ impl Driver for Komeda {
         }];
         let card =
             create(dpu, machine.clone(), outputs).map_err(|_| AttachError::Device("card"))?;
+        if any_lit {
+            card.adopt(s);
+        }
         Ok(Self {
             card,
             node: SpinLock::new(None),

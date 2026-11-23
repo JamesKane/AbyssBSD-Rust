@@ -8,7 +8,9 @@
 //! `sky1-usbdp-phy`; this crate is what binds them to the device model.
 //!
 //! Firmware may have left a link running (the board's boot display is
-//! unit 4). Until adoption exists such a unit is declined and left lit.
+//! unit 4). It is taken over as it is: no reset, no PHY preparation, no
+//! training. The first encoder enable keeps the stream if it is the one
+//! the mode asks for, and otherwise resets the block and starts afresh.
 //!
 //! Not built: the unit-2 eDP PHY and panel (declined), the video
 //! adapter's second pipeline and YCbCr output, multi-stream, audio, panel
@@ -125,6 +127,10 @@ struct Link {
     phy: Arc<UsbDpPhy>,
     adapter: Option<Adapter>,
     vid_clk0: SpinLock<Option<ClockHandle>>,
+    reset: SpinLock<Option<ResetHandle>>,
+    apb_mhz: u32,
+    /// A link taken over from firmware, until the first enable decides.
+    adopted: AtomicBool,
     /// What the monitor said, when last read.
     edid: SpinLock<Option<(Vec<u8>, edid::Edid)>>,
     sink_bpc: SpinLock<u32>,
@@ -139,6 +145,23 @@ fn thread() -> Sleepable {
 }
 
 impl Link {
+    /// Resets the block and the PHY interface and sets the transmitter up
+    /// again (section 2.1), for a link that cannot be kept.
+    fn reinit(&self) {
+        let s = thread();
+        let mut r = self.reset.lock().take();
+        if let Some(h) = r.as_mut() {
+            let _ = h.pulse(&s, bus::provider::Micros(20));
+        }
+        *self.reset.lock() = r;
+        bus::manager().delay_us(100);
+        self.dptx.forget_link();
+        // The PHY core starts from nothing, with the table.
+        self.phy.power_down();
+        self.phy.prepare();
+        self.dptx.host_init(self.apb_mhz);
+    }
+
     /// Reads the sink: capabilities, then the monitor's data. Whether a
     /// usable sink is there.
     fn read_sink(&self) -> bool {
@@ -172,6 +195,21 @@ impl EncoderHw for Encoder {
         let l = &*self.0;
         let bpc = *l.sink_bpc.lock();
         let m = *mode;
+        if l.adopted.swap(false, Ordering::AcqRel) {
+            if l.dptx.stream_matches(&m) {
+                // The display is showing this already: join its video
+                // clock and leave everything as it is.
+                let s = thread();
+                let mut c = l.vid_clk0.lock().take();
+                if let Some(h) = c.as_mut() {
+                    let _ = h.enable(&s);
+                }
+                *l.vid_clk0.lock() = c;
+                l.dptx.keep_stream();
+                return;
+            }
+            l.reinit();
+        }
         if l.dptx.link_up(&m, bpc).is_err() {
             return;
         }
@@ -268,7 +306,6 @@ pub struct SkyDp {
     hpd: AtomicBool,
     attention: AtomicBool,
     _apb: ClockHandle,
-    _reset: ResetHandle,
     unit: u32,
 }
 
@@ -350,30 +387,31 @@ impl Driver for SkyDp {
         if !UsbDpPhy::is_combo(&*phy_win) {
             return Err(AttachError::Decline);
         }
-        // A link firmware left running is not ours yet.
-        let lit = dpr::source(0) + dpr::VIDEO_STREAM_ENABLE;
-        if dpr::Words::read(&core, lit) & 1 != 0
-            || dpr::Words::read(&core, dpr::SOURCE_ENABLE) & 1 != 0
-        {
-            return Err(AttachError::Decline);
-        }
+        // A link firmware left running is taken over as it is.
+        let lit_reg = dpr::source(0) + dpr::VIDEO_STREAM_ENABLE;
+        let lit = dpr::Words::read(&core, lit_reg) & 1 != 0
+            || dpr::Words::read(&core, dpr::SOURCE_ENABLE) & 1 != 0;
         let apb_mhz = apb
             .rate(s)
             .map(|h| u32::try_from(h.0 / 1_000_000).unwrap_or(0))
             .unwrap_or(0);
         // Host initialisation (section 2.1): reset the block, then the
-        // PHY interface, then the transmitter.
-        reset
-            .pulse(s, bus::provider::Micros(20))
-            .map_err(|_| AttachError::Device("dp_reset"))?;
-        bus::manager().delay_us(100);
+        // PHY interface, then the transmitter. Not for a link that is up.
+        if !lit {
+            reset
+                .pulse(s, bus::provider::Micros(20))
+                .map_err(|_| AttachError::Device("dp_reset"))?;
+            bus::manager().delay_us(100);
+        }
         let phy = Arc::new(UsbDpPhy::with_core(
             shared.core.clone(),
             shared.regs.clone(),
             phy_win,
             shared.plat.clone(),
         ));
-        phy.prepare();
+        if !lit {
+            phy.prepare();
+        }
         let phy_dyn: Arc<dyn Phy> = phy.clone();
         let dptx = Dptx::new(
             Arc::new(core),
@@ -382,12 +420,22 @@ impl Driver for SkyDp {
             // The boards cap at HBR2 (`cix,dp-max-rate` 540000).
             Config::default(),
         );
-        dptx.host_init(apb_mhz);
+        if lit {
+            // Whatever is half-running is left alone.
+            if dptx.adopt().is_none() {
+                return Err(AttachError::Decline);
+            }
+        } else {
+            dptx.host_init(apb_mhz);
+        }
         let link = Arc::new(Link {
             dptx,
             phy,
             adapter,
             vid_clk0: SpinLock::new(Some(vid0)),
+            reset: SpinLock::new(Some(reset)),
+            apb_mhz,
+            adopted: AtomicBool::new(lit),
             edid: SpinLock::new(None),
             sink_bpc: SpinLock::new(8),
         });
@@ -398,7 +446,6 @@ impl Driver for SkyDp {
             hpd: AtomicBool::new(false),
             attention: AtomicBool::new(false),
             _apb: apb,
-            _reset: reset,
             unit,
         })
     }

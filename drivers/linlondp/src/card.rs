@@ -63,6 +63,9 @@ pub trait Platform: Send + Sync {
     fn pixel_clock_on(&self, s: &Sleepable, p: usize, khz: u32) -> Result<(), Errno>;
     /// Stops pipeline `p`'s pixel clock.
     fn pixel_clock_off(&self, s: &Sleepable, p: usize);
+    /// Joins the pixel clock firmware left running for pipeline `p`,
+    /// unchanged; its rate in kHz.
+    fn pixel_clock_adopt(&self, s: &Sleepable, p: usize) -> Option<u32>;
     /// The main clock's rate in kHz.
     fn aclk_khz(&self) -> u64;
     /// The time, in nanoseconds, for frame stamps.
@@ -84,6 +87,9 @@ struct Inner {
     /// What each layer shows now, to show again after the pipeline is
     /// restarted for a mode change.
     shown: SpinLock<[[Option<LayerCfg<'static>>; 4]; 2]>,
+    /// The pixel clock (kHz) of a pipeline taken over from firmware, until
+    /// the first mode set decides to keep it or take it down.
+    adopted: SpinLock<[Option<u32>; 2]>,
 }
 
 struct Crtc {
@@ -120,6 +126,29 @@ impl CrtcHw for Crtc {
         let (d, p) = (&self.inner.dpu, self.pipe);
         // A mode change needs the requesting thread, for the clocks.
         if u.modeset && u.s.is_none() {
+            return;
+        }
+        // A display firmware left running, asked for in the mode it runs:
+        // keep it, changing only what the layers show (section 08 §8.5).
+        let adopted = self.inner.adopted.lock()[p].take();
+        if let (true, Some(khz), true, Some(m)) =
+            (u.modeset, adopted, u.new.active, u.new.mode.as_ref())
+            && d.timing_matches(p, m)
+            && m.clock_khz.abs_diff(khz) <= khz / 100
+        {
+            let shown = *self.inner.shown.lock();
+            // With nothing to show (no layer's buffer could be mapped for
+            // the display) the firmware's picture stays, rather than a
+            // blank one replacing it.
+            if shown[p].iter().all(Option::is_none) {
+                return;
+            }
+            for (l, cfg) in shown[p].iter().enumerate() {
+                if cfg.is_none() {
+                    d.hide(p, l);
+                }
+            }
+            let _ = d.flush_wait(p);
             return;
         }
         if let (true, true, Some(s)) = (u.modeset, d.running(p), u.s) {
@@ -331,6 +360,7 @@ pub fn create(dpu: Dpu, plat: Arc<dyn Platform>, outputs: Vec<Output>) -> Result
         dpu,
         plat,
         shown: SpinLock::new([[None; 4]; 2]),
+        adopted: SpinLock::new([None; 2]),
     });
     let mut b = KmsBuilder::new(KmsLimits {
         min_width: 4,
@@ -385,6 +415,22 @@ impl Card {
             }
         }
         ev != crate::hw::Events::default()
+    }
+
+    /// Takes over every pipeline firmware left running, with the pixel
+    /// clock it runs on: the first mode set keeps the display if it asks
+    /// for the mode on screen, and takes it down otherwise. Whether any
+    /// was running.
+    pub fn adopt(&self, s: &Sleepable) -> bool {
+        let mut any = false;
+        for p in 0..self.inner.dpu.layout().pipes.len() {
+            if self.inner.dpu.adopt(p).is_some() {
+                let khz = self.inner.plat.pixel_clock_adopt(s, p);
+                self.inner.adopted.lock()[p] = khz;
+                any = true;
+            }
+        }
+        any
     }
 
     /// The display processor.

@@ -558,3 +558,90 @@ fn the_sinks_edid_is_read_whole() {
     let _ = sim.reg(0);
     let _: &dyn Words = &*sim;
 }
+
+/// What firmware leaves: a trained link at reduced rate on four lanes and
+/// source 0 streaming the 1080p mode.
+fn lit_by_firmware(sim: &Sim) {
+    let l = Link {
+        rate: Rate::Rbr,
+        lanes: 4,
+    };
+    sim.write(regs::LINK_BW_SET, 6);
+    sim.write(regs::LANE_COUNT_SET, 4);
+    sim.write(regs::SOURCE_ENABLE, 1);
+    let base = regs::source(0);
+    for &(r, v) in &stream::stream_regs(&hd(), 8, l, 1).values {
+        sim.write(base + r, v);
+    }
+    sim.write(base + regs::VIDEO_STREAM_ENABLE, 1);
+}
+
+#[test]
+fn a_link_firmware_left_up_is_adopted_without_a_reset_or_training() {
+    let sim = Arc::new(Sim::new());
+    let phy = Arc::new(TestPhy::new(4));
+    let d = Dptx::new(sim.clone(), sim.clone(), phy.clone(), Config::default());
+    // Nothing running: nothing to adopt.
+    assert!(d.adopt().is_none());
+    lit_by_firmware(&sim);
+    let up = d.adopt().unwrap();
+    assert_eq!(
+        up.trained.link,
+        Link {
+            rate: Rate::Rbr,
+            lanes: 4
+        }
+    );
+    assert_eq!(up.bpc, 8);
+    assert_eq!(d.link(), Some(up.trained.link));
+    assert_eq!(sim.reg(regs::INTERRUPT_MASK), 0x1C);
+    // No AUX traffic, nothing told to the PHY, the stream still on.
+    assert!(sim.requests().is_empty());
+    assert!(phy.log.lock().unwrap().is_empty());
+    assert_eq!(sim.reg(regs::source(0) + regs::VIDEO_STREAM_ENABLE), 1);
+    assert_eq!(sim.reg(regs::SOURCE_ENABLE), 1);
+}
+
+#[test]
+fn the_running_stream_is_matched_against_the_mode_asked_for() {
+    let sim = Arc::new(Sim::new());
+    let d = Dptx::new(
+        sim.clone(),
+        sim.clone(),
+        Arc::new(TestPhy::new(4)),
+        Config::default(),
+    );
+    lit_by_firmware(&sim);
+    assert!(!d.stream_matches(&hd()), "not adopted yet");
+    d.adopt().unwrap();
+    assert!(d.stream_matches(&hd()));
+    let mut other = hd();
+    other.vdisplay = 720;
+    other.vsync_start = 725;
+    other.vsync_end = 730;
+    other.vtotal = 750;
+    assert!(!d.stream_matches(&other));
+    // The same timing with the other polarity is not the same stream.
+    let flipped = stream::with_inverted_sync(&hd());
+    assert!(!d.stream_matches(&flipped));
+    d.forget_link();
+    assert!(!d.stream_matches(&hd()));
+    assert!(d.link().is_none());
+}
+
+#[test]
+fn nonsense_left_in_the_link_registers_is_not_adopted() {
+    let sim = Arc::new(Sim::new());
+    let d = Dptx::new(
+        sim.clone(),
+        sim.clone(),
+        Arc::new(TestPhy::new(4)),
+        Config::default(),
+    );
+    lit_by_firmware(&sim);
+    sim.write(regs::LINK_BW_SET, 0x07);
+    assert!(d.adopt().is_none());
+    sim.write(regs::LINK_BW_SET, 6);
+    sim.write(regs::LANE_COUNT_SET, 3);
+    assert!(d.adopt().is_none());
+}

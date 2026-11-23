@@ -581,3 +581,33 @@ compositors; retraining on a sink's attention pulse; the second pipeline's strea
 bandwidth checks beyond the mode list's; the eDP PHY, panel and backlight; the Type-C controller feeding
 the PHY's mode and orientation; then the board session, which answers the open questions in §15 to
 §15.3 (two needing a sink: the sync inversion and the interrupt cause's clear-on-read).
+
+### 15.5 Adoption of the firmware's display
+
+Built (host tested against the simulators): a display unit or transmitter link that firmware left running
+is taken over instead of declined.
+
+- **Display processor.** A pipeline whose timing generator runs is marked running and not reset; its pixel
+  clock is joined unchanged. The first mode set keeps the display (no stop, no clock change) if the mode
+  asked for has exactly the timing the pipeline runs and a pixel clock within 1 % of firmware's; the
+  layers it does not use are then hidden in the same latch. Any other mode takes it down by the ordinary
+  two-phase stop and starts again. Later mode sets are ordinary.
+- **Transmitter.** A running stream is adopted without a reset, PHY preparation or training; only the
+  interrupt mask is written. The first encoder enable keeps the stream if the registers hold exactly what
+  the mode would write (timing, polarities, colour depth), and otherwise resets the block and the PHY and
+  trains afresh.
+- **If nothing could be shown** (no layer's buffer could be mapped), the firmware's picture is left as it
+  is rather than replaced by a blank one.
+
+**The memory path is the open problem.** Firmware's scanout streams bypass the SMMU (IORT reserved-memory
+nodes), and a translated context would cut it off, so an adopted unit keeps passing through
+(`dma_tag_pass_through`) and can scan out only buffers that are one run of memory. Userland's dumb buffers
+are scattered pages, so on the boot display the first modeset keeps the console and shows nothing new.
+Either of these lets it show a client: a `Contiguous` buffer placement (the core returns `EOPNOTSUPP` for
+it today), or identity-mapping the reserved range (`0x84800000`, 8 MiB) into the unit's domain before its
+streams are translated (docs/IOMMU.md §4.9, listed there as built in M-G). The second also suits the other
+four units; it is the next piece.
+
+Also unconfirmed until the board: that the firmware's sync polarities and porches are the ones the offered
+modes carry (a mismatch only costs a visible blank, by the fallback above), and that the pixel clock reads
+back as the SCMI rate it was set to.
