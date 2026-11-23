@@ -1,0 +1,13 @@
+[package]
+name = "sky1-dp-tx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+kms-check = { path = "../../lib/kms-check" }
+
+[lints]
+workspace = true

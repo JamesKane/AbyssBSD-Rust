@@ -929,6 +929,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sky1-dp-tx"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "kms-check",
+]
+
+[[package]]
 name = "sky1-pinctrl"
 version = "0.0.0"
 dependencies = [

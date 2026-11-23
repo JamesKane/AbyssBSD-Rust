@@ -497,3 +497,21 @@ Open questions for the board session (the specification leaves them open):
 5. The driver name Mesa pairs with: `komeda` is the FreeBSD port's and the specification's; not yet
    checked against the Mesa in the 15.1 packages (the freedesktop host refuses automated fetches).
 6. A buffer's pages must stay resident while mapped; the core has no pin yet.
+
+### 15.1 DisplayPort transmitter (`drivers/sky1-dp-tx`)
+
+Built and host tested against a simulated core and sink (same caveat as above): register model, the
+AUX channel (chunking, defer and timeout retries, I2C over AUX, EDID), sink capability parsing, rate,
+lane and colour-depth selection, link training (clock recovery, equalisation with TPS2/3/4, rate
+fallback, a clean end), the video stream registers, and bring-up and teardown of one SST link. The PHY
+is a trait (`link::Phy`) for the combo-PHY (USB-C) and eDP-PHY drivers, which are not written.
+
+Not built: the kernel glue (ACPI `CIXH502F`, clocks, reset, interrupt thread, HPD work), the `Phy`
+implementations and Type-C lane muxing, the RCSU video adapter, `EncoderHw`/`ConnectorHw` over it,
+firmware adoption, the eDP panel and backlight, multi-stream, audio, secondary data packets, panel
+self refresh, variable refresh, HDCP, fast retraining, YCbCr output.
+
+Questions for the board: whether the sync inversion (`Config::invert_sync`, specification 02 §2.6.1)
+is right for a sink that honours the polarity bits; the DATA_CONTROL and TU_CONFIG field meanings;
+whether the interrupt cause is clear on read; whether the PHY wants lane 0's drive for every lane; the
+exact `CIXH502F` `_DSD`, `CLKT` and `RSTL` names (needs the DSDT; the corpus has them).
