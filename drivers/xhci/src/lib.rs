@@ -240,6 +240,29 @@ impl Shared {
         if let Some(t) = t {
             t.join(s);
         }
+        self.note_references("stop");
+    }
+
+    /// Logs any holder of the controller besides this instance: its
+    /// register grant is released only when the last one drops, so one
+    /// outstanding here is what the ledger later reports as a leaked grant
+    /// (the `usbus` child's data, a device or a transfer in flight, or the
+    /// watchdog's closure).
+    fn note_references(&self, when: &str) {
+        let others = Arc::strong_count(&self.hc) - 1;
+        if others != 0 {
+            bus::manager().log(format_args!(
+                "xhci{}: at {when}, {others} other reference(s) to the controller are held \
+                 (its register grant stays out until they drop)",
+                self.unit
+            ));
+        }
+    }
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        self.note_references("detach");
     }
 }
 
