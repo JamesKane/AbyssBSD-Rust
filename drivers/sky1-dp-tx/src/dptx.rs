@@ -180,6 +180,13 @@ impl Dptx {
         Err(last)
     }
 
+    /// The hot-plug line and the AUX status register, for a log line when a
+    /// transfer fails.
+    #[must_use]
+    pub fn aux_snapshot(&self) -> (bool, u32) {
+        (self.aux().hpd(), self.w.read(regs::AUX_STATUS))
+    }
+
     /// The sink's EDID, as many blocks as it says (at most 4).
     ///
     /// # Errors

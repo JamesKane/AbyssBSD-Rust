@@ -267,7 +267,10 @@ impl EncoderHw for Encoder {
         let up = match l.dptx.link_up(&m, bpc) {
             Ok(up) => up,
             Err(e) => {
-                bus::manager().log(format_args!("sky1_dp: link did not come up: {e:?}"));
+                let (hpd, status) = l.dptx.aux_snapshot();
+                bus::manager().log(format_args!(
+                    "sky1_dp: link did not come up: {e:?} (hpd {hpd}, aux status {status:#x})"
+                ));
                 return;
             }
         };

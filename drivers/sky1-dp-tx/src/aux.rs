@@ -261,6 +261,23 @@ impl<'a> Aux<'a> {
     ///
     /// [`AuxError`].
     pub fn i2c_read(&self, slave: u8, offset: &[u8], buf: &mut [u8]) -> Result<(), AuxError> {
+        let r = self.i2c_read_open(slave, offset, buf);
+        if r.is_err() {
+            self.i2c_stop(u32::from(slave));
+        }
+        r
+    }
+
+    /// Closes an I2C-over-AUX transaction left open by a failure: a bare
+    /// address packet without the middle-of-transaction flag, which the
+    /// standard's I2C helpers send whatever happened. A sink's I2C bridge
+    /// left in the middle of a transaction is one possible reason it stops
+    /// answering afterwards. Best effort.
+    fn i2c_stop(&self, addr: u32) {
+        let _ = self.retried(regs::AUX_I2C_WRITE, addr, &[], &mut [], true, false);
+    }
+
+    fn i2c_read_open(&self, slave: u8, offset: &[u8], buf: &mut [u8]) -> Result<(), AuxError> {
         let a = u32::from(slave);
         let mot = regs::AUX_I2C_MOT;
         // Start: an address-only write, then the offset.
@@ -292,14 +309,17 @@ impl<'a> Aux<'a> {
         if block >= 2 {
             // Segment pointer: written without a stop.
             let a = 0x30;
-            self.retried(
+            if let Err(e) = self.retried(
                 regs::AUX_I2C_WRITE | regs::AUX_I2C_MOT,
                 a,
                 &[block / 2],
                 &mut [],
                 false,
                 false,
-            )?;
+            ) {
+                self.i2c_stop(a);
+                return Err(e);
+            }
         }
         let mut out = [0u8; 128];
         self.i2c_read(0x50, &[(block % 2) * 128], &mut out)?;
