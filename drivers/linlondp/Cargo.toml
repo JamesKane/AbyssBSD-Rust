@@ -12,5 +12,8 @@ drm-fourcc = { path = "../../lib/drm-fourcc" }
 kms-check = { path = "../../lib/kms-check" }
 sync = { path = "../../sys/sync" }
 
+[dev-dependencies]
+vm = { path = "../../sys/vm" }
+
 [lints]
 workspace = true

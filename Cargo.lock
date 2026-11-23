@@ -740,6 +740,7 @@ dependencies = [
  "drm-fourcc",
  "kms-check",
  "sync",
+ "vm",
 ]
 
 [[package]]

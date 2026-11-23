@@ -1,0 +1,461 @@
+// SPDX-License-Identifier: BSD-2-Clause
+//! The card's planes and controllers, driven directly with a buffer in
+//! host memory and a platform that records what it is asked.
+
+use std::collections::HashMap;
+use std::prelude::rust_2024::*;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::{boxed::Box, vec};
+
+use abi::errno::Errno;
+use drm::gem::{Gem, Placement};
+use drm::kms::{CrtcSt, CrtcUpdate, Fb, PlaneSt, PlaneUpdate};
+use drm_fourcc::{Fourcc, MOD_LINEAR, Modifier, format};
+use kms_check::{DstRect, Mode, ObjId, SrcRect, Visible};
+
+use super::*;
+use crate::discover;
+use crate::regs::{bs, cu, gcu, layer};
+use crate::sim::Sim;
+
+#[derive(Default)]
+struct HeapPages {
+    pages: Mutex<HashMap<u64, Box<[u8; 4096]>>>,
+    next: AtomicU64,
+}
+
+impl vm::object::PageOps for HeapPages {
+    fn alloc_zeroed(&self) -> Option<vm::Pfn> {
+        let n = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        self.pages.lock().unwrap().insert(n, Box::new([0; 4096]));
+        Some(vm::Pfn(n))
+    }
+    fn alloc_copy(&self, from: vm::Pfn) -> Option<vm::Pfn> {
+        let c = Box::new(*self.pages.lock().unwrap()[&from.0]);
+        let n = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        self.pages.lock().unwrap().insert(n, c);
+        Some(vm::Pfn(n))
+    }
+    fn alloc_filled(&self, fill: &mut dyn FnMut(&mut [u8])) -> Option<vm::Pfn> {
+        let mut p = Box::new([0; 4096]);
+        fill(&mut p[..]);
+        let n = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        self.pages.lock().unwrap().insert(n, p);
+        Some(vm::Pfn(n))
+    }
+    fn free(&self, pfn: vm::Pfn) {
+        self.pages.lock().unwrap().remove(&pfn.0);
+    }
+    fn access(&self, pfn: vm::Pfn, f: &mut dyn FnMut(&mut [u8])) {
+        f(&mut self.pages.lock().unwrap().get_mut(&pfn.0).unwrap()[..]);
+    }
+}
+
+/// A live mapping: counts itself while it exists.
+#[derive(Debug)]
+struct Token(Arc<AtomicU32>);
+
+impl Drop for Token {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct TestPlatform {
+    live_maps: Arc<AtomicU32>,
+    next_addr: AtomicU64,
+    cleaned: AtomicU32,
+    pixel: Mutex<Vec<(usize, Option<u32>)>>,
+}
+
+impl Platform for TestPlatform {
+    fn map(&self, _: &Arc<Gem>) -> Result<Mapped, Errno> {
+        self.live_maps.fetch_add(1, Ordering::SeqCst);
+        Ok(Mapped {
+            addr: self.next_addr.fetch_add(0x100_0000, Ordering::SeqCst),
+            translated: false,
+            keep: Box::new(Token(Arc::clone(&self.live_maps))),
+        })
+    }
+    fn clean(&self, _: &Gem, _: core::ops::Range<u64>) {
+        self.cleaned.fetch_add(1, Ordering::SeqCst);
+    }
+    fn pixel_clock_on(&self, p: usize, khz: u32) -> Result<(), Errno> {
+        self.pixel.lock().unwrap().push((p, Some(khz)));
+        Ok(())
+    }
+    fn pixel_clock_off(&self, p: usize) {
+        self.pixel.lock().unwrap().push((p, None));
+    }
+    fn aclk_khz(&self) -> u64 {
+        800_000
+    }
+    fn now_ns(&self) -> u64 {
+        1_000
+    }
+}
+
+struct Rig {
+    sim: Arc<Sim>,
+    plat: Arc<TestPlatform>,
+    card: Arc<Card>,
+    pages: &'static HeapPages,
+    crtc: Crtc,
+    layers: Vec<Layer>,
+}
+
+fn rig() -> Rig {
+    let sim = Arc::new(Sim::d6());
+    let layout = discover::walk(&*sim, 0x2_0000).unwrap();
+    let dpu = Dpu::new(sim.clone(), sim.clone(), layout);
+    dpu.init();
+    let plat = Arc::new(TestPlatform {
+        live_maps: Arc::new(AtomicU32::new(0)),
+        next_addr: AtomicU64::new(0x8000_0000),
+        cleaned: AtomicU32::new(0),
+        pixel: Mutex::new(Vec::new()),
+    });
+    let card = create(dpu, plat.clone(), Vec::new()).unwrap();
+    let inner = Arc::clone(&card.inner);
+    let layers = (0..4)
+        .map(|l| {
+            let rich = inner.dpu.layout().pipes[0].layers[l].rich;
+            let kind = if rich {
+                LayerKind::Rich
+            } else {
+                LayerKind::Simple
+            };
+            Layer {
+                inner: Arc::clone(&inner),
+                pipe: 0,
+                layer: l,
+                kind,
+                formats: crate::format::offered(kind),
+                held: SpinLock::new((None, None)),
+            }
+        })
+        .collect();
+    let crtc = Crtc { inner, pipe: 0 };
+    Rig {
+        sim,
+        plat,
+        card,
+        pages: Box::leak(Box::default()),
+        crtc,
+        layers,
+    }
+}
+
+fn hd() -> Mode {
+    Mode {
+        clock_khz: 148_500,
+        hdisplay: 1920,
+        hsync_start: 2008,
+        hsync_end: 2052,
+        htotal: 2200,
+        vdisplay: 1080,
+        vsync_start: 1084,
+        vsync_end: 1089,
+        vtotal: 1125,
+        ..Mode::default()
+    }
+}
+
+fn fb(r: &Rig, f: Fourcc, w: u32, h: u32, pitch: u32) -> Arc<Fb> {
+    let size = u64::from(pitch) * u64::from(h) * 2;
+    let gem = Gem::new(r.pages, size, 0x10_0000, Placement::SYSTEM_NONCOHERENT).unwrap();
+    Arc::new(Fb {
+        id: ObjId(100),
+        width: w,
+        height: h,
+        format: f,
+        modifier: MOD_LINEAR,
+        flags: 0,
+        gems: [Some(gem.clone()), Some(gem.clone()), Some(gem), None],
+        pitches: [pitch, pitch, pitch, 0],
+        offsets: [0; 4],
+        owner: 1,
+    })
+}
+
+fn visible(w: u32, h: u32, x: i32, y: i32) -> Visible {
+    Visible {
+        shown: true,
+        src: SrcRect {
+            x: 0,
+            y: 0,
+            w: w << 16,
+            h: h << 16,
+        },
+        dst: DstRect { x, y, w, h },
+    }
+}
+
+fn update<'a>(
+    fb: Option<&'a Arc<Fb>>,
+    v: Visible,
+    old: &'a PlaneSt,
+    new: &'a PlaneSt,
+) -> PlaneUpdate<'a> {
+    PlaneUpdate {
+        index: 0,
+        crtc: Some(0),
+        fb,
+        visible: v,
+        old,
+        new,
+    }
+}
+
+fn turn_on(r: &Rig) {
+    let (old, new) = (
+        CrtcSt::default(),
+        CrtcSt {
+            active: true,
+            mode: Some(hd()),
+            ..CrtcSt::default()
+        },
+    );
+    let u = CrtcUpdate {
+        index: 0,
+        old: &old,
+        new: &new,
+        modeset: true,
+    };
+    r.crtc.check(&u).unwrap();
+    r.crtc.commit(&u);
+}
+
+#[test]
+fn what_a_plane_will_take_and_what_it_refuses() {
+    let r = rig();
+    let (o, n) = (PlaneSt::default(), PlaneSt::default());
+    let ok = fb(&r, format::ARGB8888, 640, 480, 2560);
+    let chk = |l: usize, f: &Arc<Fb>, v: Visible| r.layers[l].check(&update(Some(f), v, &o, &n));
+    assert!(chk(0, &ok, visible(640, 480, 0, 0)).is_ok());
+    // No scaling.
+    let mut v = visible(640, 480, 0, 0);
+    v.dst.w = 320;
+    assert_eq!(chk(0, &ok, v), Err(Errno::EINVAL));
+    // A pitch that is not whole bus words.
+    let odd = fb(&r, format::ARGB8888, 640, 480, 2556);
+    assert_eq!(chk(0, &odd, visible(640, 480, 0, 0)), Err(Errno::EINVAL));
+    // Too small to fetch.
+    assert_eq!(chk(0, &ok, visible(2, 480, 0, 0)), Err(Errno::EINVAL));
+    // A modifier other than linear.
+    let mut m = fb(&r, format::ARGB8888, 640, 480, 2560);
+    Arc::get_mut(&mut m).unwrap().modifier = Modifier(1);
+    assert_eq!(chk(0, &m, visible(640, 480, 0, 0)), Err(Errno::EINVAL));
+    // YUV on a layer that is not rich: layer 2 is simple, layer 0 is rich.
+    let nv = fb(&r, format::NV12, 640, 480, 640);
+    assert!(chk(0, &nv, visible(640, 480, 0, 0)).is_ok());
+    assert_eq!(chk(2, &nv, visible(640, 480, 0, 0)), Err(Errno::EINVAL));
+    // Chroma samples: an odd width or position.
+    assert_eq!(chk(0, &nv, visible(639, 480, 0, 0)), Err(Errno::EINVAL));
+    // Wider than the layer fetches.
+    let wide = fb(&r, format::ARGB8888, 4200, 100, 16800);
+    assert_eq!(chk(0, &wide, visible(4200, 100, 0, 0)), Err(Errno::EINVAL));
+}
+
+#[test]
+fn a_pipeline_turns_on_with_its_clock_and_off_again() {
+    let r = rig();
+    turn_on(&r);
+    assert!(r.card.dpu().running(0));
+    assert_eq!(
+        r.plat.pixel.lock().unwrap().as_slice(),
+        &[(0, Some(148_500))]
+    );
+    assert_eq!(
+        r.sim.live(gcu::CONTROL) & gcu::MODE_MASK,
+        gcu::MODE_DISPLAY0
+    );
+    let p = &r.card.dpu().layout().pipes[0];
+    assert_eq!(r.sim.live(p.bs.offset + bs::CONTROL) & bs::CTRL_EN, 1);
+    let (old, new) = (
+        CrtcSt {
+            active: true,
+            mode: Some(hd()),
+            ..CrtcSt::default()
+        },
+        CrtcSt::default(),
+    );
+    r.crtc.commit(&CrtcUpdate {
+        index: 0,
+        old: &old,
+        new: &new,
+        modeset: true,
+    });
+    assert!(!r.card.dpu().running(0));
+    assert_eq!(r.plat.pixel.lock().unwrap().last(), Some(&(0, None)));
+}
+
+#[test]
+fn a_mode_the_clocks_cannot_serve_is_refused() {
+    let r = rig();
+    let mut m = hd();
+    // Faster than the 800 MHz main clock.
+    m.clock_khz = 900_000;
+    let (old, new) = (
+        CrtcSt::default(),
+        CrtcSt {
+            active: true,
+            mode: Some(m),
+            ..CrtcSt::default()
+        },
+    );
+    let u = CrtcUpdate {
+        index: 0,
+        old: &old,
+        new: &new,
+        modeset: true,
+    };
+    assert_eq!(r.crtc.check(&u), Err(Errno::EINVAL));
+}
+
+#[test]
+fn a_plane_shows_a_buffer_at_its_mapped_address_and_hides() {
+    let r = rig();
+    turn_on(&r);
+    let (o, n) = (PlaneSt::default(), PlaneSt::default());
+    let f = fb(&r, format::ARGB8888, 1920, 1080, 7680);
+    // Showing a window: a 640x480 rectangle at (100, 50) on screen, from
+    // (16, 8) of the buffer.
+    let mut v = visible(640, 480, 100, 50);
+    v.src.x = 16 << 16;
+    v.src.y = 8 << 16;
+    r.layers[0].commit(&update(Some(&f), v, &o, &n));
+    r.crtc.commit(&CrtcUpdate {
+        index: 0,
+        old: &CrtcSt {
+            active: true,
+            mode: Some(hd()),
+            ..CrtcSt::default()
+        },
+        new: &CrtcSt {
+            active: true,
+            mode: Some(hd()),
+            ..CrtcSt::default()
+        },
+        modeset: false,
+    });
+    r.sim.frame();
+    let p = &r.card.dpu().layout().pipes[0];
+    let b = p.layers[0].block.offset;
+    assert_eq!(
+        u64::from(r.sim.live(b + layer::P0_PTR_LOW)),
+        0x8000_0000 + 8 * 7680 + 16 * 4
+    );
+    assert_eq!(r.sim.live(b + layer::P0_STRIDE), 7680);
+    assert_eq!(
+        r.sim.live(p.cu.offset + cu::input_offset(0)),
+        100 | 50 << 16
+    );
+    assert_eq!(r.sim.live(b + layer::CONTROL) & layer::CTRL_EN, 1);
+    // The buffer was cleaned for a display that does not snoop.
+    assert_eq!(r.plat.cleaned.load(Ordering::SeqCst), 1);
+    // Hiding.
+    r.layers[0].commit(&update(
+        None,
+        Visible {
+            shown: false,
+            src: SrcRect::default(),
+            dst: DstRect::default(),
+        },
+        &o,
+        &n,
+    ));
+    r.card.dpu().flush(0);
+    r.sim.frame();
+    assert_eq!(r.sim.live(b + layer::CONTROL) & layer::CTRL_EN, 0);
+}
+
+#[test]
+fn a_buffer_is_unmapped_when_it_is_two_commits_old() {
+    let r = rig();
+    turn_on(&r);
+    let (o, n) = (PlaneSt::default(), PlaneSt::default());
+    let live = &r.plat.live_maps;
+    let a = fb(&r, format::ARGB8888, 256, 256, 1024);
+    let b = fb(&r, format::ARGB8888, 256, 256, 1024);
+    let c = fb(&r, format::ARGB8888, 256, 256, 1024);
+    let v = visible(256, 256, 0, 0);
+    r.layers[0].commit(&update(Some(&a), v, &o, &n));
+    assert_eq!(live.load(Ordering::SeqCst), 1);
+    // The same buffer again maps nothing.
+    r.layers[0].commit(&update(Some(&a), v, &o, &n));
+    assert_eq!(live.load(Ordering::SeqCst), 1);
+    // A new one: the old is kept, as the display may still read it.
+    r.layers[0].commit(&update(Some(&b), v, &o, &n));
+    assert_eq!(live.load(Ordering::SeqCst), 2);
+    r.layers[0].commit(&update(Some(&c), v, &o, &n));
+    assert_eq!(live.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_mode_change_shows_the_layers_again() {
+    let r = rig();
+    turn_on(&r);
+    let (o, n) = (PlaneSt::default(), PlaneSt::default());
+    let f = fb(&r, format::XRGB8888, 1920, 1080, 7680);
+    r.layers[0].commit(&update(Some(&f), visible(1920, 1080, 0, 0), &o, &n));
+    r.card.dpu().flush_wait(0).unwrap();
+    let mut m = hd();
+    m.clock_khz = 148_000;
+    let (old, new) = (
+        CrtcSt {
+            active: true,
+            mode: Some(hd()),
+            ..CrtcSt::default()
+        },
+        CrtcSt {
+            active: true,
+            mode: Some(m),
+            ..CrtcSt::default()
+        },
+    );
+    r.crtc.commit(&CrtcUpdate {
+        index: 0,
+        old: &old,
+        new: &new,
+        modeset: true,
+    });
+    let p = &r.card.dpu().layout().pipes[0];
+    assert!(r.card.dpu().running(0));
+    // The restart took the layer off, and showing it again put it back.
+    assert_eq!(
+        r.sim.live(p.layers[0].block.offset + layer::CONTROL) & layer::CTRL_EN,
+        1
+    );
+    assert_eq!(
+        r.plat.pixel.lock().unwrap().as_slice(),
+        &[(0, Some(148_500)), (0, None), (0, Some(148_000))]
+    );
+}
+
+#[test]
+fn the_interrupt_is_for_the_device_or_not() {
+    let r = rig();
+    assert!(!r.card.interrupt());
+    turn_on(&r);
+    r.crtc.vblank_enable(true);
+    r.sim.frame();
+    assert!(r.card.interrupt());
+    assert!(!r.card.interrupt());
+    let _ = vec![0u8];
+}
+
+#[test]
+fn the_card_reads_as_the_specification_describes_it() {
+    let r = rig();
+    let k = r.card.kms().unwrap();
+    // Two display controllers, eight planes.
+    assert_eq!(k.crtc_ids().len(), 2);
+    assert_eq!(k.plane_ids().len(), 8);
+    let info = r.card.info();
+    assert_eq!(info.name, "komeda");
+    let d = r.card.dumb().unwrap();
+    assert_eq!(d.pitch_align, 16);
+    assert!(!r.card.dumb_placement().coherent);
+}

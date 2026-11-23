@@ -466,3 +466,34 @@ it. Frame rates are diagnostics (§12), not gates.
 | **M-G.4** | Sky1 display aggregate. Exit: native modesetting on the Orange Pi 6 Plus, hotplug, backlight, and the acceptance capture on the Sky1 display with software rendering |
 | **M-G.5** | `panthor`. Exit: panvk runs `vkcube` and the CTS subset on the Orange Pi 6 Plus, and the acceptance capture there accelerated: Sway on Vulkan over panvk, jellyfish on panfrost |
 | **M-G.6** | amd64 native GPU (RDNA2). Exit: parity with FreeBSD `drm-kmod` on the X870E and the Z690-A, and the acceptance capture on each accelerated: Sway on Vulkan over RADV, jellyfish on radeonsi. The desktop running accelerated is M-D.4, which follows |
+
+## 15. Sky1 display: state and what the board must answer
+
+`drivers/linlondp` (the Linlon-D6 display processor) is built and host tested against a simulated
+device written from the same clean-room specification, so the tests show the driver agrees with the
+specification and with itself, not that the silicon does. Built: register model, block discovery,
+mode to timing registers (modes that overflow a field are refused, not truncated), one display's data
+path with the two-phase stop, interrupt decode, and the card (one display controller per pipeline, one
+plane per layer, linear buffers one to one, non-coherent dumb buffers). Not built: the kernel glue
+(registration as an ACPI driver for `CIXH5010`, clocks, interrupt, memory mapping through the SMMU),
+the firmware-adoption path, scalers, rotation, compressed buffers, colour management, write-back,
+side-by-side composition, and every encoder (DP-TX, combo PHY, eDP panel, backlight).
+
+From the board's ACPI dump (`tests/corpus/opi6p/freebsd/acpidump-dt.txt`): pipeline clocks are named
+`pipeline@0` and `pipeline@1` in `CLKT`, the main clock `aclk` is pinned at 800 MHz
+(`aclk_freq_fixed`), `enabled_by_gop` is 0, `_CCA` is 0 (not coherent), and power is an ACPI power
+resource that the ACPI bus switches on before attach. The firmware leaves DPU 4 running 1920x1080
+(DisplayPort 4), so adoption matters on this board.
+
+Open questions for the board session (the specification leaves them open):
+
+1. Whether a second config-valid write before the first latches is safe (03 §3.4); the card avoids it.
+2. Whether the config-valid readback (1 until latched) holds on the D6 as the vendor notes say; the
+   two-phase stop and the first enable poll it.
+3. Where `BS_PROG_LINE` counts from, and whether the programmed-line interrupt falls after the latch
+   (the card completes commits on it).
+4. Whether the display takes the 5 DPU stream IDs with one translation (08 §8.2.1) and how a buffer's
+   pages are mapped for it (the card asks the platform for a device address per buffer).
+5. The driver name Mesa pairs with: `komeda` is the FreeBSD port's and the specification's; not yet
+   checked against the Mesa in the 15.1 packages (the freedesktop host refuses automated fetches).
+6. A buffer's pages must stay resident while mapped; the core has no pin yet.

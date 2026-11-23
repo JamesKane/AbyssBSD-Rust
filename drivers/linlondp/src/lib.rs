@@ -16,6 +16,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod card;
 pub mod discover;
 pub mod format;
 pub mod hw;

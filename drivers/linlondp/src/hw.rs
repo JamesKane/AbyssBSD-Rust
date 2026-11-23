@@ -278,11 +278,9 @@ impl Dpu {
         };
         self.set_mode(Self::mode_for(on))?;
         let x = &*self.w;
-        // Compositor: no inputs yet, then its size.
-        for n in 0..cu::INPUTS {
-            x.write(pipe.cu.offset + cu::INPUT_ID + 4 * n, 0);
-            x.write(pipe.cu.offset + cu::input_control(n), cu::IN_DISABLED);
-        }
+        // Compositor size. Its inputs are the layers' to set: a commit
+        // programs them before the pipeline's, so none is cleared here
+        // (see `clear`).
         x.write(pipe.cu.offset + cu::SIZE, size);
         // Image processor: the compositor in, 8 bits, no colour changes.
         x.write(pipe.ips.offset + ips::INPUT_ID0, pipe.cu.input_id(0));
@@ -353,6 +351,15 @@ impl Dpu {
         );
         x.write(c0 + cu::INPUT_ID + 4 * l, lay.block.input_id(0));
         Ok(())
+    }
+
+    /// Takes every layer of pipeline `p` off its compositor, for a
+    /// pipeline the firmware did not leave running. The caller flushes.
+    pub fn clear(&self, p: usize) {
+        let n = self.layout.pipes.get(p).map_or(0, |pipe| pipe.layers.len());
+        for l in 0..n {
+            self.hide(p, l);
+        }
     }
 
     /// Takes layer `l` of pipeline `p` off the display (section 03 §3.6).
