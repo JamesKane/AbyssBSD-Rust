@@ -131,6 +131,9 @@ struct Link {
     apb_mhz: u32,
     /// A link taken over from firmware, until the first enable decides.
     adopted: AtomicBool,
+    /// The link was shut down: the next bring-up re-initialises the host
+    /// side with a reset first (section 2.11.2, 2.1).
+    reinit_next: AtomicBool,
     /// What the monitor said, when last read.
     edid: SpinLock<Option<(Vec<u8>, edid::Edid)>>,
     sink_bpc: SpinLock<u32>,
@@ -209,10 +212,20 @@ impl EncoderHw for Encoder {
                 return;
             }
             l.reinit();
+        } else if l.reinit_next.swap(false, Ordering::AcqRel) {
+            l.reinit();
         }
-        if l.dptx.link_up(&m, bpc).is_err() {
-            return;
-        }
+        let up = match l.dptx.link_up(&m, bpc) {
+            Ok(up) => up,
+            Err(e) => {
+                bus::manager().log(format_args!("sky1_dp: link did not come up: {e:?}"));
+                return;
+            }
+        };
+        bus::manager().log(format_args!(
+            "sky1_dp: link up, {:?} x{}, {} bits a component",
+            up.trained.link.rate, up.trained.link.lanes, up.bpc
+        ));
         let s = thread();
         let mut c = l.vid_clk0.lock().take();
         if let Some(h) = c.as_mut() {
@@ -222,7 +235,9 @@ impl EncoderHw for Encoder {
         if let Some(a) = &l.adapter {
             a.set_pipeline0(sky1_dp_tx::stream::pixels_per_clock(m.clock_khz) == 2);
         }
-        let _ = l.dptx.stream_on(&m);
+        if let Err(e) = l.dptx.stream_on(&m) {
+            bus::manager().log(format_args!("sky1_dp: stream did not start: {e:?}"));
+        }
     }
 
     fn disable(&self) {
@@ -236,6 +251,7 @@ impl EncoderHw for Encoder {
         *l.vid_clk0.lock() = c;
         l.dptx.link_down();
         l.phy.link_off();
+        l.reinit_next.store(true, Ordering::Release);
     }
 }
 
@@ -436,6 +452,7 @@ impl Driver for SkyDp {
             reset: SpinLock::new(Some(reset)),
             apb_mhz,
             adopted: AtomicBool::new(lit),
+            reinit_next: AtomicBool::new(false),
             edid: SpinLock::new(None),
             sink_bpc: SpinLock::new(8),
         });
