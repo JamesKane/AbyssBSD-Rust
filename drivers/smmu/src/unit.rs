@@ -450,7 +450,14 @@ impl<H: Hw> Unit<H> {
             return Ok(());
         }
         let valid = cur[0] & 1 != 0;
-        if live && valid {
+        // An entry that bypasses needs nothing from the SMMU but word 0
+        // (its configuration field), so the other words are written first
+        // and word 0, one 64-bit store, switches it. Going through an
+        // invalid entry instead faults the DMA in flight: a display
+        // scanning out firmware's framebuffer reported C_BAD_STE on the
+        // board (2026-11-23).
+        let bypassing = Ste::decode(&cur) == Ok(Ste::Bypass);
+        if live && valid && !bypassing {
             // Break: no SMMU may see a half-written entry, so the old one
             // goes first.
             self.store_ste_word(sid, 0, 0)?;

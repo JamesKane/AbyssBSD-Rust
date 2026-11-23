@@ -338,10 +338,10 @@ fn new_entries_are_invalidated() {
 fn a_valid_entry_breaks_before_it_is_remade() {
     let mut u = unit(Config::board());
     u.enable().unwrap();
-    u.set_stream(0x40, Ste::Bypass).unwrap();
+    u.set_stream(0x40, Ste::Abort).unwrap();
     commands(&u);
     model(&u).clear_executed();
-    u.set_stream(0x40, Ste::Abort).unwrap();
+    u.set_stream(0x40, Ste::Bypass).unwrap();
     let m = model(&u);
     let ex: Vec<Command> = m.executed().to_vec();
     drop(m);
@@ -353,8 +353,7 @@ fn a_valid_entry_breaks_before_it_is_remade() {
     assert_eq!(ex.len(), 4, "{ex:?}");
     assert_eq!((ex[0], ex[2]), (cfgi, cfgi));
     assert!(matches!(ex[1], Command::Sync(_)) && matches!(ex[3], Command::Sync(_)));
-    // Config abort: terminated without an event.
-    assert_eq!(translate(&u, 0x40), Err(Termination::SteAbort));
+    assert!(matches!(translate(&u, 0x40), Ok(Translation::Bypass(_))));
     let events = model(&u).stats().events;
     u.set_stream(0x40, Ste::Invalid).unwrap();
     assert_eq!(u.stream(0x40), Ste::Invalid);
@@ -753,4 +752,22 @@ fn model_memory_is_what_the_unit_wrote() {
     assert_eq!(hw.load32(&m, 8), 0x5566_7788);
     assert_eq!(hw.load32(&m, 12), 0x1122_3344);
     assert!(hw.m.borrow().mem().read_u64(m + 8).is_some());
+}
+
+#[test]
+fn a_bypassing_entry_is_switched_without_going_invalid() {
+    // A display scanning out through a bypassed stream must not see an
+    // invalid entry while it moves to a translated one: one invalidation
+    // and sync, after word 0 is stored.
+    let mut u = unit(Config::board());
+    u.enable().unwrap();
+    u.set_stream(0x40, Ste::Bypass).unwrap();
+    commands(&u);
+    model(&u).clear_executed();
+    u.set_stream(0x40, Ste::Abort).unwrap();
+    let ex: Vec<Command> = model(&u).executed().to_vec();
+    assert_eq!(ex.len(), 2, "{ex:?}");
+    assert!(matches!(ex[0], Command::CfgiSte { .. }) && matches!(ex[1], Command::Sync(_)));
+    assert_eq!(u.stream(0x40), Ste::Abort);
+    assert_clean(&u);
 }
