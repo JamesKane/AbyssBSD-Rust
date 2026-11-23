@@ -304,13 +304,16 @@ fn scmi_shared_memory_is_declared() {
     let x = PLATFORM.extract(&mut i, &mut h, &devices);
     let shared = &x.description.shared;
     let paths: Vec<String> = shared.iter().map(|s| i.path(s.device).to_text()).collect();
-    assert_eq!(paths, [
+    assert_eq!(
+        paths,
+        [
             "\\_SB_.SHM0",
             "\\_SB_.SHM1",
             "\\_SB_.UCRU",
             "\\_SB_.CRU0",
             "\\_SB_.ACRU"
-        ]);
+        ]
+    );
     let ranges: Vec<_> = devices
         .iter()
         .map(|&d| {

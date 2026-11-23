@@ -614,3 +614,34 @@ named-component branch itself (QEMU has no named component behind an SMMU); the 
 Also unconfirmed until the board: that the firmware's sync polarities and porches are the ones the offered
 modes carry (a mismatch only costs a visible blank, by the fallback above), and that the pixel clock reads
 back as the SCMI rate it was set to.
+
+### 15.6 First board session (2026-11-23)
+
+Orange Pi 6 Plus, AbyssBSD booted once per kernel by `BootNext` from FreeBSD, serial console captured. Sway
+1.12 (pixman) now runs stably on the display processor's card, 1920x1080 at 60 Hz, on the HDMI output
+(unit 4); the atomic test commit and the real commit both succeed. What the board showed, in the order found:
+
+1. **Resets.** Firmware releases only the unit it uses for the boot display. The other four display units
+   stayed in reset, and the interconnect's monitor (the firmware's `IDM` lines on the serial console)
+   reported a non-secure access error for each. The driver now releases `rcsu_reset`, then `ip_reset`,
+   before the first register access (sky1-soc 02 §2.2, §2.4).
+2. **`MAX_LINE_SIZE`.** Reading a block's own `MAX_LINE_SIZE` (offset 8 of the first block) is refused on
+   this part, the same monitor line at `0x208` of each window. The walk uses the global line size for every
+   block and never reads it. A late bus error from the refused access may be what killed `init` (signal 10)
+   on the first boot; it did not recur once both reads were gone.
+3. **SMMU.** Moving a bypassed stream to a translated one went through an invalid entry, and the display
+   scanning the firmware framebuffer faulted (`C_BAD_STE`). A bypassing entry is now switched with one
+   64-bit store of word 0 after the other words are written, with no invalid window.
+4. **Shared register windows.** The USB-C PHY's control window (`UCRU`) lies inside the FCH reset
+   controller's window, and the audio one (`ACRU`) is shared with three audio devices. Both are declared,
+   as the S5 one was; before, the reset controller or a syscon failed to attach with `Claimed`.
+5. **Two cards.** Both the firmware framebuffer card and the native one existed for the same screen. The
+   native driver now retires the firmware card (`drm::retire_firmware_cards`) once its connector sees a
+   monitor, so only `card1` remains; the console keeps drawing on the framebuffer memory the display scans.
+
+Confirmed on hardware: the transmitter's auxiliary channel and EDID read (4 modes, first 1920x1080 at 60 Hz);
+adoption keeps the console lit; the first client modeset takes (the mode asked for is the one firmware ran).
+Still open: the sync polarity inversion and the rest of the list above need a mode that differs from
+firmware's; the connector's readout does not yet say the link rate and lanes; `sky1_dptx4` leaves three
+grants outstanding at detach (the card still holds its windows); the broker's named-component branch ran
+for the first time here and worked (streams of the unit translate; the framebuffer range kept scanning).

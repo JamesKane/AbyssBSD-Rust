@@ -371,16 +371,22 @@ impl Driver for Komeda {
         // card goes (docs/GRAPHICS.md §7.5).
         let connected = self.connector.detect() == drm::kms::Connection::Connected;
         let modes = self.connector.modes();
-        let first = modes.first().map_or(alloc::string::String::from("none"), |m| {
-            let hz = (u64::from(m.clock_khz) * 1000)
-                .checked_div(u64::from(m.htotal) * u64::from(m.vtotal))
-                .unwrap_or(0);
-            alloc::format!("{}x{}@{hz}", m.hdisplay, m.vdisplay)
-        });
+        let first = modes
+            .first()
+            .map_or(alloc::string::String::from("none"), |m| {
+                let hz = (u64::from(m.clock_khz) * 1000)
+                    .checked_div(u64::from(m.htotal) * u64::from(m.vtotal))
+                    .unwrap_or(0);
+                alloc::format!("{}x{}@{hz}", m.hdisplay, m.vdisplay)
+            });
         bus::manager().log(format_args!(
             "komeda{}: DisplayPort {}, {} mode(s), first {first}",
             self.unit,
-            if connected { "connected" } else { "disconnected" },
+            if connected {
+                "connected"
+            } else {
+                "disconnected"
+            },
             modes.len()
         ));
         if connected {
