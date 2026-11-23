@@ -1215,7 +1215,8 @@ fn wakeup_latency(s: &Sleepable) {
                     let woken = sh.seq.load(Ordering::Acquire) != i;
                     if !woken {
                         // Announced under the queue lock: once the waker
-                        // sees it, the sleeper is queued.
+                        // sees it, the sleeper is queued. (The one unlocked
+                        // run, right after a wakeup, finds `woken`.)
                         sh.asleep.store(i + 1, Ordering::Release);
                     }
                     woken

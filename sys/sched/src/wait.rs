@@ -38,7 +38,17 @@ impl WaitQueue {
     }
 
     /// Sleeps until `done` returns true. `done` runs with the queue locked
-    /// (and interrupts masked), so it must be short and must not sleep.
+    /// (and interrupts masked), so it must be short and must not sleep;
+    /// so that a wakeup is not lost, the thread is on the queue before the
+    /// lock is released with `done` false.
+    ///
+    /// Once the thread has slept and been woken, `done` is also tried
+    /// first without the lock, and the wait ends if it holds (what FreeBSD's
+    /// `msleep` does: it returns from a wakeup without looking at the
+    /// sleep queue again). `done` must therefore tolerate being run
+    /// unlocked then, and run again when it returns false: it may consume
+    /// what it waited for when it returns true, but must not publish
+    /// "this thread is queued" or the like when it returns false.
     pub fn wait_until(&self, _s: &crate::Sleepable, mut done: impl FnMut() -> bool) {
         loop {
             // Mask interrupts before taking the queue lock, so they stay
@@ -59,6 +69,12 @@ impl WaitQueue {
             crate::switch_away();
             hal::irq::restore(irq);
             crate::slept(wmesg, since);
+            // Woken: whoever woke us took us off the queue. If what we
+            // waited for is there, the queue's lock (a line the waker just
+            // wrote) need not be taken to find out again.
+            if done() {
+                return;
+            }
         }
     }
 
