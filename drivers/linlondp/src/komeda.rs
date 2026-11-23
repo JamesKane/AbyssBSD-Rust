@@ -70,11 +70,6 @@ struct DomainMapping {
 
 impl Drop for DomainMapping {
     fn drop(&mut self) {
-        bus::manager().log(format_args!(
-            "komeda: unmap {:#x}..{:#x}",
-            self.mapping.addr,
-            self.mapping.addr + self.mapping.len
-        ));
         self.domain.unmap(&self.mapping);
     }
 }
@@ -116,12 +111,6 @@ impl Platform for Machine {
                 let mapping = d
                     .map(&ranges, false, self.tag.constraints())
                     .map_err(|_| Errno::ENOMEM)?;
-                bus::manager().log(format_args!(
-                    "komeda: map {:#x}..{:#x} ({} run(s))",
-                    mapping.addr,
-                    mapping.addr + mapping.len,
-                    ranges.len()
-                ));
                 Ok(Mapped {
                     addr: mapping.addr,
                     // The addresses are the unit's, not the display

@@ -672,7 +672,13 @@ processor's and transmitter's computed timing (back-porch adjust, transfer unit,
 inverted sync polarities, link training at `Rbr x4`). It does not prove the polarities are right: a monitor
 that locks to the signal regardless of polarity would show the same.
 
-Open: five `F_TRANSLATION` faults from the unit's stream (`0xf4000`, `0x13caa00`, `0x13caa80`, `0x13cab00`,
-`0xfd3000`) at the moment of the mode set, then none; the display recovers. Not yet explained (a fetch from a
-stale layer address while the pipeline restarts, or a buffer unmapped before the latch). The DisplayPort
-transmitter's detach still leaves three grants outstanding.
+4. **Buffers released too early.** Five `F_TRANSLATION` faults from the unit's stream appeared at the mode
+   set. Logging each buffer's mapping and unmapping placed them: a fault inside a buffer's range right
+   after that buffer was unmapped, about halfway down the frame. Sway cycles three buffers, and a flip
+   can take effect a frame after its event is sent, so the display still read the buffer the previous
+   commit replaced when the next commit released it. A buffer is now released once three newer commits have
+   replaced it (`retire` in `drivers/linlondp/src/card.rs`). After that, no faults in 35 seconds of steady
+   state. If the latch can be later than one frame the fix would have to tie release to the interrupt that
+   confirms the latch; not seen.
+
+Open: the DisplayPort transmitter's detach still leaves three grants outstanding.
