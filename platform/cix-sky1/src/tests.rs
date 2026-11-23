@@ -308,7 +308,8 @@ fn scmi_shared_memory_is_declared() {
             "\\_SB_.SHM0",
             "\\_SB_.SHM1",
             "\\_SB_.UCRU",
-            "\\_SB_.CRU0"
+            "\\_SB_.CRU0",
+            "\\_SB_.ACRU"
         ]);
     let ranges: Vec<_> = devices
         .iter()
@@ -327,7 +328,8 @@ fn scmi_shared_memory_is_declared() {
             (0x0659_0000, 0x80),
             (0x065a_0000, 0x80),
             (0x0416_009c, 0x80),
-            (0x1600_0000, 0x1000)
+            (0x1600_0000, 0x1000),
+            (0x0711_0000, 0x1_0000)
         ]
     );
     let pairs: Vec<(String, String)> = overlaps(&ranges, &[], &declared)
@@ -350,6 +352,13 @@ fn scmi_shared_memory_is_declared() {
             (String::from("\\_SB_.MBX6"), String::from("\\_SB_.SHM0")),
             (String::from("\\_SB_.MBX7"), String::from("\\_SB_.SHM1")),
             (String::from("\\_SB_.RST0"), String::from("\\_SB_.CRU0")),
+            // The audio window: four devices share it.
+            (String::from("\\_SB_.ADSS"), String::from("\\_SB_.ACRU")),
+            (String::from("\\_SB_.ADSS"), String::from("\\_SB_.DCRU")),
+            (String::from("\\_SB_.ADSS"), String::from("\\_SB_.DSP_")),
+            (String::from("\\_SB_.ACRU"), String::from("\\_SB_.DCRU")),
+            (String::from("\\_SB_.ACRU"), String::from("\\_SB_.DSP_")),
+            (String::from("\\_SB_.DCRU"), String::from("\\_SB_.DSP_")),
         ]
     );
 }

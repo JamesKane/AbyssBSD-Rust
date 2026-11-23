@@ -119,6 +119,9 @@ impl PlatformSource for CixSky1 {
                 Ok(Some(aml::Uid::Integer(2))) => {
                     "USB-C PHY CRU: inside the FCH reset controller's window (RST1); clients lease fields"
                 }
+                Ok(Some(aml::Uid::Integer(0))) => {
+                    "audio CRU: the 64 KiB window the audio devices also use; clients lease fields"
+                }
                 _ => continue,
             };
             x.description
