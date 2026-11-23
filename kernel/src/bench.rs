@@ -1250,7 +1250,12 @@ fn wakeup_latency(s: &Sleepable) {
 /// table entries with what every CPU runs on, so invalidating it also
 /// costs the CPUs that merely answer.
 fn tlb_shootdown(s: &Sleepable) {
-    let va = VirtAddr::new(crate::mm::KVA.lock().alloc(4096, 4096).expect("bench: no kva"));
+    let va = VirtAddr::new(
+        crate::mm::KVA
+            .lock()
+            .alloc(4096, 4096)
+            .expect("bench: no kva"),
+    );
     crate::mm::map_fresh(va, 4096, pt::Attrs::KERNEL_RW).expect("bench: out of memory");
     throughput(s, "tlb.shootdown", 1, move |_| {
         crate::mm::flush_range(va, 4096);
@@ -1258,5 +1263,8 @@ fn tlb_shootdown(s: &Sleepable) {
         1
     });
     crate::mm::unmap_and_free(va, 4096);
-    crate::mm::KVA.lock().free(va.get(), 4096).expect("bench: kva free");
+    crate::mm::KVA
+        .lock()
+        .free(va.get(), 4096)
+        .expect("bench: kva free");
 }
