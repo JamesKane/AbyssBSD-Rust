@@ -265,6 +265,18 @@ impl Driver for Komeda {
             optional(cx.clock(Some("pipeline@0"))),
             optional(cx.clock(Some("pipeline@1"))),
         );
+        // Firmware releases only the unit it uses for the boot display; the
+        // others are held in reset, and the interconnect's monitor reports
+        // any access to a unit in reset (observed on the board, 2026-11-23).
+        // Release the subsystem's control block first, then the processor
+        // (sky1-soc 02 §2.2 and §2.4). Releasing a line already released
+        // changes nothing, so a unit firmware lit keeps scanning.
+        let mut rcsu = cx.reset(Some("rcsu_reset"))?;
+        let mut ip = cx.reset(Some("ip_reset"))?;
+        rcsu.deassert(s)
+            .map_err(|_| AttachError::Device("rcsu_reset"))?;
+        ip.deassert(s)
+            .map_err(|_| AttachError::Device("ip_reset"))?;
         let regs = cx.mmio_bytes(0)?;
         if regs.len() < WINDOW {
             return Err(AttachError::Device("register window too small"));
