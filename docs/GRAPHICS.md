@@ -681,4 +681,12 @@ that locks to the signal regardless of polarity would show the same.
    state. If the latch can be later than one frame the fix would have to tie release to the interrupt that
    confirms the latch; not seen.
 
-Open: the DisplayPort transmitter's detach still leaves three grants outstanding.
+5. **The detach leak.** The transmitter's detach left its three register windows outstanding (the ledger's
+   "detach left 3 grant(s) outstanding") because the display card holds its encoder and connector, and the
+   display unit's `remote-endpoint` link is an `Order` edge, which does not make the unit detach first. The
+   windows are now revocable (`Window` in `drivers/sky1-dp/src/lib.rs`): the driver gives them back at stop,
+   whichever detaches first, and later reads give 0 and writes nothing. The shutdown log no longer has the
+   line.
+
+Open: the original monitor with the real EDID and a mode-to-mode switch (the Acer has one mode); whether the
+vendor's sync polarities are right (only a monitor that checks them would say).
