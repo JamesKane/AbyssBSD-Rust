@@ -693,6 +693,24 @@ Restart test on the Acer (one mode): stopping Sway and starting it again takes t
 `output dpms off` and `on` brought the picture back but logged no new link bring-up, so it did not take the
 link down; it proves nothing about the shutdown path.
 
-Open: the original monitor with the real EDID and a mode-to-mode switch (the Acer has one mode; the 1920x1080
-to 1280x720 switch that failed there has not been run since the link-shutdown fix); whether the vendor's sync
-polarities are right (only a monitor that checks them would say).
+#### 15.6.2 The original monitor (a 4K panel behind a KVM switch)
+
+With the original monitor back, its EDID read failed in two new ways, both fixed:
+
+1. **Segment pointer.** The sink NACKed the E-DDC segment pointer (address `0x30`) that EDID blocks 2 and 3
+   need, so the whole EDID was thrown away and the fallback modes offered. An extension block that cannot be
+   read now ends the read and what was read stands (the base block carries the modes).
+2. **A transaction left open.** The refused request had the middle-of-transaction flag set, and after it the
+   sink stopped answering on the AUX channel (`link did not come up: Aux(Timeout)`, then the connector
+   reported disconnected). A failed I2C-over-AUX transaction is now closed with a bare address packet, as the
+   standard's helpers do. This is the likely reason, not proven: the next boots did not show the timeout.
+
+Then, on the board, with Sway: 3840x2160 at 60 Hz (the EDID's only mode here) comes up on `Hbr2 x4` at 8 bits
+a component and is stable, the first run of an HBR2 link and of the largest mode; a custom 1920x1080 mode
+(`Rbr x4`), then 1280x720 (`Rbr x2`), then 3840x2160 again, each switch a full link shutdown and bring-up,
+all stable, with no `F_TRANSLATION` faults. The resolution switch that went black before the link-shutdown fix
+(1920x1080 to 1280x720 on this monitor) now works.
+
+Open: the connector offers only the EDID's base block modes (CTA extension blocks and their video
+identification codes are not parsed; a monitor's 1080p comes from the extension block); the sync polarities
+(a monitor that locks regardless would show the same picture); the detach of the display card.
