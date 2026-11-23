@@ -599,14 +599,17 @@ is taken over instead of declined.
 - **If nothing could be shown** (no layer's buffer could be mapped), the firmware's picture is left as it
   is rather than replaced by a blank one.
 
-**The memory path is the open problem.** Firmware's scanout streams bypass the SMMU (IORT reserved-memory
-nodes), and a translated context would cut it off, so an adopted unit keeps passing through
-(`dma_tag_pass_through`) and can scan out only buffers that are one run of memory. Userland's dumb buffers
-are scattered pages, so on the boot display the first modeset keeps the console and shows nothing new.
-Either of these lets it show a client: a `Contiguous` buffer placement (the core returns `EOPNOTSUPP` for
-it today), or identity-mapping the reserved range (`0x84800000`, 8 MiB) into the unit's domain before its
-streams are translated (docs/IOMMU.md §4.9, listed there as built in M-G). The second also suits the other
-four units; it is the next piece.
+**The memory path.** Firmware's scanout streams bypass the SMMU (IORT reserved-memory nodes), so the unit
+gets one translated context for all five of its streams, and the reserved range (`0x84800000`, 8 MiB) is
+mapped to itself in that domain *before* any stream leaves bypass (docs/IOMMU.md §4.9): a display scanning
+the firmware framebuffer keeps scanning, and buffers mapped for client use are scattered pages through the
+domain, never on the reserved addresses. Built: `Domain::identity_map`; `Iommu::group_context`; the
+SMMU's group context (one domain and ASID for many streams, released once); the broker's named-component
+path; the reserved ranges a named component may remap (`SmmuNode::identity_for`). Tested on the host
+against the SMMU model (two streams starting in bypass, five ending translated, the framebuffer reading as
+itself on each, release) and on the corpus (each display unit gets the 8 MiB range, the other named
+components none); the kernel's SMMU boot cases still pass. Not exercised by any test: the broker's
+named-component branch itself (QEMU has no named component behind an SMMU); the board is its first run.
 
 Also unconfirmed until the board: that the firmware's sync polarities and porches are the ones the offered
 modes carry (a mismatch only costs a visible blank, by the fallback above), and that the pixel clock reads

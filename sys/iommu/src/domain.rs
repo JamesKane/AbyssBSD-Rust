@@ -267,6 +267,41 @@ impl Domain {
             })
     }
 
+    /// Maps `[start, end)` (rounded out to pages) to the same physical
+    /// addresses: reserved memory a device already uses by address (an
+    /// RMR range, docs/IOMMU.md §4.9), entered before the device's streams
+    /// switch to this domain so its traffic does not stop. The space never
+    /// hands the range out. Ranges that overlap an earlier identity range
+    /// are clipped to what is new.
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::NoMemory`], or [`DomainError::Invalid`] for a range
+    /// that overlaps an ordinary mapping or reservation.
+    pub fn identity_map(&self, start: u64, end: u64) -> Result<(), DomainError> {
+        let s = start & !(PAGE - 1);
+        let e = end.min(SPACE_48).next_multiple_of(PAGE);
+        if s >= e {
+            return Ok(());
+        }
+        let added = self
+            .space
+            .lock()
+            .identity(Iova::new(s), Iova::new(e))
+            .map_err(|g| match g {
+                iommu::gas::GasError::NoMemory => DomainError::NoMemory,
+                _ => DomainError::Invalid,
+            })?;
+        let Some((a, b)) = added else {
+            return Ok(());
+        };
+        let (a, b) = (a.get(), b.get());
+        self.enter(a, &[(a, b - a)], pt::smmu::dma(true, self.cache()))
+            .map_err(|_| DomainError::NoMemory)?;
+        let _ = self.invalidate(a, b - a);
+        Ok(())
+    }
+
     /// The entries of the space, in address order (diagnostics, tests).
     #[must_use]
     pub fn entries(&self) -> Vec<iommu::gas::Entry> {

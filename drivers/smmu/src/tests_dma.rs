@@ -801,3 +801,82 @@ fn random_maps_and_strict_unmaps_against_reference() {
         r.assert_clean();
     }
 }
+
+#[test]
+fn a_device_with_several_streams_shares_one_domain_and_keeps_its_reserved_memory() {
+    use iommu::ste::Ste;
+    let r = Rig::new(coherent());
+    // A display controller: five streams, two of them (as the table's
+    // reserved-memory node says) bypassed from the start, scanning out a
+    // firmware framebuffer.
+    let streams = [0x6u32, 0x7, 0x9, 0xa, 0xb];
+    let fb = BASE + 0x10_0000;
+    let identity = [(fb, 0x8000u64)];
+    r.shared.set_stream(0x6, Ste::Bypass).unwrap();
+    r.shared.set_stream(0x7, Ste::Bypass).unwrap();
+    assert_eq!(r.probe(0x6, fb, Access::READ), Ok(Translation::Bypass(fb)));
+    let req = ContextRequest {
+        want: Want::Translate,
+        name: "komeda4",
+        rid: 0,
+        segment: 0,
+        coherent: false,
+        reserved: &[],
+    };
+    let Context::Translated(d) = r.provider.group_context(&streams, &req, &identity).unwrap()
+    else {
+        panic!("pass-through");
+    };
+    // Every stream now translates through the one domain, and the
+    // framebuffer reads as itself on each.
+    for &s in &streams {
+        match r.probe(s, fb + 0x1234, Access::READ) {
+            Ok(Translation::Mapped { pa, .. }) => assert_eq!(pa, fb + 0x1234, "stream {s:#x}"),
+            other => panic!("stream {s:#x}: {other:?}"),
+        }
+    }
+    // The same context again for any of the streams.
+    let Context::Translated(again) = r.provider.context(0x9, &req).unwrap() else {
+        panic!();
+    };
+    assert!(Arc::ptr_eq(&again, &d));
+    // Buffers mapped through it never land on the framebuffer's addresses.
+    let tag = DmaTag::translated(r.mem, DmaConstraints::UNLIMITED, d);
+    let pa = r.take(4);
+    let m = tag
+        .map::<dir::ToDevice, _>(r.buf(pa, 0x4000, true))
+        .unwrap();
+    let s = m.segments()[0];
+    assert!(s.bus + s.len <= fb || s.bus >= fb + 0x8000, "{s:?}");
+    drop(m);
+    // Releasing the streams one at a time works, and they abort again.
+    for &s in &streams {
+        r.shared.release(s).unwrap();
+    }
+    assert!(matches!(
+        r.probe(0x6, fb, Access::READ),
+        Err(Termination::Fault(Record::BadSte))
+    ));
+    r.assert_clean();
+}
+
+#[test]
+fn a_group_that_does_not_translate_bypasses_every_stream() {
+    let r = Rig::new(coherent());
+    let req = ContextRequest {
+        want: Want::PassThrough,
+        name: "komeda0",
+        rid: 0,
+        segment: 0,
+        coherent: false,
+        reserved: &[],
+    };
+    let c = r.provider.group_context(&[0x30, 0x31], &req, &[]).unwrap();
+    assert!(matches!(c, Context::PassThrough));
+    for s in [0x30, 0x31] {
+        assert_eq!(
+            r.probe(s, 0x4000, Access::READ),
+            Ok(Translation::Bypass(0x4000))
+        );
+    }
+}

@@ -78,6 +78,29 @@ pub struct NamedStreams {
 }
 
 impl SmmuNode {
+    /// The reserved ranges a device with `streams` may use through a
+    /// domain: those of the RMR nodes on this unit that name one of its
+    /// streams and permit remapping (docs/IOMMU.md §4.9).
+    #[must_use]
+    pub fn identity_for(&self, streams: &[RangeInclusive<u32>]) -> Vec<(u64, u64)> {
+        let mut out: Vec<(u64, u64)> = Vec::new();
+        for r in self.reserved.iter().filter(|r| r.remap) {
+            let hit = r.streams.iter().any(|a| {
+                streams
+                    .iter()
+                    .any(|b| a.start() <= b.end() && b.start() <= a.end())
+            });
+            if hit {
+                for &range in &r.ranges {
+                    if !out.contains(&range) {
+                        out.push(range);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Its interrupts' GSIVs in FreeBSD's resource order: event, PRI,
     /// sync, gerror.
     #[must_use]

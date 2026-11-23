@@ -291,16 +291,11 @@ impl Driver for Komeda {
             // `_CCA` is 0 on this board and the unit does not snoop.
             coherency: Coherency::NonCoherent,
         };
-        // The firmware's scanout streams bypass the SMMU (an RMR node), and
-        // a translated context would cut it off. Until the reserved range
-        // is identity-mapped for a translated one (docs/IOMMU.md §4.9, not
-        // built), a unit taken over keeps passing through, which scans out
-        // only buffers that are one run of memory.
-        let tag = if any_lit {
-            cx.dma_tag_pass_through(constraints)?
-        } else {
-            cx.dma_tag(constraints)?
-        };
+        // The unit's streams get one translated context; the firmware's
+        // framebuffer (an RMR range) is mapped to itself in it before the
+        // streams switch from bypass (docs/IOMMU.md §4.9), so a display
+        // scanning it out keeps scanning.
+        let tag = cx.dma_tag(constraints)?;
         // The transmitter of the same number gives the output; until it
         // has attached there is nothing to build the card for.
         let Some(out) = sky1_dp::outputs::lookup(unit) else {

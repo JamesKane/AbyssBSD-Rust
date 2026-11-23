@@ -600,15 +600,126 @@ where
         })
     }
 
+    /// One context for all `streams` of a device (an IORT named
+    /// component), in one domain whose `identity` ranges are mapped to
+    /// themselves before any stream leaves bypass: a display controller
+    /// scanning out firmware's framebuffer keeps scanning (docs/IOMMU.md
+    /// §4.9). Streams a context already covers share it.
+    fn group_context(
+        &self,
+        streams: &[u32],
+        req: &bus::iommu::ContextRequest<'_>,
+        identity: &[(u64, u64)],
+    ) -> Result<bus::iommu::Context, unit::Error> {
+        use bus::iommu::{Context, Want};
+        let Some(&first) = streams.first() else {
+            return Err(unit::Error::NoStream(0));
+        };
+        let mut ctxs = self.contexts.lock();
+        if let Some(c) = ctxs.get(&first) {
+            return Ok(match (&c.domain, req.want) {
+                (Some(d), Want::Translate) => Context::Translated(Arc::clone(d) as _),
+                _ => Context::PassThrough,
+            });
+        }
+        let label = |s: u32| alloc::format!("{} (stream {s:#x})", req.name);
+        if !(self.translates() && req.want == Want::Translate) {
+            for &s in streams {
+                self.set_stream(s, Ste::Bypass)?;
+                ctxs.insert(
+                    s,
+                    Ctx {
+                        domain: None,
+                        label: label(s),
+                    },
+                );
+            }
+            return Ok(Context::PassThrough);
+        }
+        let mem = self.tables.ok_or(unit::Error::NoMemory)?;
+        let (asid, features) = self
+            .with_unit(|u| u.alloc_asid().map(|a| (a, *u.features())))
+            .unwrap_or(Err(unit::Error::NoStream(first)))?;
+        let oas = features.idr5.oas;
+        let me: Weak<dyn Invalidate> = self.me.clone();
+        let built = Domain::new(
+            mem,
+            me,
+            Params {
+                asid: asid.0,
+                reach: 1u64 << oas.bits(),
+                walk_coherent: features.coherent,
+                device_coherent: req.coherent,
+            },
+        )
+        .map_err(|_| unit::Error::NoMemory)
+        .and_then(|d| {
+            for &(start, len) in req.reserved {
+                d.reserve(start, start.saturating_add(len))
+                    .map_err(|_| unit::Error::NoMemory)?;
+            }
+            // Before any stream switches.
+            for &(base, len) in identity {
+                d.identity_map(base, base.saturating_add(len))
+                    .map_err(|_| unit::Error::NoMemory)?;
+            }
+            Ok(d)
+        });
+        let d = match built {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = self.with_unit(|u| u.free_asid(asid));
+                return Err(e);
+            }
+        };
+        let cd = ContextDescriptor::new(asid, PhysAddr::new(d.root()), oas, features.coherent);
+        let mut done: Vec<u32> = Vec::new();
+        for &s in streams {
+            let r = self
+                .with_unit(|u| u.attach_stage1(s, &cd))
+                .unwrap_or(Err(unit::Error::NoStream(s)));
+            if let Err(e) = r {
+                // Back to bypass for the streams already moved, which were
+                // bypassed or aborting before; the display must not stop.
+                for &t in &done {
+                    let _ = self.set_stream(t, Ste::Bypass);
+                }
+                let _ = self.with_unit(|u| u.free_asid(asid));
+                return Err(e);
+            }
+            done.push(s);
+        }
+        for &s in streams {
+            ctxs.insert(
+                s,
+                Ctx {
+                    domain: Some(Arc::clone(&d)),
+                    label: label(s),
+                },
+            );
+        }
+        Ok(Context::Translated(d))
+    }
+
     /// Ends `stream`'s context: its STE invalid (its DMA aborts again),
-    /// its domain's ASID and descriptor freed. The domain itself goes when
-    /// its last tag does.
+    /// its domain's ASID and descriptor freed once no stream uses the
+    /// domain. The domain itself goes when its last tag does.
     fn release(&self, stream: u32) -> Result<(), unit::Error> {
-        let Some(c) = self.contexts.lock().remove(&stream) else {
-            return Ok(());
+        let (c, shared) = {
+            let mut ctxs = self.contexts.lock();
+            let Some(c) = ctxs.remove(&stream) else {
+                return Ok(());
+            };
+            let shared = c.domain.as_ref().is_some_and(|d| {
+                ctxs.values()
+                    .any(|o| o.domain.as_ref().is_some_and(|x| Arc::ptr_eq(x, d)))
+            });
+            (c, shared)
         };
         self.set_stream(stream, Ste::Invalid)?;
-        if let Some(d) = c.domain {
+        if let Some(d) = c.domain
+            && !shared
+        {
             self.with_unit(|u| u.free_asid(Asid(d.asid())))
                 .unwrap_or(Ok(()))?;
         }
@@ -641,6 +752,17 @@ where
         req: &bus::iommu::ContextRequest<'_>,
     ) -> Result<bus::iommu::Context, bus::iommu::IommuError> {
         self.0.context(stream, req).map_err(unit::Error::for_bus)
+    }
+
+    fn group_context(
+        &self,
+        streams: &[u32],
+        req: &bus::iommu::ContextRequest<'_>,
+        identity: &[(u64, u64)],
+    ) -> Result<bus::iommu::Context, bus::iommu::IommuError> {
+        self.0
+            .group_context(streams, req, identity)
+            .map_err(unit::Error::for_bus)
     }
 }
 

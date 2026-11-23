@@ -862,6 +862,16 @@ fn opi6p_iort() {
             }
             Translated::Named { streams } => assert!(!streams.is_empty()),
         }
+        // A display controller's identity range is the firmware
+        // framebuffer; the other named components have none.
+        if let Translated::Named { streams } = &c.how {
+            let want: Vec<(u64, u64)> = if c.path.starts_with("\\_SB_.DPU") {
+                alloc::vec![(0x8480_0000, 8 << 20)]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(p.smmus[c.smmu].identity_for(streams), want, "{}", c.path);
+        }
     }
     let absent: Vec<&str> = p.notes.iter().map(String::as_str).collect();
     assert_eq!(

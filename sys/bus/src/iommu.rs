@@ -110,6 +110,25 @@ pub trait Iommu: Send + Sync {
     ///
     /// Why the stream has no context: its DMA still aborts.
     fn context(&self, stream: u32, req: &ContextRequest<'_>) -> Result<Context, IommuError>;
+
+    /// One context for a device that uses several `streams` (an IORT named
+    /// component: a display controller has five), with `identity` ranges
+    /// (base, length) mapped to themselves before any stream switches to
+    /// it: memory firmware set the device scanning out. A unit that does
+    /// not translate gives [`Context::PassThrough`].
+    ///
+    /// # Errors
+    ///
+    /// [`IommuError::NoStream`] from a unit that does not do this.
+    fn group_context(
+        &self,
+        streams: &[u32],
+        req: &ContextRequest<'_>,
+        identity: &[(u64, u64)],
+    ) -> Result<Context, IommuError> {
+        let _ = (streams, req, identity);
+        Err(IommuError::NoStream)
+    }
 }
 
 /// The bus of a node with a requester ID, told when its requester gets a
@@ -160,6 +179,23 @@ impl IommuSource {
             return Err(IommuError::Revoked);
         }
         self.imp.context(stream, req)
+    }
+
+    /// [`Iommu::group_context`].
+    ///
+    /// # Errors
+    ///
+    /// The provider's, or [`IommuError::Revoked`].
+    pub fn group_context(
+        &self,
+        streams: &[u32],
+        req: &ContextRequest<'_>,
+        identity: &[(u64, u64)],
+    ) -> Result<Context, IommuError> {
+        if self.revoked.load(Ordering::Acquire) {
+            return Err(IommuError::Revoked);
+        }
+        self.imp.group_context(streams, req, identity)
     }
 }
 
@@ -215,6 +251,9 @@ pub enum Translation {
         unit: DeviceId,
         /// Its streams, mapping by mapping.
         streams: Vec<RangeInclusive<u32>>,
+        /// Reserved memory (RMR ranges the OS may remap) its streams
+        /// reach, as (base, length): identity-mapped in its domain.
+        identity: Vec<(u64, u64)>,
     },
 }
 
@@ -242,6 +281,15 @@ impl Translation {
         match self {
             Self::Pci { windows, .. } => windows,
             Self::Named { .. } => &[],
+        }
+    }
+
+    /// The ranges mapped to themselves in a domain of this translation.
+    #[must_use]
+    pub fn identity(&self) -> &[(u64, u64)] {
+        match self {
+            Self::Pci { .. } => &[],
+            Self::Named { identity, .. } => identity,
         }
     }
 
@@ -296,7 +344,9 @@ mod tests {
         let named = Translation::Named {
             unit,
             streams: alloc::vec![0..=0, 3..=5],
+            identity: alloc::vec![(0x8480_0000, 0x80_0000)],
         };
+        assert_eq!(named.identity(), [(0x8480_0000, 0x80_0000)]);
         assert_eq!(named.stream(0), None);
     }
 }

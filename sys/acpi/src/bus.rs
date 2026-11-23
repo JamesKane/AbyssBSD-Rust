@@ -915,7 +915,16 @@ impl Driver for AcpiBus {
                 }
 
                 crate::iort::Translated::Named { streams } => {
-                    bus::iommu::Translation::Named { unit, streams }
+                    let identity = iort
+                        .smmus
+                        .get(c.smmu)
+                        .map(|s| s.identity_for(&streams))
+                        .unwrap_or_default();
+                    bus::iommu::Translation::Named {
+                        unit,
+                        streams,
+                        identity,
+                    }
                 }
             };
             cx.set_dma_translation(consumer, tr);

@@ -1059,6 +1059,36 @@ impl Manager {
         let Some(tr) = self.dma_translation(s, id) else {
             return Ok(None);
         };
+        // A named component has no requester: all its streams share one
+        // context.
+        if let crate::iommu::Translation::Named {
+            unit,
+            streams,
+            identity,
+        } = &tr
+        {
+            let unit = self
+                .topo
+                .read(s)
+                .node(*unit)
+                .and_then(|n| n.provides.iommu.clone());
+            let Some(unit) = unit else {
+                return Ok(None);
+            };
+            let ids: Vec<u32> = streams.iter().flat_map(|r| r.clone()).collect();
+            let name = self
+                .nameunit(id, s)
+                .unwrap_or_else(|| String::from("named component"));
+            let req = crate::iommu::ContextRequest {
+                want,
+                name: &name,
+                rid: 0,
+                segment: 0,
+                coherent: self.dma_limits(s, id).coherency == vm::dma::Coherency::Coherent,
+                reserved: &[],
+            };
+            return unit.group_context(&ids, &req, identity).map(Some);
+        }
         // A device below a PCI function (a virtio device on its transport,
         // a USB device) does its DMA as that function: the nearest
         // requester ID up the tree is its (FreeBSD's `iommu_get_requester`
