@@ -300,6 +300,51 @@ impl<'a> PhysAllocator<'a> {
         self.alloc_in_where(order, d, |_| true)
     }
 
+    /// Takes up to `want` consecutive frames as single allocated pages
+    /// (each freed alone, at order 0) from the smallest free block there
+    /// is, in `domain` first: a cache refill's batch from one block, not
+    /// one allocation and one split a page (`vm_phys_alloc_npages`). A
+    /// block larger than `want` gives its low end and keeps the rest as
+    /// free blocks. Returns the first frame and how many.
+    pub fn alloc_run(&mut self, domain: DomainId, want: usize) -> Option<(Pfn, usize)> {
+        if want == 0 {
+            return None;
+        }
+        let n = self.ndomains.max(1);
+        (0..n)
+            .map(|k| (domain.index() + k) % n)
+            .find_map(|d| self.alloc_run_in(d, want))
+    }
+
+    fn alloc_run_in(&mut self, d: usize, want: usize) -> Option<(Pfn, usize)> {
+        let o = (0..ORDERS).find(|&o| self.domains[d].heads[o] != NIL)?;
+        let i = ix(self.domains[d].heads[o]);
+        self.unlink(d, i, o);
+        let block = 1usize << o;
+        let take = block.min(want);
+        for k in 0..take {
+            self.pages[i + k].state = PageState::Allocated;
+            self.pages[i + k].order = 0;
+        }
+        // The rest of the block, as the largest aligned blocks that fit
+        // (its low end is gone, so none can merge with a free neighbor:
+        // the block's own buddy was not free).
+        let mut at = take;
+        while at < block {
+            let mut k = at.trailing_zeros() as usize;
+            while at + (1 << k) > block {
+                k -= 1;
+            }
+            let j = i + at;
+            self.pages[j].state = PageState::Free;
+            self.pages[j].order = Order(u8::try_from(k).unwrap_or(0)).get();
+            self.push(d, j, k);
+            at += 1 << k;
+        }
+        self.domains[d].free_pages -= take as u64;
+        Some((self.pfn_at(i), take))
+    }
+
     /// Allocates a block of `order` lying wholly below frame `limit` (for
     /// devices that cannot address all of memory). Slower than
     /// [`PhysAllocator::alloc`]: it searches the free lists.
@@ -542,12 +587,14 @@ impl PageMagazine {
             .min(usize::try_from(room).unwrap_or(usize::MAX));
         let mut got = 0;
         while got < want {
-            let Some(p) = a.alloc(Order::ZERO, domain) else {
+            let Some((first, n)) = a.alloc_run(domain, want - got) else {
                 break;
             };
-            self.pfns[self.len] = p;
-            self.len += 1;
-            got += 1;
+            for k in 0..n {
+                self.pfns[self.len] = first.add(k as u64);
+                self.len += 1;
+            }
+            got += n;
         }
         got
     }
@@ -806,6 +853,29 @@ mod tests {
             m.drain(a, true).unwrap();
             assert!(m.is_empty());
             assert_eq!(a.stats().free, total);
+        });
+    }
+
+    #[test]
+    fn a_run_comes_from_the_smallest_block_and_leaves_the_rest() {
+        with(&[seg(0, 256, 0)], |a| {
+            a.add_free(Pfn(0), Pfn(256));
+            // One page out of the 256 block leaves 1+2+4+..+128 free.
+            let one = a.alloc(Order::ZERO, DomainId(0)).unwrap();
+            // The smallest block is the single page next to it.
+            let (p, n) = a.alloc_run(DomainId(0), 32).unwrap();
+            assert_eq!((p.0, n), (1, 1));
+            let (p, n) = a.alloc_run(DomainId(0), 32).unwrap();
+            assert_eq!((p.0, n), (2, 2));
+            // Wanting less than the smallest block splits it.
+            let (p, n) = a.alloc_run(DomainId(0), 3).unwrap();
+            assert_eq!((p.0, n), (4, 3));
+            assert_eq!(a.stats().free, 256 - 1 - 1 - 2 - 3);
+            for f in [one, Pfn(1), Pfn(2), Pfn(3), Pfn(4), Pfn(5), Pfn(6)] {
+                a.free(f, Order::ZERO).unwrap();
+            }
+            assert_eq!(a.stats().free, 256);
+            assert_eq!(a.free_blocks(DomainId(0))[8], 1, "merged back whole");
         });
     }
 
