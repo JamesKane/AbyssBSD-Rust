@@ -130,8 +130,14 @@ impl Card {
         UNITS.lock().remove(&self.unit);
     }
 
-    /// A new open file: the first one becomes master if there is none.
-    pub(crate) fn open_file(self: &Arc<Self>) -> Result<Arc<Open>, Errno> {
+    /// A new open file, for a client inside the kernel (the console,
+    /// tests); devfs makes the same for each open. The first file
+    /// opened becomes master if there is none.
+    ///
+    /// # Errors
+    ///
+    /// `ENODEV` if the card is gone.
+    pub fn open_file(self: &Arc<Self>) -> Result<Arc<Open>, Errno> {
         if self.is_revoked() {
             return Err(Errno::ENODEV);
         }
@@ -342,6 +348,24 @@ impl Open {
 
     fn ready(&self) -> bool {
         !self.events.lock().queue.is_empty()
+    }
+
+    /// Sets a display controller from inside the kernel: `a` is the
+    /// older set-controller call's argument (a framebuffer of 0 turns it
+    /// off), `connectors` the connectors' numbers. Waits for the frame.
+    ///
+    /// # Errors
+    ///
+    /// As the set-controller ioctl: `EACCES` unless this file is master,
+    /// `ENOENT` for an object that does not exist, `EINVAL` for a state
+    /// that cannot be shown.
+    pub fn set_crtc(
+        &self,
+        s: &Sleepable,
+        a: &abi::drm::DrmModeCrtc,
+        connectors: &[u32],
+    ) -> Result<(), Errno> {
+        crate::atomic::set_crtc_with(self, s, a, connectors)
     }
 
     /// Whether this file is the device's master.

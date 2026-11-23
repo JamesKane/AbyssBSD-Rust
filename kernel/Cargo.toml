@@ -29,6 +29,7 @@ intmap = { path = "../lib/intmap" }
 bootproto = { path = "../boot/bootproto" }
 bus = { path = "../sys/bus" }
 drm = { path = "../sys/drm" }
+drm-fourcc = { path = "../lib/drm-fourcc" }
 gop-kms = { path = "../drivers/gop-kms" }
 evdev = { path = "../sys/evdev" }
 input = { path = "../sys/input" }

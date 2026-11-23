@@ -653,6 +653,7 @@ dependencies = [
  "devtree",
  "driver-table",
  "drm",
+ "drm-fourcc",
  "efi",
  "elf",
  "evdev",

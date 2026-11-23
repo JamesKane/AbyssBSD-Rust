@@ -157,6 +157,28 @@ fn switch_off(k: &Kms, st: &mut State, crtc: usize) {
 /// Set a controller: a framebuffer, a mode and connectors at once (the
 /// older, pre-atomic way). A framebuffer of 0 turns the controller off.
 pub(crate) fn set_crtc(f: &Open, s: &Sleepable, a: &mut DrmModeCrtc) -> Result<usize, Errno> {
+    let count = usize::try_from(a.count_connectors).map_err(|_| Errno::EINVAL)?;
+    if count > 32 {
+        return Err(Errno::EINVAL);
+    }
+    // Connectors are named only when the controller is being turned on.
+    let listed = if a.fb_id == 0 || a.mode_valid == 0 {
+        Vec::new()
+    } else {
+        le32(&read_user(a.set_connectors_ptr, count, 4)?)
+    };
+    set_crtc_with(f, s, a, &listed)?;
+    Ok(0)
+}
+
+/// [`set_crtc`] with the connectors given as numbers rather than a user
+/// address: the same call for a client inside the kernel.
+pub(crate) fn set_crtc_with(
+    f: &Open,
+    s: &Sleepable,
+    a: &DrmModeCrtc,
+    listed: &[u32],
+) -> Result<(), Errno> {
     let k = master_kms(f)?;
     let ci = k.crtc_index(ObjId(a.crtc_id)).ok_or(Errno::ENOENT)?;
     let id = Some(k.crtcs[ci].id);
@@ -173,11 +195,6 @@ pub(crate) fn set_crtc(f: &Open, s: &Sleepable, a: &mut DrmModeCrtc) -> Result<u
         if x > 0xffff || y > 0xffff {
             return Err(Errno::EINVAL);
         }
-        let count = usize::try_from(a.count_connectors).map_err(|_| Errno::EINVAL)?;
-        if count > 32 {
-            return Err(Errno::EINVAL);
-        }
-        let listed = le32(&read_user(a.set_connectors_ptr, count, 4)?);
         let pi = primary_of(k, ci)?;
         let c = &mut new.crtcs[ci];
         c.active = true;
@@ -202,7 +219,7 @@ pub(crate) fn set_crtc(f: &Open, s: &Sleepable, a: &mut DrmModeCrtc) -> Result<u
         };
         if !listed.is_empty() {
             let mut ks = Vec::new();
-            for l in &listed {
+            for l in listed {
                 ks.push(k.connector_index(ObjId(*l)).ok_or(Errno::ENOENT)?);
             }
             for (i, c) in new.conns.iter_mut().enumerate() {
@@ -224,8 +241,7 @@ pub(crate) fn set_crtc(f: &Open, s: &Sleepable, a: &mut DrmModeCrtc) -> Result<u
             allow_modeset: true,
             ..Flags::default()
         },
-    )?;
-    Ok(0)
+    )
 }
 
 /// Flip a controller's primary plane to another framebuffer at the

@@ -15,6 +15,8 @@ use ktest::ktest;
 use crate::arch;
 use crate::devices::find_named;
 
+mod drm_card;
+
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod sky_i2c;
 

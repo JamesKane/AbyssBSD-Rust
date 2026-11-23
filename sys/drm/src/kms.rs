@@ -449,6 +449,25 @@ impl Kms {
         self.encoders.iter().position(|e| e.id == id)
     }
 
+    /// The numbers of the display controllers, in the order they were
+    /// built.
+    #[must_use]
+    pub fn crtc_ids(&self) -> Vec<u32> {
+        self.crtcs.iter().map(|c| c.id.0).collect()
+    }
+
+    /// The numbers of the planes, in the order they were built.
+    #[must_use]
+    pub fn plane_ids(&self) -> Vec<u32> {
+        self.planes.iter().map(|c| c.id.0).collect()
+    }
+
+    /// The numbers of the connectors, in the order they were built.
+    #[must_use]
+    pub fn connector_ids(&self) -> Vec<u32> {
+        self.connectors.iter().map(|c| c.id.0).collect()
+    }
+
     /// The framebuffer `id`.
     #[must_use]
     pub fn fb(&self, id: ObjId) -> Option<Arc<Fb>> {
