@@ -293,9 +293,9 @@ fn reference_names() {
     }
 }
 
-/// The SCMI shared memory is declared shared with its mailbox, and the FCH
-/// CRU with the reset controller: those three overlaps, and no other,
-/// become declared, so each entry still applies.
+/// The SCMI shared memory is declared shared with its mailbox, and the two
+/// CRUs with their reset controllers: those overlaps, and no other, become
+/// declared, so each entry still applies.
 #[test]
 fn scmi_shared_memory_is_declared() {
     use acpi::ranges::{Party, consumed, declared, overlaps};
@@ -304,7 +304,12 @@ fn scmi_shared_memory_is_declared() {
     let x = PLATFORM.extract(&mut i, &mut h, &devices);
     let shared = &x.description.shared;
     let paths: Vec<String> = shared.iter().map(|s| i.path(s.device).to_text()).collect();
-    assert_eq!(paths, ["\\_SB_.SHM0", "\\_SB_.SHM1", "\\_SB_.CRU0"]);
+    assert_eq!(paths, [
+            "\\_SB_.SHM0",
+            "\\_SB_.SHM1",
+            "\\_SB_.UCRU",
+            "\\_SB_.CRU0"
+        ]);
     let ranges: Vec<_> = devices
         .iter()
         .map(|&d| {
@@ -321,6 +326,7 @@ fn scmi_shared_memory_is_declared() {
         [
             (0x0659_0000, 0x80),
             (0x065a_0000, 0x80),
+            (0x0416_009c, 0x80),
             (0x1600_0000, 0x1000)
         ]
     );
@@ -334,6 +340,9 @@ fn scmi_shared_memory_is_declared() {
     assert_eq!(
         pairs,
         [
+            // The USB-C PHY's CRU lies inside the FCH reset controller's
+            // window.
+            (String::from("\\_SB_.UCRU"), String::from("\\_SB_.RST1")),
             // The S5 window's other occupant (the power-domain controller)
             // overlaps both, as it always did.
             (String::from("\\_SB_.PDC0"), String::from("\\_SB_.RST0")),

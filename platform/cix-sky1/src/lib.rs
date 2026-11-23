@@ -104,17 +104,26 @@ impl PlatformSource for CixSky1 {
                     .push(devtree::platform::SharedRange { device, why });
             }
         }
-        // The FCH CRU (`CRU0`, `CIXHA018` unit 4) has the S5 reset
-        // controller's window: its clients lease fields of it.
+        // Two `CIXHA018` windows lie inside a reset controller's: the FCH
+        // CRU (`CRU0`, unit 4) is the S5 reset controller's whole window,
+        // and the USB-C PHY's (`UCRU`, unit 2) is `0x9C..0x11C` of the FCH
+        // reset controller's. Their clients lease fields of them.
         for &d in devices {
-            let is_cru = interp.hid(d, host).ok().flatten().as_deref() == Some("CIXHA018")
-                && matches!(interp.uid(d, host), Ok(Some(aml::Uid::Integer(4))));
-            if is_cru {
-                x.description.shared.push(devtree::platform::SharedRange {
-                    device: d,
-                    why: "FCH CRU: the same 4 KiB as the S5 reset controller (RST0); clients lease fields",
-                });
+            if interp.hid(d, host).ok().flatten().as_deref() != Some("CIXHA018") {
+                continue;
             }
+            let why = match interp.uid(d, host) {
+                Ok(Some(aml::Uid::Integer(4))) => {
+                    "FCH CRU: the same 4 KiB as the S5 reset controller (RST0); clients lease fields"
+                }
+                Ok(Some(aml::Uid::Integer(2))) => {
+                    "USB-C PHY CRU: inside the FCH reset controller's window (RST1); clients lease fields"
+                }
+                _ => continue,
+            };
+            x.description
+                .shared
+                .push(devtree::platform::SharedRange { device: d, why });
         }
         x
     }
