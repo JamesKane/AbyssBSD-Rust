@@ -711,6 +711,24 @@ a component and is stable, the first run of an HBR2 link and of the largest mode
 all stable, with no `F_TRANSLATION` faults. The resolution switch that went black before the link-shutdown fix
 (1920x1080 to 1280x720 on this monitor) now works.
 
-Open: the connector offers only the EDID's base block modes (CTA extension blocks and their video
-identification codes are not parsed; a monitor's 1080p comes from the extension block); the sync polarities
-(a monitor that locks regardless would show the same picture); the detach of the display card.
+#### 15.6.3 CTA-861 extension blocks and the mode list
+
+The connector had offered only the base block's one mode (the 4K panel's preferred timing). `lib/edid` now
+reads CTA-861 extension blocks (`lib/edid/src/cta.rs`): the video data block's standard video codes, looked
+up in a table of the progressive 480p, 576p, 720p, 1080p and 2160p timings, and the detailed timings after the
+data blocks. Their modes follow the base block's, a size at a rate already given is not added twice, and only
+the base block's first timing is preferred. A table written by hand can be wrong, so each entry carries the
+rate it is meant to give and a test checks its numbers against it (to 0.1 %). A malformed extension (bad
+checksum, wrong tag, a data block or timing offset outside the block, a truncated block) gives no modes.
+
+On the 4K monitor the connector went from 1 mode to 15 (2160p at 60, 50, 30, 25 and 24 Hz; 1080p at 120, 60,
+50, 30 and 24 Hz; 720p at 60 and 50 Hz; 576p, 480p and 640x480). A timed sequence on the board, with the
+monitor watched through a KVM switch, changed mode every 15 seconds: 2160p60 (`Hbr2 x4`), 1080p60
+(`Rbr x4`), 1080p120 (`Hbr x4`), 720p60 (`Rbr x2`), 2160p60 again; every step brought the link up, every
+picture was stable and correct, with no `F_TRANSLATION` faults. An earlier run of the same steps had failed
+at 1080p120 with `link did not come up: Aux(Nack)`, a refusal by the sink right after the previous link was
+shut down; the bring-up now tries again after a pause, and once more from a full re-initialisation, though
+the run that passed did not need either.
+
+Open: the sync polarities (a monitor that locks regardless would show the same picture); DisplayID
+extensions, YCbCr 4:2:0-only modes, interlaced modes and the audio blocks are not read.
