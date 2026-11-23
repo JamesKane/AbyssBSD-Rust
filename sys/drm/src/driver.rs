@@ -55,6 +55,13 @@ pub trait DrmDriver: Send + Sync {
         None
     }
 
+    /// Whether it is the firmware's framebuffer standing in for a display
+    /// driver (docs/GRAPHICS.md §7.5): a native driver whose display shows
+    /// the same screen retires it with [`crate::retire_firmware_cards`].
+    fn firmware_framebuffer(&self) -> bool {
+        false
+    }
+
     /// Whether it publishes a display.
     fn has_kms(&self) -> bool {
         self.kms().is_some()

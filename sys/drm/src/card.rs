@@ -101,6 +101,22 @@ pub fn register(driver: Arc<dyn DrmDriver>) -> Result<Arc<Card>, Errno> {
     Ok(card)
 }
 
+/// Takes away every card whose driver is the firmware's framebuffer
+/// ([`DrmDriver::firmware_framebuffer`]), for a native driver that now
+/// shows the same screen (docs/GRAPHICS.md §7.5). Returns how many went.
+pub fn retire_firmware_cards(s: &Sleepable) -> usize {
+    let cards: Vec<Arc<Card>> = CARDS
+        .lock()
+        .values()
+        .filter_map(alloc::sync::Weak::upgrade)
+        .filter(|c| c.driver.firmware_framebuffer())
+        .collect();
+    for c in &cards {
+        c.unregister(s);
+    }
+    cards.len()
+}
+
 impl Card {
     /// Its unit number: `card<N>`.
     #[must_use]

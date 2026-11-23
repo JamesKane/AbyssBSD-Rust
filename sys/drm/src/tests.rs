@@ -2343,3 +2343,38 @@ fn sharing_buffers_needs_the_masters_say_so() {
     assert!(prime(&guest, DRM_IOCTL_PRIME_HANDLE_TO_FD, handle, 0, -1).is_ok());
     c.unregister(&s());
 }
+
+/// The firmware's framebuffer, as a card with nothing else.
+struct FirmwareCard;
+
+impl DrmDriver for FirmwareCard {
+    fn info(&self) -> DriverInfo {
+        DriverInfo {
+            name: "simpledrm",
+            desc: "Firmware framebuffer",
+            date: "20261122",
+            major: 1,
+            minor: 0,
+            patch: 0,
+        }
+    }
+    fn firmware_framebuffer(&self) -> bool {
+        true
+    }
+}
+
+/// A native driver retires the firmware's framebuffer card, and only that
+/// one: its node goes and the other card stays.
+#[test]
+fn retiring_firmware_cards_leaves_the_others() {
+    setup();
+    let native = card(true, false);
+    let fw = crate::register(Arc::new(FirmwareCard)).unwrap();
+    assert!(!fw.is_revoked() && !native.is_revoked());
+    assert_eq!(crate::retire_firmware_cards(&s()), 1);
+    assert!(fw.is_revoked());
+    assert!(!native.is_revoked());
+    // Nothing left to retire.
+    assert_eq!(crate::retire_firmware_cards(&s()), 0);
+    native.unregister(&s());
+}

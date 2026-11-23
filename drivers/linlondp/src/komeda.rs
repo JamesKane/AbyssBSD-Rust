@@ -211,6 +211,9 @@ pub struct Komeda {
     card: Arc<Card>,
     /// The device node, while registered.
     node: SpinLock<Option<Arc<drm::Card>>>,
+    /// The output's connector, to say what it sees once registered.
+    connector: Arc<dyn drm::kms::ConnectorHw>,
+    unit: u32,
     irq: SpinLock<Option<IrqLine>>,
     _aclk: ClockHandle,
     /// Held so the clocks the card enables and disables outlive it.
@@ -331,6 +334,7 @@ impl Driver for Komeda {
             aclk_khz: fixed / 1000,
             pixel: [SpinLock::new(px0), SpinLock::new(px1)],
         });
+        let connector = out.connector.clone();
         let outputs = alloc::vec![Output {
             pipe: 0,
             encoder: out.encoder,
@@ -344,6 +348,8 @@ impl Driver for Komeda {
         Ok(Self {
             card,
             node: SpinLock::new(None),
+            connector,
+            unit,
             irq: SpinLock::new(Some(irq)),
             _aclk: aclk,
             _machine: machine,
@@ -359,6 +365,32 @@ impl Driver for Komeda {
         match drm::register(self.card.clone()) {
             Ok(n) => *self.node.lock() = Some(n),
             Err(_) => return Err(AttachError::Device("registering the card")),
+        }
+        // What the connector sees, for the console log, and the screen it
+        // shows is the one the firmware's framebuffer card stands for: that
+        // card goes (docs/GRAPHICS.md §7.5).
+        let connected = self.connector.detect() == drm::kms::Connection::Connected;
+        let modes = self.connector.modes();
+        let first = modes.first().map_or(alloc::string::String::from("none"), |m| {
+            let hz = (u64::from(m.clock_khz) * 1000)
+                .checked_div(u64::from(m.htotal) * u64::from(m.vtotal))
+                .unwrap_or(0);
+            alloc::format!("{}x{}@{hz}", m.hdisplay, m.vdisplay)
+        });
+        bus::manager().log(format_args!(
+            "komeda{}: DisplayPort {}, {} mode(s), first {first}",
+            self.unit,
+            if connected { "connected" } else { "disconnected" },
+            modes.len()
+        ));
+        if connected {
+            let n = drm::retire_firmware_cards(cx.sleepable());
+            if n > 0 {
+                bus::manager().log(format_args!(
+                    "komeda{}: took over from the firmware framebuffer card",
+                    self.unit
+                ));
+            }
         }
         Ok(())
     }

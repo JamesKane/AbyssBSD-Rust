@@ -321,6 +321,10 @@ impl DrmDriver for GopKms {
         Some(&self.kms)
     }
 
+    fn firmware_framebuffer(&self) -> bool {
+        true
+    }
+
     fn dumb(&self) -> Option<DumbLimits> {
         Some(DumbLimits::default())
     }
