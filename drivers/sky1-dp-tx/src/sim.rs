@@ -25,6 +25,10 @@ pub(crate) struct Sink {
     pub works_up_to: Rate,
     /// The next this many native requests are deferred.
     pub defer: u32,
+    /// The next this many I2C requests are deferred at the channel's own
+    /// level (native field DEFER, I2C field ACK, no data), as a sink
+    /// fetching the monitor's data answered on the board.
+    pub i2c_defer: u32,
     /// Replies stop coming (the channel times out).
     pub dead: bool,
     /// Writes to these DPCD addresses are refused.
@@ -49,6 +53,7 @@ impl Sink {
             need: Drive::default(),
             works_up_to: Rate::Hbr3,
             defer: 0,
+            i2c_defer: 0,
             dead: false,
             nack_write: Vec::new(),
         }
@@ -179,6 +184,13 @@ impl State {
         if native && self.sink.defer > 0 {
             self.sink.defer -= 1;
             self.reply_code = code(2);
+            self.reply_count = 0;
+            self.reply_ready = true;
+            return;
+        }
+        if !native && self.sink.i2c_defer > 0 {
+            self.sink.i2c_defer -= 1;
+            self.reply_code = 2;
             self.reply_count = 0;
             self.reply_ready = true;
             return;

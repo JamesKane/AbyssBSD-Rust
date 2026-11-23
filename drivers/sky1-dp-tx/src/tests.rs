@@ -663,3 +663,20 @@ fn a_sink_that_answers_an_i2c_read_with_fewer_bytes_is_asked_for_the_rest() {
     assert_eq!(e[127], 127);
     assert_eq!(e[64], 64);
 }
+
+#[test]
+fn a_channel_level_defer_on_an_i2c_read_is_retried() {
+    // Seen on the board: the sink answered the EDID read with the channel's
+    // DEFER and the I2C field ACK, and no data.
+    let sim = Sim::new();
+    sim.sink(|s| {
+        s.i2c_defer = 3;
+        for (i, b) in s.edid.iter_mut().enumerate().skip(8) {
+            *b = u8::try_from(i).unwrap();
+        }
+    });
+    let aux = Aux::new(&sim, &sim);
+    let e = aux.read_edid_block(0).unwrap();
+    assert_eq!(e[8], 8);
+    assert_eq!(e[127], 127);
+}

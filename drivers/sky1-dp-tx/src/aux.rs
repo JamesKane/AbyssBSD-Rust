@@ -41,6 +41,9 @@ const CHUNK: usize = 16;
 /// A native request is retried this often on a defer (the standard says at
 /// least seven) and this often on a timeout.
 const DEFER_RETRIES: u32 = 7;
+/// An I2C request goes through to the monitor, which can keep the sink
+/// busy longer: more tries.
+const I2C_DEFER_RETRIES: u32 = 32;
 const TIMEOUT_RETRIES: u32 = 3;
 /// Polls of the status register, a millisecond apart (the vendor gives up
 /// after the third).
@@ -111,7 +114,15 @@ impl<'a> Aux<'a> {
             return Err(AuxError::Timeout);
         }
         let code = self.w.read(regs::AUX_REPLY_CODE);
-        let field = if native { code & 3 } else { (code >> 2) & 3 };
+        // The native field is the channel's own reply, and it applies to an
+        // I2C request too: a DEFER there means "not ready, ask again" (a
+        // sink fetching the monitor's data answered so on the board, with
+        // the I2C field reading ACK and no data). Only when it ACKs does
+        // the I2C field say anything (section 1.4.3).
+        let field = match (code & 3, native) {
+            (0, false) => (code >> 2) & 3,
+            (n, _) => n,
+        };
         let reply = match field {
             0 => Reply::Ack,
             1 => Reply::Nack,
@@ -170,7 +181,13 @@ impl<'a> Aux<'a> {
                 Ok((Reply::Nack, _)) => return Err(AuxError::Nack),
                 Ok((Reply::Defer, _)) => {
                     defers += 1;
-                    if defers > DEFER_RETRIES {
+                    if defers
+                        > if native {
+                            DEFER_RETRIES
+                        } else {
+                            I2C_DEFER_RETRIES
+                        }
+                    {
                         return Err(AuxError::Defer);
                     }
                     self.d.delay_us(400);
