@@ -14,6 +14,14 @@ pub enum AuxError {
     Timeout,
     /// The reply carried the wrong number of bytes.
     Io,
+    /// The same, with what was seen: the request code, the count in the
+    /// reply, the count asked for, and the reply code.
+    Count {
+        cmd: u8,
+        got: u8,
+        want: u8,
+        code: u8,
+    },
     /// The sink refused (NACK).
     Nack,
     /// The sink kept deferring.
@@ -116,7 +124,12 @@ impl<'a> Aux<'a> {
             // read may be answered with fewer bytes, and the source asks
             // again for the rest (the standard's I2C-over-AUX framing).
             if n == 0 || n > read.len() || (native && n != read.len()) {
-                return Err(AuxError::Io);
+                return Err(AuxError::Count {
+                    cmd: u8::try_from(cmd & 0xFF).unwrap_or(0xFF),
+                    got: u8::try_from(n).unwrap_or(0xFF),
+                    want: u8::try_from(read.len()).unwrap_or(0xFF),
+                    code: u8::try_from(code & 0xFF).unwrap_or(0xFF),
+                });
             }
             for b in read.iter_mut().take(n) {
                 *b = u8::try_from(self.w.read(regs::AUX_REPLY_DATA) & 0xFF).unwrap_or(0);
