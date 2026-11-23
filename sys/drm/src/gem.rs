@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! GEM buffers: a buffer is a VM object, a handle names it in one DRM
+//! GEM buffers: a buffer is a VM object, a handle names it in one Direct Rendering Manager
 //! file, and a fake file offset names it for `mmap`.
 //!
 //! Behavior reference: `docs/GRAPHICS.md` §4.1, §4.2.
@@ -21,7 +21,7 @@ pub const MAX_HANDLES: usize = 1 << 20;
 /// A buffer object: pages in a VM object, at a fake offset of its own.
 ///
 /// The object's pages sit at indices `offset .. offset + pages`, so a
-/// `mmap` of the DRM file at the buffer's fake offset reaches them with
+/// `mmap` of the Direct Rendering Manager file at the buffer's fake offset reaches them with
 /// no translation.
 #[derive(Debug)]
 pub struct Gem {

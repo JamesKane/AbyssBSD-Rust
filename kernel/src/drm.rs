@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! The kernel's side of the DRM core (`sys/drm`): the caller's memory
+//! The kernel's side of the Direct Rendering Manager core (`sys/drm`): the caller's memory
 //! for requests that carry pointers, the page pool buffers draw on, and
 //! the console for what the core refuses.
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! The kernel mode setting object model: display controllers (CRTCs, in
-//! DRM's name for them), planes, encoders and connectors, with typed
+//! Direct Rendering Manager's name for them), planes, encoders and connectors, with typed
 //! properties, blobs and framebuffers.
 //!
 //! Display hardware is several drivers (GRAPHICS.md §7.2): each publishes

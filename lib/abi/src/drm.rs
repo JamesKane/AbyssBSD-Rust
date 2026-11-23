@@ -7,7 +7,7 @@
 // Copyright (c) 2007-2008 Tungsten Graphics, Inc., Cedar Park, TX., USA
 // Copyright (c) 2007-2008 Intel Corporation
 // Copyright (c) 2026 The AbyssBSD Project
-//! The DRM user interface (`drm.h`, `drm_mode.h`: MIT-licensed), as
+//! The Direct Rendering Manager user interface (`drm.h`, `drm_mode.h`: MIT-licensed), as
 //! libdrm built for FreeBSD sees it: the structures `/dev/dri/card*`
 //! and `renderD*` ioctls pass, the events `read` returns, and the
 //! capability and object numbers.
@@ -21,7 +21,7 @@
 
 use crate::ioctl::{IOC_IN, IOC_OUT, IOC_VOID, ioc_of};
 
-/// The group letter every DRM request uses (`DRM_IOCTL_BASE`).
+/// The group letter every Direct Rendering Manager request uses (`DRM_IOCTL_BASE`).
 pub const DRM_IOCTL_BASE: u8 = b'd';
 /// Driver-specific requests start here (`DRM_COMMAND_BASE`).
 pub const DRM_COMMAND_BASE: u8 = 0x40;
@@ -41,13 +41,13 @@ const fn iowr(nr: u8, len: usize) -> u32 {
     ioc_of(IOC_IN | IOC_OUT, DRM_IOCTL_BASE, nr, len)
 }
 
-/// The request number inside a DRM request (`DRM_IOCTL_NR`).
+/// The request number inside a Direct Rendering Manager request (`DRM_IOCTL_NR`).
 #[must_use]
 pub const fn ioctl_nr(req: u32) -> u8 {
     (req & 0xff) as u8
 }
 
-/// Whether `req` is a DRM request: the group letter is `'d'`.
+/// Whether `req` is a Direct Rendering Manager request: the group letter is `'d'`.
 #[must_use]
 pub const fn is_drm_ioctl(req: u32) -> bool {
     ((req >> 8) & 0xff) as u8 == DRM_IOCTL_BASE

@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! The core of the Direct Rendering Manager (DRM): `/dev/dri/card<N>`,
+//! The core of the Direct Rendering Manager: `/dev/dri/card<N>`,
 //! its open files, handles to graphics execution manager (GEM) buffers,
 //! dumb buffers, events, and the ioctl dispatcher.
 //!
-//! The user interface is DRM's as FreeBSD's ports see it
-//! (`docs/GRAPHICS.md` §2): FreeBSD's request encoding, DRM's structure
-//! rules, Linux driver names. A driver implements [`DrmDriver`] and calls
+//! The user interface is the Direct Rendering Manager's, as FreeBSD's
+//! ports see it (`docs/GRAPHICS.md` §2): FreeBSD's request encoding,
+//! the Direct Rendering Manager's structure rules, Linux driver names. A driver implements [`DrmDriver`] and calls
 //! [`register`]; the core does the rest. Display objects (the kernel
 //! mode setting core) arrive in `kms`; fences, syncobj and dma-buf with M-G.2.
 //!
 //! Behavior reference: `sys/dev/drm2` and `drm-kmod`'s device interface,
-//! as userland (libdrm) uses them; the MIT DRM uapi headers.
+//! as userland (libdrm) uses them; the MIT Direct Rendering Manager uapi headers.
 
 #![no_std]
 #![deny(unsafe_code)]

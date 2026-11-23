@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2011 Intel Corporation
 // Copyright (c) 2026 The AbyssBSD Project
-//! DRM pixel formats and framebuffer modifiers (`drm_fourcc.h`, MIT):
+//! Direct Rendering Manager pixel formats and framebuffer modifiers (`drm_fourcc.h`, MIT):
 //! the four-character codes, how many planes and bytes per pixel each
 //! has, and the validation `ADDFB2` applies to a framebuffer's pitches
 //! and offsets.

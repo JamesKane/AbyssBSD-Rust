@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! What a DRM driver provides to the core.
+//! What a Direct Rendering Manager driver provides to the core.
 
 use abi::errno::Errno;
 
@@ -41,7 +41,7 @@ impl Default for DumbLimits {
     }
 }
 
-/// A driver's side of a DRM device. The core owns the file, the handle
+/// A driver's side of a Direct Rendering Manager device. The core owns the file, the handle
 /// tables and the dispatch; the driver says what it is and what it can
 /// do.
 pub trait DrmDriver: Send + Sync {

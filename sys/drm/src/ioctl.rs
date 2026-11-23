@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! The DRM ioctl dispatcher.
+//! The Direct Rendering Manager ioctl dispatcher.
 //!
-//! A request carries its argument's size, but DRM does not trust it:
+//! A request carries its argument's size, but Direct Rendering Manager does not trust it:
 //! each handler has the size of the structure it knows. A caller's
 //! shorter structure is zero-extended to it; a longer one is cut to it,
 //! its tail ignored (as `drm_ioctl` does; drivers' own requests that

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! A DRM device (`/dev/dri/card<N>`) and its open files.
+//! A Direct Rendering Manager device (`/dev/dri/card<N>`) and its open files.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeSet, VecDeque};
@@ -28,7 +28,7 @@ const EVENT_SPACE: usize = 4096;
 
 static UNITS: SpinLock<BTreeSet<u32>> = SpinLock::new(BTreeSet::new());
 
-/// A registered DRM device.
+/// A registered Direct Rendering Manager device.
 pub struct Card {
     unit: u32,
     driver: Arc<dyn DrmDriver>,
@@ -218,7 +218,7 @@ pub(crate) mod client {
     pub(crate) const WRITEBACK: u8 = 1 << 4;
 }
 
-/// An open DRM file (`drm_file`): its handles, events, and client
+/// An open Direct Rendering Manager file (`drm_file`): its handles, events, and client
 /// capabilities. Closing it drops them and gives up mastership.
 pub struct Open {
     pub(crate) card: Arc<Card>,
