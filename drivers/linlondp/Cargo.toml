@@ -9,6 +9,7 @@ publish.workspace = true
 acpi = { path = "../../sys/acpi" }
 addr = { path = "../../lib/addr" }
 bus = { path = "../../sys/bus" }
+sky1-dp = { path = "../sky1-dp" }
 devtree = { path = "../../lib/devtree" }
 irq = { path = "../../sys/irq" }
 regs = { path = "../../lib/regs" }

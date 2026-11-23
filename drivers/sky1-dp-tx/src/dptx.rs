@@ -7,6 +7,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use kms_check::Mode;
+use sync::SpinLock;
 
 use crate::Delay;
 use crate::aux::{Aux, AuxError};
@@ -79,8 +80,11 @@ pub struct Dptx {
     d: Arc<dyn Delay>,
     phy: Arc<dyn Phy>,
     cfg: Config,
-    caps: Option<Caps>,
-    up: Option<Up>,
+    /// What was last read of the sink, and the link that is up: held
+    /// only to read or change them, never across a hardware wait, so the
+    /// interrupt thread and a commit can both use the transmitter.
+    caps: SpinLock<Option<Caps>>,
+    up: SpinLock<Option<Up>>,
 }
 
 impl core::fmt::Debug for Dptx {
@@ -100,8 +104,8 @@ impl Dptx {
             d,
             phy,
             cfg,
-            caps: None,
-            up: None,
+            caps: SpinLock::new(None),
+            up: SpinLock::new(None),
         }
     }
 
@@ -112,7 +116,7 @@ impl Dptx {
     /// Host initialisation (section 2.1 steps 6 to 8): the transmitter on,
     /// the interrupt mask, and the AUX time base from the register
     /// clock's rate in MHz (25 if unknown; 10 to 400).
-    pub fn host_init(&mut self, apb_mhz: u32) {
+    pub fn host_init(&self, apb_mhz: u32) {
         self.w.write(regs::TRANSMITTER_ENABLE, 1);
         self.w.write(regs::INTERRUPT_MASK, regs::IRQ_MASK_OPERATING);
         let mhz = if apb_mhz == 0 { 25 } else { apb_mhz };
@@ -120,11 +124,11 @@ impl Dptx {
     }
 
     /// Host shutdown: the transmitter off, everything masked.
-    pub fn host_exit(&mut self) {
+    pub fn host_exit(&self) {
         self.link_down();
         self.w.write(regs::TRANSMITTER_ENABLE, 0);
         self.w.write(regs::INTERRUPT_MASK, regs::IRQ_MASK_ALL);
-        self.caps = None;
+        *self.caps.lock() = None;
     }
 
     /// The hot-plug line is high.
@@ -135,7 +139,7 @@ impl Dptx {
 
     /// Reads the interrupt (once: the cause is cleared by reading it) and
     /// says what it was; `None` if it was not this core's (section 2.2.1).
-    pub fn interrupt(&mut self) -> Option<Events> {
+    pub fn interrupt(&self) -> Option<Events> {
         let cause = self.w.read(regs::INTERRUPT_CAUSE);
         let mask = self.w.read(regs::INTERRUPT_MASK);
         let live = cause & !mask;
@@ -154,9 +158,9 @@ impl Dptx {
     /// # Errors
     ///
     /// [`Error`] when no usable block is read.
-    pub fn probe(&mut self) -> Result<Caps, Error> {
+    pub fn probe(&self) -> Result<Caps, Error> {
         if !self.connected() {
-            self.caps = None;
+            *self.caps.lock() = None;
             return Err(Error::NoSink);
         }
         let mut last = Error::NoSink;
@@ -165,7 +169,7 @@ impl Dptx {
             match self.aux().read(dpcd::REV, &mut b) {
                 Ok(()) => {
                     let c = Caps::parse(&b).map_err(Error::Caps)?;
-                    self.caps = Some(c);
+                    *self.caps.lock() = Some(c);
                     return Ok(c);
                 }
                 Err(AuxError::NoSink) => return Err(Error::NoSink),
@@ -198,8 +202,9 @@ impl Dptx {
     /// # Errors
     ///
     /// [`Error`].
-    pub fn link_up(&mut self, mode: &Mode, sink_bpc: u32) -> Result<Up, Error> {
-        let caps = match self.caps {
+    pub fn link_up(&self, mode: &Mode, sink_bpc: u32) -> Result<Up, Error> {
+        let cached = *self.caps.lock();
+        let caps = match cached {
             Some(c) => c,
             None => self.probe()?,
         };
@@ -228,7 +233,7 @@ impl Dptx {
             .map_err(Error::Train)?;
         stream::enable_sources(&*self.w, 1);
         let up = Up { trained, bpc };
-        self.up = Some(up);
+        *self.up.lock() = Some(up);
         Ok(up)
     }
 
@@ -247,13 +252,11 @@ impl Dptx {
     /// # Errors
     ///
     /// [`Error::NoSink`] without a link.
-    pub fn stream_on(&mut self, mode: &Mode) -> Result<(), Error> {
-        let up = self.up.ok_or(Error::NoSink)?;
-        let m = if self.cfg.invert_sync {
-            stream::with_inverted_sync(mode)
-        } else {
-            *mode
-        };
+    pub fn stream_on(&self, mode: &Mode) -> Result<(), Error> {
+        let up = (*self.up.lock()).ok_or(Error::NoSink)?;
+        // The mode is as the display processor was given it: with the
+        // sync inverted, if `invert_sync` asks (see [`Dptx::offered`]).
+        let m = *mode;
         let ppc = stream::pixels_per_clock(m.clock_khz);
         let r = stream::stream_regs(&m, up.bpc, up.trained.link, ppc);
         let pol = r
@@ -266,14 +269,15 @@ impl Dptx {
     }
 
     /// Stops the stream.
-    pub fn stream_off(&mut self) {
+    pub fn stream_off(&self) {
         stream::stop(&*self.w, 0);
     }
 
     /// Takes the link down (section 2.11.2): the stream, the sink to D3 if
     /// it is still there, the sources.
-    pub fn link_down(&mut self) {
-        if self.up.take().is_none() {
+    pub fn link_down(&self) {
+        let was_up = self.up.lock().take();
+        if was_up.is_none() {
             return;
         }
         stream::stop(&*self.w, 0);
@@ -283,15 +287,28 @@ impl Dptx {
         stream::disable_sources(&*self.w);
     }
 
+    /// A mode as it is offered to userland and given to both the display
+    /// processor and the core: the back porch the core needs, and the sync
+    /// polarities the board wants (section 2.6.1).
+    #[must_use]
+    pub fn offered(&self, m: &Mode) -> Mode {
+        let m = stream::adjust_mode(m);
+        if self.cfg.invert_sync {
+            stream::with_inverted_sync(&m)
+        } else {
+            m
+        }
+    }
+
     /// The link now, if it is up.
     #[must_use]
     pub fn link(&self) -> Option<Link> {
-        self.up.map(|u| u.trained.link)
+        (*self.up.lock()).map(|u| u.trained.link)
     }
 
     /// What was last read of the sink.
     #[must_use]
     pub fn caps(&self) -> Option<Caps> {
-        self.caps
+        *self.caps.lock()
     }
 }

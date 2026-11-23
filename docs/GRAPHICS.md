@@ -560,3 +560,24 @@ them (a registry keyed by unit stands in until the M-G PHY provider is designed)
 adapter; encoder and connector objects over the transmitter; the hot-plug interrupt thread; the
 aggregate that registers the card when its output attaches; and adoption of the firmware's running
 display, which the boot display (DP 4) needs before any of it can drive that connector.
+
+### 15.4 The transmitter's driver and the chain to a card
+
+Built (host tested; not run on hardware): `lib/edid` (base block: detailed timings, name, size, depth;
+malformed data is an error, not a panic); `drivers/sky1-dp`, the ACPI driver for `CIXH502F`, with the
+hot-plug interrupt thread, an encoder (link up, video clock, video adapter, stream on) and a connector
+(detect, modes from the monitor or the standard fallback list, EDID), published by unit number; and the
+display driver (`komeda`) now waits for the transmitter of its number, builds the card with that output
+and registers it. A mode is offered to userland already adjusted for the core (back porch of 12 pixels
+at least) and, as the vendor does, with its sync polarities inverted (`Config::invert_sync`), so the
+display processor and the transmitter are given the same timing without a fix-up hook in the core.
+
+Declined or waiting by design: a unit the firmware left running (display or link), so the boot display
+(unit 4) keeps its console; unit 2 (eDP: its PHY and its panel `CIXH5040` have no driver; the driver
+table's ledger test records the wait).
+
+Not built, in order: adoption of the running display (what unit 4 needs); the hot-plug uevent to
+compositors; retraining on a sink's attention pulse; the second pipeline's stream and YCbCr output;
+bandwidth checks beyond the mode list's; the eDP PHY, panel and backlight; the Type-C controller feeding
+the PHY's mode and orientation; then the board session, which answers the open questions in §15 to
+§15.3 (two needing a sink: the sync inversion and the interrupt cause's clear-on-read).

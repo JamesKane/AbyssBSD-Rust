@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: BSD-2-Clause
+use std::vec::Vec;
+
+use super::*;
+
+/// 1920x1080 at 60 hertz, 509 by 286 mm, digital separate sync, both
+/// polarities positive.
+const DTD_1080P: [u8; 18] = [
+    0x02, 0x3A, 0x80, 0x18, 0x71, 0x38, 0x2D, 0x40, 0x58, 0x2C, 0x45, 0x00, 0xFD, 0x1E, 0x11, 0x00,
+    0x00, 0x1E,
+];
+
+/// 1280x720 at 60 hertz (74.25 MHz).
+const DTD_720P: [u8; 18] = [
+    0x01, 0x1D, 0x00, 0x72, 0x51, 0xD0, 0x1E, 0x20, 0x6E, 0x28, 0x55, 0x00, 0xC4, 0x8E, 0x21, 0x00,
+    0x00, 0x1E,
+];
+
+fn name_descriptor(name: &str) -> [u8; 18] {
+    let mut d = [0u8; 18];
+    d[3] = 0xFC;
+    let mut text = [0x20u8; 13];
+    for (i, c) in name.bytes().enumerate() {
+        text[i] = c;
+    }
+    if name.len() < 13 {
+        text[name.len()] = b'\n';
+    }
+    d[5..].copy_from_slice(&text);
+    d
+}
+
+fn block(descriptors: &[[u8; 18]]) -> Vec<u8> {
+    let mut b = std::vec![0u8; BLOCK];
+    b[..8].copy_from_slice(&HEADER);
+    // EDID 1.4, digital 8 bits a component, 51 by 29 cm.
+    b[18] = 1;
+    b[19] = 4;
+    b[20] = 0x80 | 2 << 4;
+    b[21] = 51;
+    b[22] = 29;
+    for (i, d) in descriptors.iter().enumerate() {
+        b[54 + 18 * i..72 + 18 * i].copy_from_slice(d);
+    }
+    let sum = b[..127].iter().fold(0u8, |a, x| a.wrapping_add(*x));
+    b[127] = 0u8.wrapping_sub(sum);
+    b
+}
+
+#[test]
+fn the_detailed_timing_becomes_a_mode() {
+    let e = parse(&block(&[DTD_1080P])).unwrap();
+    assert_eq!(e.modes.len(), 1);
+    let m = e.modes[0];
+    assert_eq!(m.clock_khz, 148_500);
+    assert_eq!(
+        (m.hdisplay, m.hsync_start, m.hsync_end, m.htotal),
+        (1920, 2008, 2052, 2200)
+    );
+    assert_eq!(
+        (m.vdisplay, m.vsync_start, m.vsync_end, m.vtotal),
+        (1080, 1084, 1089, 1125)
+    );
+    assert_eq!(m.flags, DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC);
+    assert_ne!(m.kind & DRM_MODE_TYPE_PREFERRED, 0);
+    assert_eq!(e.size_mm, (510, 290));
+    assert_eq!(e.bpc, Some(8));
+}
+
+#[test]
+fn the_first_descriptor_is_preferred_and_the_name_is_read() {
+    let e = parse(&block(&[
+        DTD_720P,
+        DTD_1080P,
+        name_descriptor("Test Monitor"),
+    ]))
+    .unwrap();
+    assert_eq!(e.modes.len(), 2);
+    assert_eq!(e.modes[0].hdisplay, 1280);
+    assert_ne!(e.modes[0].kind & DRM_MODE_TYPE_PREFERRED, 0);
+    assert_eq!(e.modes[1].kind & DRM_MODE_TYPE_PREFERRED, 0);
+    assert_eq!(e.name.as_deref(), Some("Test Monitor"));
+    assert_eq!(e.modes[0].clock_khz, 74_250);
+    assert_eq!(e.modes[0].hsync_start, 1390);
+}
+
+#[test]
+fn a_bad_block_is_an_error_not_a_panic() {
+    assert_eq!(parse(&[0; 10]), Err(Error::Short));
+    let mut b = block(&[DTD_1080P]);
+    b[0] = 1;
+    assert_eq!(parse(&b), Err(Error::Header));
+    let mut b = block(&[DTD_1080P]);
+    b[60] ^= 0xFF;
+    assert_eq!(parse(&b), Err(Error::Checksum));
+}
+
+#[test]
+fn nonsense_timings_are_dropped() {
+    // Front porch and sync wider than the blanking.
+    let mut d = DTD_1080P;
+    d[3] = 0x10;
+    d[4] = 0x70;
+    let e = parse(&block(&[d, DTD_720P])).unwrap();
+    assert_eq!(e.modes.len(), 1);
+    assert_eq!(e.modes[0].hdisplay, 1280);
+    // No active area.
+    let mut z = DTD_1080P;
+    z[2] = 0;
+    z[4] = 0x01;
+    z[5] = 0;
+    z[7] = 0;
+    assert!(parse(&block(&[z])).unwrap().modes.is_empty());
+}
+
+#[test]
+fn sync_that_is_not_separate_digital_is_negative() {
+    let mut d = DTD_1080P;
+    // Analog composite.
+    d[17] = 0x00;
+    let m = parse(&block(&[d])).unwrap().modes[0];
+    assert_eq!(m.flags, DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC);
+    // Interlaced is marked.
+    let mut i = DTD_1080P;
+    i[17] |= 0x80;
+    assert_ne!(
+        parse(&block(&[i])).unwrap().modes[0].flags & abi::drm::DRM_MODE_FLAG_INTERLACE,
+        0
+    );
+}
+
+#[test]
+fn extensions_and_ratio_sizes() {
+    let mut b = block(&[DTD_1080P]);
+    b[126] = 1;
+    b[21] = 16;
+    b[22] = 0;
+    let sum = b[..127].iter().fold(0u8, |a, x| a.wrapping_add(*x));
+    b[127] = 0u8.wrapping_sub(sum);
+    let e = parse(&b).unwrap();
+    assert_eq!(e.extensions, 1);
+    assert_eq!(e.size_mm, (0, 0));
+}
+
+#[test]
+fn the_fallback_prefers_1080p() {
+    let m = fallback_modes();
+    assert_eq!(m[0].hdisplay, 1920);
+    assert_ne!(m[0].kind & DRM_MODE_TYPE_PREFERRED, 0);
+    assert!(
+        m.iter()
+            .all(|x| x.htotal > x.hsync_end && x.vtotal > x.vsync_end)
+    );
+}

@@ -308,6 +308,7 @@ dependencies = [
  "rx8803",
  "sbsa-gwdt",
  "sky1-clk",
+ "sky1-dp",
  "sky1-pinctrl",
  "sky1-reset",
  "sky1-syscon",
@@ -342,6 +343,14 @@ dependencies = [
 [[package]]
 name = "drm-fourcc"
 version = "0.0.0"
+
+[[package]]
+name = "edid"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "kms-check",
+]
 
 [[package]]
 name = "efi"
@@ -753,6 +762,7 @@ dependencies = [
  "kms-check",
  "regs",
  "sched",
+ "sky1-dp",
  "sync",
  "vm",
 ]
@@ -943,11 +953,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "sky1-dp"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "acpi",
+ "acpi-corpus",
+ "acpi-platform",
+ "aml",
+ "bus",
+ "cix-sky1",
+ "devtree",
+ "drm",
+ "edid",
+ "irq",
+ "kms-check",
+ "regs",
+ "sched",
+ "sky1-dp-tx",
+ "sky1-usbdp-phy",
+ "sync",
+]
+
+[[package]]
 name = "sky1-dp-tx"
 version = "0.0.0"
 dependencies = [
  "abi",
  "kms-check",
+ "sync",
 ]
 
 [[package]]

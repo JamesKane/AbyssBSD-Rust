@@ -496,8 +496,13 @@ fn nothing_with_a_driver_waits_forever() {
         pair("\\_SB_.PCI2", &["\\_SB_.PEP0", "\\_SB_.QPPX"]),
         pair("\\_SB_.PCI4", &["\\_SB_.PEP0", "\\_SB_.QPPX"]),
     ];
+    // The Orange Pi 6 Plus: the DisplayPort transmitter of unit 2 (the
+    // eDP port) waits for its panel (`CIXH5040`), whose driver is not
+    // built (docs/GRAPHICS.md §15.3).
+    let opi6p = alloc::vec![pair("\\_SB_.DP02", &["\\_SB_.EDP0"])];
     for (name, _) in acpi_corpus::machines() {
         let want = match name {
+            "opi6p" => opi6p.clone(),
             "radxa-q8b" => q8b.clone(),
             _ => Vec::new(),
         };

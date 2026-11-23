@@ -1,0 +1,30 @@
+[package]
+name = "sky1-dp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+acpi = { path = "../../sys/acpi" }
+bus = { path = "../../sys/bus" }
+devtree = { path = "../../lib/devtree" }
+drm = { path = "../../sys/drm" }
+edid = { path = "../../lib/edid" }
+irq = { path = "../../sys/irq" }
+kms-check = { path = "../../lib/kms-check" }
+regs = { path = "../../lib/regs" }
+sched = { path = "../../sys/sched" }
+sky1-dp-tx = { path = "../sky1-dp-tx" }
+sky1-usbdp-phy = { path = "../sky1-usbdp-phy" }
+sync = { path = "../../sys/sync" }
+
+[dev-dependencies]
+acpi-corpus = { path = "../../lib/acpi-corpus" }
+acpi-platform = { path = "../../lib/acpi-platform" }
+aml = { path = "../../lib/aml" }
+cix-sky1 = { path = "../../platform/cix-sky1" }
+
+[lints]
+workspace = true

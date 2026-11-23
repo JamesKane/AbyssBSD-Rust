@@ -37,7 +37,7 @@ fn hd() -> Mode {
 fn rig(cfg: Config) -> (Arc<Sim>, Arc<TestPhy>, Dptx) {
     let sim = Arc::new(Sim::new());
     let phy = Arc::new(TestPhy::new(4));
-    let mut d = Dptx::new(sim.clone(), sim.clone(), phy.clone(), cfg);
+    let d = Dptx::new(sim.clone(), sim.clone(), phy.clone(), cfg);
     d.host_init(100);
     (sim, phy, d)
 }
@@ -271,7 +271,7 @@ fn the_colour_depth_steps_down_until_the_link_carries_it() {
 
 #[test]
 fn training_reaches_what_the_sink_asks_and_ends_cleanly() {
-    let (sim, phy, mut d) = rig(Config::default());
+    let (sim, phy, d) = rig(Config::default());
     sim.sink(|s| {
         s.need = Drive {
             swing: 2,
@@ -320,7 +320,7 @@ fn training_reaches_what_the_sink_asks_and_ends_cleanly() {
 
 #[test]
 fn the_best_pattern_both_sides_have_is_used() {
-    let (sim, _, mut d) = rig(Config::default());
+    let (sim, _, d) = rig(Config::default());
     sim.sink(|s| s.dpcd[3] |= 0x80);
     d.probe().unwrap();
     d.link_up(&hd(), 8).unwrap();
@@ -336,7 +336,7 @@ fn the_best_pattern_both_sides_have_is_used() {
 
 #[test]
 fn a_sink_that_cannot_train_at_the_chosen_rate_gets_a_slower_one() {
-    let (sim, _, mut d) = rig(Config::default());
+    let (sim, _, d) = rig(Config::default());
     // 350 MHz at 24 bits fits HBR only without margin, so HBR2 is picked
     // first; this sink locks only up to HBR.
     sim.sink(|s| s.works_up_to = Rate::Hbr);
@@ -351,7 +351,7 @@ fn a_sink_that_cannot_train_at_the_chosen_rate_gets_a_slower_one() {
 
 #[test]
 fn a_sink_that_never_locks_is_an_error_and_training_still_ends() {
-    let (sim, _, mut d) = rig(Config::default());
+    let (sim, _, d) = rig(Config::default());
     sim.sink(|s| s.works_up_to = Rate::Rbr);
     let mut m = hd();
     m.clock_khz = 297_000;
@@ -366,7 +366,7 @@ fn a_sink_that_never_locks_is_an_error_and_training_still_ends() {
 
 #[test]
 fn the_phy_must_report_its_lanes_ready() {
-    let (sim, phy, mut d) = rig(Config::default());
+    let (sim, phy, d) = rig(Config::default());
     sim.set_ready_mask(0b0011);
     d.probe().unwrap();
     assert_eq!(
@@ -382,7 +382,7 @@ fn the_phy_must_report_its_lanes_ready() {
 fn a_port_with_two_lanes_trains_two() {
     let sim = Arc::new(Sim::new());
     let phy = Arc::new(TestPhy::new(2));
-    let mut d = Dptx::new(sim.clone(), sim.clone(), phy, Config::default());
+    let d = Dptx::new(sim.clone(), sim.clone(), phy, Config::default());
     d.host_init(100);
     sim.set_ready_mask(0b0011);
     d.probe().unwrap();
@@ -469,16 +469,20 @@ fn inverting_the_sync_flips_each_polarity() {
 
 #[test]
 fn the_stream_starts_after_the_link_and_stops_before_it_goes() {
-    let (sim, _, mut d) = rig(Config::default());
+    let (sim, _, d) = rig(Config::default());
     d.probe().unwrap();
     d.link_up(&hd(), 8).unwrap();
     d.stream_on(&hd()).unwrap();
     let base = regs::source(0);
     assert_eq!(sim.reg(base + regs::VIDEO_STREAM_ENABLE), 1);
     assert_eq!(sim.reg(base + regs::SECONDARY_STREAM_ENABLE), 1);
-    // The default inverts the sync: positive sync went in as negative.
-    assert_eq!(sim.reg(base + regs::MAIN_STREAM_POLARITY), 0);
-    assert_eq!(sim.reg(base + regs::USER_SYNC_POLARITY), 0xC);
+    // The mode is programmed as given; `offered` is where the vendor's
+    // inversion is applied.
+    assert_eq!(sim.reg(base + regs::MAIN_STREAM_POLARITY), 3);
+    assert_eq!(sim.reg(base + regs::USER_SYNC_POLARITY), 0xC | 3);
+    let o = d.offered(&hd());
+    assert_eq!(o.flags & (DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC), 0);
+    assert_ne!(o.flags & DRM_MODE_FLAG_NHSYNC, 0);
     d.stream_off();
     assert_eq!(sim.reg(base + regs::VIDEO_STREAM_ENABLE), 0);
     d.stream_on(&hd()).unwrap();
@@ -495,7 +499,7 @@ fn the_stream_starts_after_the_link_and_stops_before_it_goes() {
 
 #[test]
 fn an_unplugged_sink_is_not_probed_or_put_to_sleep() {
-    let (sim, _, mut d) = rig(Config::default());
+    let (sim, _, d) = rig(Config::default());
     d.probe().unwrap();
     d.link_up(&hd(), 8).unwrap();
     sim.sink(|s| s.hpd = false);
@@ -508,7 +512,7 @@ fn an_unplugged_sink_is_not_probed_or_put_to_sleep() {
 
 #[test]
 fn a_slow_sink_gets_five_tries() {
-    let (sim, _, mut d) = rig(Config::default());
+    let (sim, _, d) = rig(Config::default());
     sim.sink(|s| s.dead = true);
     assert_eq!(d.probe().unwrap_err(), Error::Aux(AuxError::Timeout));
     assert!(sim.waited_us() >= 400_000);
@@ -516,7 +520,7 @@ fn a_slow_sink_gets_five_tries() {
 
 #[test]
 fn host_setup_and_the_interrupt() {
-    let (sim, _, mut d) = rig(Config::default());
+    let (sim, _, d) = rig(Config::default());
     assert_eq!(sim.reg(regs::TRANSMITTER_ENABLE), 1);
     assert_eq!(sim.reg(regs::INTERRUPT_MASK), 0x1C);
     assert_eq!(sim.reg(regs::AUX_CLOCK_DIVIDER), 100);

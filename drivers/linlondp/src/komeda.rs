@@ -8,9 +8,10 @@
 //! unit 4). Until adoption exists such a unit is left alone: this driver
 //! declines it, so the firmware's console stays.
 //!
-//! The card is built but not registered: it has no outputs until the
-//! DisplayPort transmitter joins it, and a card with controllers and no
-//! connectors would only confuse a compositor.
+//! The unit's output is the transmitter of the same number
+//! (`CIXH502F`, `sky1-dp`): this driver waits for it, builds the card
+//! with its encoder and connector, and registers the card when it
+//! starts. Pipeline 0 only; the second pipeline's stream is not built.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -20,8 +21,8 @@ use alloc::vec::Vec;
 use abi::errno::Errno;
 use bus::provider::{ClockHandle, Hz};
 use bus::{
-    AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, IrqLine, MmioGrant, StartCx, StopCx,
-    StopReason,
+    AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, IrqLine, MmioGrant, Need, StartCx,
+    StopCx, StopReason,
 };
 use devtree::ids::AcpiId;
 use drm::gem::Gem;
@@ -31,7 +32,7 @@ use sched::{IrqCx, Sleepable};
 use sync::SpinLock;
 use vm::dma::{Coherency, DmaConstraints, DmaTag, IoMapping};
 
-use crate::card::{Card, Mapped, Platform, create};
+use crate::card::{Card, Mapped, Output, Platform, create};
 use crate::discover::{self, Delay};
 use crate::hw::Dpu;
 use crate::regs::{Words, bs};
@@ -197,6 +198,8 @@ impl Platform for Machine {
 /// `komedaN`.
 pub struct Komeda {
     card: Arc<Card>,
+    /// The device node, while registered.
+    node: SpinLock<Option<Arc<drm::Card>>>,
     irq: SpinLock<Option<IrqLine>>,
     _aclk: ClockHandle,
     /// Held so the clocks the card enables and disables outlive it.
@@ -234,6 +237,11 @@ impl Driver for Komeda {
 
     fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
         let s = cx.sleepable();
+        let unit: u32 = match cx.ident() {
+            Ident::Acpi(i, _) => i.uid.as_deref().and_then(|u| u.parse().ok()),
+            _ => None,
+        }
+        .ok_or(AttachError::Device("no unit number"))?;
         let mut aclk = cx.clock(Some("aclk"))?;
         // The main clock is pinned (section 08 §8.3); its register access
         // needs it running.
@@ -272,6 +280,13 @@ impl Driver for Komeda {
         {
             return Err(AttachError::Decline);
         }
+        // The transmitter of the same number gives the output; until it
+        // has attached there is nothing to build the card for.
+        let Some(out) = sky1_dp::outputs::lookup(unit) else {
+            return Err(AttachError::Wait(Need::Firmware(alloc::format!(
+                "\\_SB_.DP0{unit}"
+            ))));
+        };
         discover::soft_reset(&*words, &*delay).map_err(|_| AttachError::Device("soft reset"))?;
         let dpu = Dpu::new(words.clone(), delay, layout);
         dpu.init();
@@ -283,10 +298,16 @@ impl Driver for Komeda {
             aclk_khz: fixed / 1000,
             pixel: [SpinLock::new(px0), SpinLock::new(px1)],
         });
+        let outputs = alloc::vec![Output {
+            pipe: 0,
+            encoder: out.encoder,
+            connector: out.connector,
+        }];
         let card =
-            create(dpu, machine.clone(), Vec::new()).map_err(|_| AttachError::Device("card"))?;
+            create(dpu, machine.clone(), outputs).map_err(|_| AttachError::Device("card"))?;
         Ok(Self {
             card,
+            node: SpinLock::new(None),
             irq: SpinLock::new(Some(irq)),
             _aclk: aclk,
             _machine: machine,
@@ -298,10 +319,19 @@ impl Driver for Komeda {
         if let Some(l) = line {
             cx.interrupt(l, Some(intr), None, 0)?;
         }
+        // The card exists for userland from here.
+        match drm::register(self.card.clone()) {
+            Ok(n) => *self.node.lock() = Some(n),
+            Err(_) => return Err(AttachError::Device("registering the card")),
+        }
         Ok(())
     }
 
-    fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {
+    fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
+        let node = self.node.lock().take();
+        if let Some(n) = node {
+            n.unregister(cx.sleepable());
+        }
         self.card.dpu().mask();
     }
 }
