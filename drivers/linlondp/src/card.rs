@@ -190,15 +190,26 @@ struct Held {
     maps: Vec<Mapped>,
 }
 
+/// Moves what is held one commit back, and lets go of what was held three
+/// commits ago.
+fn retire(h: &mut [Option<Held>; 3]) {
+    h[2] = h[1].take();
+    h[1] = h[0].take();
+}
+
 struct Layer {
     inner: Arc<Inner>,
     pipe: usize,
     layer: usize,
     kind: LayerKind,
     formats: Vec<Fourcc>,
-    /// What is shown, and what was shown before it (the display may
-    /// still be reading that until the commit completes).
-    held: SpinLock<(Option<Held>, Option<Held>)>,
+    /// What is shown, and what was shown before it, twice over. A flip
+    /// takes effect at the next latch, which can be a frame after the
+    /// commit's event was sent, so the display may still read what the
+    /// previous commit replaced when the next one arrives: a buffer goes
+    /// only when three commits have replaced it (observed on the board:
+    /// the unit read a buffer one commit after it was released).
+    held: SpinLock<[Option<Held>; 3]>,
 }
 
 impl PlaneHw for Layer {
@@ -264,7 +275,7 @@ impl PlaneHw for Layer {
             // What it showed may still be read until this commit
             // completes: it goes at the next one.
             let mut h = self.held.lock();
-            h.1 = h.0.take();
+            retire(&mut h);
             return;
         };
         let (Some(info), Some(hf)) = (lookup(fb.format), format::lookup(fb.format)) else {
@@ -273,7 +284,7 @@ impl PlaneHw for Layer {
         // Map each plane's buffer, once for a framebuffer already shown.
         let reuse = {
             let h = self.held.lock();
-            h.0.as_ref().is_some_and(|c| Arc::ptr_eq(&c.fb, fb))
+            h[0].as_ref().is_some_and(|c| Arc::ptr_eq(&c.fb, fb))
         };
         let mut fresh = Vec::new();
         if !reuse {
@@ -297,14 +308,14 @@ impl PlaneHw for Layer {
         {
             let mut h = self.held.lock();
             if !reuse {
-                // What was shown two commits ago is no longer read.
-                h.1 = h.0.take();
-                h.0 = Some(Held {
+                // What was shown three commits ago is no longer read.
+                retire(&mut h);
+                h[0] = Some(Held {
                     fb: Arc::clone(fb),
                     maps: fresh,
                 });
             }
-            let Some(cur) = h.0.as_ref() else { return };
+            let Some(cur) = h[0].as_ref() else { return };
             for (i, m) in cur.maps.iter().enumerate().take(3) {
                 let base = m.addr + u64::from(fb.offsets[i]);
                 addr[i] = plane_addr(info, i, base, fb.pitches[i], x, y);
@@ -385,7 +396,7 @@ pub fn create(dpu: Dpu, plat: Arc<dyn Platform>, outputs: Vec<Output>) -> Result
                 layer: l,
                 kind,
                 formats: format::offered(kind),
-                held: SpinLock::new((None, None)),
+                held: SpinLock::new([None, None, None]),
             };
             let pk = if l == 0 {
                 PlaneKind::Primary

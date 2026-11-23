@@ -142,7 +142,7 @@ fn rig() -> Rig {
                 layer: l,
                 kind,
                 formats: crate::format::offered(kind),
-                held: SpinLock::new((None, None)),
+                held: SpinLock::new([None, None, None]),
             }
         })
         .collect();
@@ -386,7 +386,10 @@ fn a_plane_shows_a_buffer_at_its_mapped_address_and_hides() {
 }
 
 #[test]
-fn a_buffer_is_unmapped_when_it_is_two_commits_old() {
+fn a_buffer_is_unmapped_when_three_commits_have_replaced_it() {
+    // A flip can take effect a frame after its event, so the display may
+    // still read what the previous commit replaced (the board's translation
+    // faults, 2026-11-23): a buffer goes when the third newer one arrives.
     let r = rig();
     turn_on(&r);
     let (o, n) = (PlaneSt::default(), PlaneSt::default());
@@ -394,17 +397,21 @@ fn a_buffer_is_unmapped_when_it_is_two_commits_old() {
     let a = fb(&r, format::ARGB8888, 256, 256, 1024);
     let b = fb(&r, format::ARGB8888, 256, 256, 1024);
     let c = fb(&r, format::ARGB8888, 256, 256, 1024);
+    let d = fb(&r, format::ARGB8888, 256, 256, 1024);
     let v = visible(256, 256, 0, 0);
     r.layers[0].commit(&update(Some(&a), v, &o, &n));
     assert_eq!(live.load(Ordering::SeqCst), 1);
     // The same buffer again maps nothing.
     r.layers[0].commit(&update(Some(&a), v, &o, &n));
     assert_eq!(live.load(Ordering::SeqCst), 1);
-    // A new one: the old is kept, as the display may still read it.
+    // New ones: the old are kept, as the display may still read them.
     r.layers[0].commit(&update(Some(&b), v, &o, &n));
     assert_eq!(live.load(Ordering::SeqCst), 2);
     r.layers[0].commit(&update(Some(&c), v, &o, &n));
-    assert_eq!(live.load(Ordering::SeqCst), 2);
+    assert_eq!(live.load(Ordering::SeqCst), 3);
+    // The fourth replaces the first for the third time: it goes.
+    r.layers[0].commit(&update(Some(&d), v, &o, &n));
+    assert_eq!(live.load(Ordering::SeqCst), 3);
 }
 
 #[test]
