@@ -94,6 +94,9 @@ struct State {
     fifo: Vec<u8>,
     addr: u32,
     i2c_offset: usize,
+    /// Most bytes one I2C read is answered with (a sink may answer less
+    /// than was asked).
+    i2c_max: usize,
     cause: u32,
     ready_mask: u32,
     delays_us: u64,
@@ -106,6 +109,11 @@ pub(crate) struct Sim {
 }
 
 impl Sim {
+    /// Answers each I2C read with at most `n` bytes.
+    pub(crate) fn short_i2c_reads(&self, n: usize) {
+        self.s.lock().unwrap().i2c_max = n;
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             s: Mutex::new(State {
@@ -119,6 +127,7 @@ impl Sim {
                 fifo: Vec::new(),
                 addr: 0,
                 i2c_offset: 0,
+                i2c_max: usize::MAX,
                 cause: 0,
                 ready_mask: 0xF,
                 delays_us: 0,
@@ -206,6 +215,7 @@ impl State {
             }
             // I2C read.
             1 => {
+                let len = len.min(self.i2c_max);
                 for i in 0..len {
                     let b = self
                         .sink

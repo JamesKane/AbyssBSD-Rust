@@ -67,7 +67,7 @@ impl<'a> Aux<'a> {
         read: &mut [u8],
         address_only: bool,
         native: bool,
-    ) -> Result<Reply, AuxError> {
+    ) -> Result<(Reply, usize), AuxError> {
         if !self.hpd() {
             return Err(AuxError::NoSink);
         }
@@ -109,16 +109,21 @@ impl<'a> Aux<'a> {
             1 => Reply::Nack,
             _ => Reply::Defer,
         };
+        let mut received = 0;
         if reply == Reply::Ack && !read.is_empty() {
             let n = (self.w.read(regs::AUX_REPLY_DATA_COUNT) & 0xFF) as usize;
-            if n != read.len() {
+            // A native read returns what was asked for. An I2C-over-AUX
+            // read may be answered with fewer bytes, and the source asks
+            // again for the rest (the standard's I2C-over-AUX framing).
+            if n == 0 || n > read.len() || (native && n != read.len()) {
                 return Err(AuxError::Io);
             }
-            for b in read.iter_mut() {
+            for b in read.iter_mut().take(n) {
                 *b = u8::try_from(self.w.read(regs::AUX_REPLY_DATA) & 0xFF).unwrap_or(0);
             }
+            received = n;
         }
-        Ok(reply)
+        Ok((reply, received))
     }
 
     /// One transaction with the retries the standard asks of a source.
@@ -131,12 +136,26 @@ impl<'a> Aux<'a> {
         address_only: bool,
         native: bool,
     ) -> Result<(), AuxError> {
+        self.retried_n(cmd, addr, write, read, address_only, native)
+            .map(|_| ())
+    }
+
+    /// [`Aux::retried`], with the number of bytes a read received.
+    fn retried_n(
+        &self,
+        cmd: u32,
+        addr: u32,
+        write: &[u8],
+        read: &mut [u8],
+        address_only: bool,
+        native: bool,
+    ) -> Result<usize, AuxError> {
         let (mut defers, mut timeouts) = (0, 0);
         loop {
             match self.once(cmd, addr, write, read, address_only, native) {
-                Ok(Reply::Ack) => return Ok(()),
-                Ok(Reply::Nack) => return Err(AuxError::Nack),
-                Ok(Reply::Defer) => {
+                Ok((Reply::Ack, n)) => return Ok(n),
+                Ok((Reply::Nack, _)) => return Err(AuxError::Nack),
+                Ok((Reply::Defer, _)) => {
                     defers += 1;
                     if defers > DEFER_RETRIES {
                         return Err(AuxError::Defer);
@@ -213,7 +232,11 @@ impl<'a> Aux<'a> {
         for (i, chunk) in buf.chunks_mut(CHUNK).enumerate() {
             let last = i + 1 == chunks;
             let cmd = regs::AUX_I2C_READ | if last { 0 } else { mot };
-            self.retried(cmd, a, &[], chunk, false, false)?;
+            // A short reply is not the end: ask for the rest.
+            let mut done = 0;
+            while done < chunk.len() {
+                done += self.retried_n(cmd, a, &[], &mut chunk[done..], false, false)?;
+            }
         }
         // Stop.
         self.retried(regs::AUX_I2C_READ, a, &[], &mut [], true, false)

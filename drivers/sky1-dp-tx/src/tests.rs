@@ -645,3 +645,21 @@ fn nonsense_left_in_the_link_registers_is_not_adopted() {
     sim.write(regs::LANE_COUNT_SET, 3);
     assert!(d.adopt().is_none());
 }
+
+#[test]
+fn a_sink_that_answers_an_i2c_read_with_fewer_bytes_is_asked_for_the_rest() {
+    // Seen on the board: the EDID read failed when a reply carried fewer
+    // bytes than the 16 asked for.
+    let sim = Sim::new();
+    sim.sink(|s| {
+        for (i, b) in s.edid.iter_mut().enumerate().skip(8) {
+            *b = u8::try_from(i).unwrap();
+        }
+    });
+    sim.short_i2c_reads(5);
+    let aux = Aux::new(&sim, &sim);
+    let e = aux.read_edid_block(0).unwrap();
+    assert_eq!(e[8], 8);
+    assert_eq!(e[127], 127);
+    assert_eq!(e[64], 64);
+}
