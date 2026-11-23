@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+// Copyright 1999 Precision Insight, Inc., Cedar Park, Texas.
+// Copyright 2000 VA Linux Systems, Inc., Sunnyvale, California.
 // Copyright (c) 2007 Dave Airlie <airlied@linux.ie>
 // Copyright (c) 2007 Jakob Bornecrantz <wallbraker@gmail.com>
 // Copyright (c) 2008 Red Hat Inc.
@@ -273,9 +275,10 @@ pub const DRM_EVENT_VBLANK: u32 = 0x01;
 pub const DRM_EVENT_FLIP_COMPLETE: u32 = 0x02;
 pub const DRM_EVENT_CRTC_SEQUENCE: u32 = 0x03;
 
-/// `DRM_CLOEXEC` and `DRM_RDWR` (`PRIME_HANDLE_TO_FD` flags).
-pub const DRM_CLOEXEC: u32 = 0o2000000;
-pub const DRM_RDWR: u32 = 0o2;
+/// `DRM_CLOEXEC` and `DRM_RDWR` (`PRIME_HANDLE_TO_FD` flags): libdrm
+/// defines them as `O_CLOEXEC` and `O_RDWR`, which are FreeBSD's values here.
+pub const DRM_CLOEXEC: u32 = crate::fcntl::O_CLOEXEC;
+pub const DRM_RDWR: u32 = crate::fcntl::O_RDWR;
 
 // `drm_wait_vblank` types.
 pub const DRM_VBLANK_ABSOLUTE: u32 = 0x0;
@@ -950,6 +953,459 @@ pub const DRM_IOCTL_MODE_REVOKE_LEASE: u32 = iowr(0xC9, size_of::<DrmModeRevokeL
 pub const DRM_IOCTL_MODE_GETFB2: u32 = iowr(0xCE, size_of::<DrmModeFbCmd2>());
 pub const DRM_IOCTL_MODE_CLOSEFB: u32 = iowr(0xD0, size_of::<DrmModeClosefb>());
 
+// ---- field codecs ----
+
+/// A value at a fixed place in a structure's bytes, in native order.
+pub trait WireField: Sized {
+    /// Its size in bytes.
+    const SIZE: usize;
+    /// Reads it from the start of `b` (at least `SIZE` bytes).
+    fn get(b: &[u8]) -> Self;
+    /// Writes it to the start of `b`.
+    fn put(&self, b: &mut [u8]);
+}
+
+macro_rules! wire_prim {
+    ($($t:ty),*) => {$(
+        impl WireField for $t {
+            const SIZE: usize = size_of::<$t>();
+            fn get(b: &[u8]) -> Self {
+                let mut x = [0u8; size_of::<$t>()];
+                x.copy_from_slice(&b[..Self::SIZE]);
+                Self::from_ne_bytes(x)
+            }
+            fn put(&self, b: &mut [u8]) {
+                b[..Self::SIZE].copy_from_slice(&self.to_ne_bytes());
+            }
+        }
+    )*};
+}
+wire_prim!(u8, u16, u32, u64, i32, i64);
+
+impl<T: WireField, const N: usize> WireField for [T; N] {
+    const SIZE: usize = N * T::SIZE;
+    fn get(b: &[u8]) -> Self {
+        core::array::from_fn(|i| T::get(&b[i * T::SIZE..]))
+    }
+    fn put(&self, b: &mut [u8]) {
+        for (i, v) in self.iter().enumerate() {
+            v.put(&mut b[i * T::SIZE..]);
+        }
+    }
+}
+
+/// A structure that crosses the user boundary: decoded from and encoded
+/// to its C layout field by field, at the offsets `offset_of!` gives, so
+/// no padding is read and no `unsafe` is needed.
+pub trait Wire: Sized {
+    /// `sizeof` the C structure.
+    const SIZE: usize;
+    /// Decodes it from `b`, which must hold `SIZE` bytes.
+    fn decode(b: &[u8]) -> Self;
+    /// Encodes it into `b`, which must hold `SIZE` bytes; padding is left
+    /// as it was.
+    fn encode(&self, b: &mut [u8]);
+}
+
+macro_rules! wire {
+    ($name:ident { $($f:ident: $t:ty),* $(,)? }) => {
+        impl Wire for $name {
+            const SIZE: usize = size_of::<$name>();
+            fn decode(b: &[u8]) -> Self {
+                Self { $($f: <$t as WireField>::get(&b[core::mem::offset_of!($name, $f)..])),* }
+            }
+            fn encode(&self, b: &mut [u8]) {
+                $(WireField::put(&self.$f, &mut b[core::mem::offset_of!($name, $f)..]);)*
+            }
+        }
+        impl WireField for $name {
+            const SIZE: usize = size_of::<$name>();
+            fn get(b: &[u8]) -> Self {
+                <Self as Wire>::decode(b)
+            }
+            fn put(&self, b: &mut [u8]) {
+                <Self as Wire>::encode(self, b);
+            }
+        }
+    };
+}
+
+wire!(DrmVersion {
+    version_major: i32,
+    version_minor: i32,
+    version_patchlevel: i32,
+    name_len: u64,
+    name: u64,
+    date_len: u64,
+    date: u64,
+    desc_len: u64,
+    desc: u64
+});
+wire!(DrmUnique {
+    unique_len: u64,
+    unique: u64
+});
+wire!(DrmAuth { magic: u32 });
+wire!(DrmGemClose {
+    handle: u32,
+    pad: u32
+});
+wire!(DrmGemFlink {
+    handle: u32,
+    name: u32
+});
+wire!(DrmGemOpen {
+    name: u32,
+    handle: u32,
+    size: u64
+});
+wire!(DrmGetCap {
+    capability: u64,
+    value: u64
+});
+wire!(DrmSetClientCap {
+    capability: u64,
+    value: u64
+});
+wire!(DrmSetClientName {
+    name_len: u64,
+    name: u64
+});
+wire!(DrmModesetCtl {
+    crtc: u32,
+    cmd: u32
+});
+wire!(DrmPrimeHandle {
+    handle: u32,
+    flags: u32,
+    fd: i32
+});
+wire!(DrmWaitVblankRequest {
+    kind: u32,
+    sequence: u32,
+    signal: u64
+});
+wire!(DrmWaitVblankReply {
+    kind: u32,
+    sequence: u32,
+    tval_sec: i64,
+    tval_usec: i64
+});
+wire!(DrmWaitVblank {
+    kind: u32,
+    sequence: u32,
+    word0: u64,
+    word1: u64
+});
+wire!(DrmCrtcGetSequence {
+    crtc_id: u32,
+    active: u32,
+    sequence: u64,
+    sequence_ns: i64
+});
+wire!(DrmCrtcQueueSequence {
+    crtc_id: u32,
+    flags: u32,
+    sequence: u64,
+    user_data: u64
+});
+wire!(DrmEvent {
+    kind: u32,
+    length: u32
+});
+wire!(DrmEventVblank {
+    base: DrmEvent,
+    user_data: u64,
+    tv_sec: u32,
+    tv_usec: u32,
+    sequence: u32,
+    crtc_id: u32
+});
+wire!(DrmEventCrtcSequence {
+    base: DrmEvent,
+    user_data: u64,
+    time_ns: i64,
+    sequence: u64
+});
+wire!(DrmModeModeinfo {
+    clock: u32,
+    hdisplay: u16,
+    hsync_start: u16,
+    hsync_end: u16,
+    htotal: u16,
+    hskew: u16,
+    vdisplay: u16,
+    vsync_start: u16,
+    vsync_end: u16,
+    vtotal: u16,
+    vscan: u16,
+    vrefresh: u32,
+    flags: u32,
+    kind: u32,
+    name: [u8; DRM_DISPLAY_MODE_LEN]
+});
+wire!(DrmModeCardRes {
+    fb_id_ptr: u64,
+    crtc_id_ptr: u64,
+    connector_id_ptr: u64,
+    encoder_id_ptr: u64,
+    count_fbs: u32,
+    count_crtcs: u32,
+    count_connectors: u32,
+    count_encoders: u32,
+    min_width: u32,
+    max_width: u32,
+    min_height: u32,
+    max_height: u32
+});
+wire!(DrmModeCrtc {
+    set_connectors_ptr: u64,
+    count_connectors: u32,
+    crtc_id: u32,
+    fb_id: u32,
+    x: u32,
+    y: u32,
+    gamma_size: u32,
+    mode_valid: u32,
+    mode: DrmModeModeinfo
+});
+wire!(DrmModeSetPlane {
+    plane_id: u32,
+    crtc_id: u32,
+    fb_id: u32,
+    flags: u32,
+    crtc_x: i32,
+    crtc_y: i32,
+    crtc_w: u32,
+    crtc_h: u32,
+    src_x: u32,
+    src_y: u32,
+    src_h: u32,
+    src_w: u32
+});
+wire!(DrmModeGetPlane {
+    plane_id: u32,
+    crtc_id: u32,
+    fb_id: u32,
+    possible_crtcs: u32,
+    gamma_size: u32,
+    count_format_types: u32,
+    format_type_ptr: u64
+});
+wire!(DrmModeGetPlaneRes {
+    plane_id_ptr: u64,
+    count_planes: u32
+});
+wire!(DrmModeGetEncoder {
+    encoder_id: u32,
+    encoder_type: u32,
+    crtc_id: u32,
+    possible_crtcs: u32,
+    possible_clones: u32
+});
+wire!(DrmModeGetConnector {
+    encoders_ptr: u64,
+    modes_ptr: u64,
+    props_ptr: u64,
+    prop_values_ptr: u64,
+    count_modes: u32,
+    count_props: u32,
+    count_encoders: u32,
+    encoder_id: u32,
+    connector_id: u32,
+    connector_type: u32,
+    connector_type_id: u32,
+    connection: u32,
+    mm_width: u32,
+    mm_height: u32,
+    subpixel: u32,
+    pad: u32
+});
+wire!(DrmModePropertyEnum {
+    value: u64,
+    name: [u8; DRM_PROP_NAME_LEN]
+});
+wire!(DrmModeGetProperty {
+    values_ptr: u64,
+    enum_blob_ptr: u64,
+    prop_id: u32,
+    flags: u32,
+    name: [u8; DRM_PROP_NAME_LEN],
+    count_values: u32,
+    count_enum_blobs: u32
+});
+wire!(DrmModeConnectorSetProperty {
+    value: u64,
+    prop_id: u32,
+    connector_id: u32
+});
+wire!(DrmModeObjGetProperties {
+    props_ptr: u64,
+    prop_values_ptr: u64,
+    count_props: u32,
+    obj_id: u32,
+    obj_type: u32
+});
+wire!(DrmModeObjSetProperty {
+    value: u64,
+    prop_id: u32,
+    obj_id: u32,
+    obj_type: u32
+});
+wire!(DrmModeGetBlob {
+    blob_id: u32,
+    length: u32,
+    data: u64
+});
+wire!(DrmModeFbCmd {
+    fb_id: u32,
+    width: u32,
+    height: u32,
+    pitch: u32,
+    bpp: u32,
+    depth: u32,
+    handle: u32
+});
+wire!(DrmModeFbCmd2 {
+    fb_id: u32,
+    width: u32,
+    height: u32,
+    pixel_format: u32,
+    flags: u32,
+    handles: [u32; 4],
+    pitches: [u32; 4],
+    offsets: [u32; 4],
+    modifier: [u64; 4]
+});
+wire!(DrmModeFbDirtyCmd {
+    fb_id: u32,
+    flags: u32,
+    color: u32,
+    num_clips: u32,
+    clips_ptr: u64
+});
+wire!(DrmModeCursor {
+    flags: u32,
+    crtc_id: u32,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    handle: u32
+});
+wire!(DrmModeCursor2 {
+    flags: u32,
+    crtc_id: u32,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    handle: u32,
+    hot_x: i32,
+    hot_y: i32
+});
+wire!(DrmModeCrtcLut {
+    crtc_id: u32,
+    gamma_size: u32,
+    red: u64,
+    green: u64,
+    blue: u64
+});
+wire!(DrmColorLut {
+    red: u16,
+    green: u16,
+    blue: u16,
+    reserved: u16
+});
+wire!(DrmColorCtm { matrix: [u64; 9] });
+wire!(DrmModeCrtcPageFlip {
+    crtc_id: u32,
+    fb_id: u32,
+    flags: u32,
+    reserved: u32,
+    user_data: u64
+});
+wire!(DrmModeCrtcPageFlipTarget {
+    crtc_id: u32,
+    fb_id: u32,
+    flags: u32,
+    sequence: u32,
+    user_data: u64
+});
+wire!(DrmModeCreateDumb {
+    height: u32,
+    width: u32,
+    bpp: u32,
+    flags: u32,
+    handle: u32,
+    pitch: u32,
+    size: u64
+});
+wire!(DrmModeMapDumb {
+    handle: u32,
+    pad: u32,
+    offset: u64
+});
+wire!(DrmModeDestroyDumb { handle: u32 });
+wire!(DrmModeAtomic {
+    flags: u32,
+    count_objs: u32,
+    objs_ptr: u64,
+    count_props_ptr: u64,
+    props_ptr: u64,
+    prop_values_ptr: u64,
+    reserved: u64,
+    user_data: u64
+});
+wire!(DrmFormatModifierBlob {
+    version: u32,
+    flags: u32,
+    count_formats: u32,
+    formats_offset: u32,
+    count_modifiers: u32,
+    modifiers_offset: u32
+});
+wire!(DrmFormatModifier {
+    formats: u64,
+    offset: u32,
+    pad: u32,
+    modifier: u64
+});
+wire!(DrmModeCreateBlob {
+    data: u64,
+    length: u32,
+    blob_id: u32
+});
+wire!(DrmModeDestroyBlob { blob_id: u32 });
+wire!(DrmModeCreateLease {
+    object_ids: u64,
+    object_count: u32,
+    flags: u32,
+    lessee_id: u32,
+    fd: u32
+});
+wire!(DrmModeListLessees {
+    count_lessees: u32,
+    pad: u32,
+    lessees_ptr: u64
+});
+wire!(DrmModeGetLease {
+    count_objects: u32,
+    pad: u32,
+    objects_ptr: u64
+});
+wire!(DrmModeRevokeLease { lessee_id: u32 });
+wire!(DrmModeRect {
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32
+});
+wire!(DrmModeClosefb {
+    fb_id: u32,
+    pad: u32
+});
+
 // Layouts, from compiling `drm.h` and `drm_mode.h` for LP64 with a C
 // compiler. `abi-check` compares against FreeBSD's base headers, and
 // these are libdrm's (a port), so each size is pinned here instead.
@@ -1027,6 +1483,41 @@ mod tests {
         assert_eq!(DRM_IOCTL_MODE_ATOMIC, 0xc038_64bc);
         assert!(is_drm_ioctl(DRM_IOCTL_MODE_CREATE_DUMB));
         assert_eq!(ioctl_nr(DRM_IOCTL_MODE_CREATE_DUMB), 0xb2);
+    }
+
+    #[test]
+    fn wire_round_trips_and_skips_padding() {
+        // `drm_version` has 4 bytes of padding after its third int.
+        let v = DrmVersion {
+            version_major: 1,
+            version_minor: 2,
+            version_patchlevel: 3,
+            name_len: 4,
+            name: 0x1000,
+            date_len: 5,
+            date: 0x2000,
+            desc_len: 6,
+            desc: 0x3000,
+        };
+        let mut b = [0xeeu8; 64];
+        v.encode(&mut b);
+        assert_eq!(&b[12..16], &[0xee; 4]);
+        assert_eq!(DrmVersion::decode(&b), v);
+
+        // A nested structure and a name array.
+        let mut c = DrmModeCrtc {
+            crtc_id: 7,
+            mode_valid: 1,
+            ..Default::default()
+        };
+        c.mode.hdisplay = 1920;
+        c.mode.vrefresh = 60;
+        c.mode.name[..4].copy_from_slice(b"1080");
+        let mut b = [0u8; 104];
+        c.encode(&mut b);
+        assert_eq!(DrmModeCrtc::decode(&b), c);
+        // `mode` starts after seven 32-bit fields and the 64-bit pointer.
+        assert_eq!(&b[36 + 4..36 + 6], &1920u16.to_ne_bytes());
     }
 
     #[test]

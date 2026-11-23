@@ -3,9 +3,11 @@
 //!
 //! A request carries its argument's size, but DRM does not trust it:
 //! each handler has the size of the structure it knows. A caller's
-//! shorter structure is zero-extended to it; a longer one is cut to it.
-//! Only the bytes the caller passed come back. Requests the core lacks
-//! are logged, so a compositor or `modetest` says what it needs.
+//! shorter structure is zero-extended to it; a longer one is cut to it,
+//! its tail ignored (as `drm_ioctl` does; drivers' own requests that
+//! demand a zero tail, panthor's, check it themselves). Only the bytes
+//! the caller passed come back. Requests the core lacks are logged, so a
+//! compositor or `modetest` says what it needs.
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -31,71 +33,71 @@ struct Def {
     handler: Handler,
 }
 
-const fn nr(req: u32) -> u8 {
-    ioctl_nr(req)
+/// A request with no argument.
+struct Empty;
+
+impl Wire for Empty {
+    const SIZE: usize = 0;
+    fn decode(_: &[u8]) -> Self {
+        Self
+    }
+    fn encode(&self, _: &mut [u8]) {}
+}
+
+/// A table entry for request `$req` whose argument is `$ty`, handled by
+/// `$h(&Open, &mut $ty)`.
+macro_rules! def {
+    ($req:ident, $name:literal, $ty:ty, $h:path) => {
+        Def {
+            nr: ioctl_nr($req),
+            name: $name,
+            size: <$ty as Wire>::SIZE,
+            handler: |f, b| {
+                let mut a = <$ty as Wire>::decode(b);
+                let r = $h(f, &mut a)?;
+                a.encode(b);
+                Ok(r)
+            },
+        }
+    };
 }
 
 const TABLE: &[Def] = &[
-    Def {
-        nr: nr(DRM_IOCTL_VERSION),
-        name: "VERSION",
-        size: 64,
-        handler: version,
-    },
-    Def {
-        nr: nr(DRM_IOCTL_GEM_CLOSE),
-        name: "GEM_CLOSE",
-        size: 8,
-        handler: gem_close,
-    },
-    Def {
-        nr: nr(DRM_IOCTL_GET_CAP),
-        name: "GET_CAP",
-        size: 16,
-        handler: get_cap,
-    },
-    Def {
-        nr: nr(DRM_IOCTL_SET_CLIENT_CAP),
-        name: "SET_CLIENT_CAP",
-        size: 16,
-        handler: set_client_cap,
-    },
-    Def {
-        nr: nr(DRM_IOCTL_SET_MASTER),
-        name: "SET_MASTER",
-        size: 0,
-        handler: set_master,
-    },
-    Def {
-        nr: nr(DRM_IOCTL_DROP_MASTER),
-        name: "DROP_MASTER",
-        size: 0,
-        handler: drop_master,
-    },
-    Def {
-        nr: nr(DRM_IOCTL_SET_CLIENT_NAME),
-        name: "SET_CLIENT_NAME",
-        size: 16,
-        handler: set_client_name,
-    },
-    Def {
-        nr: nr(DRM_IOCTL_MODE_CREATE_DUMB),
-        name: "MODE_CREATE_DUMB",
-        size: 32,
-        handler: create_dumb,
-    },
-    Def {
-        nr: nr(DRM_IOCTL_MODE_MAP_DUMB),
-        name: "MODE_MAP_DUMB",
-        size: 16,
-        handler: map_dumb,
-    },
-    Def {
-        nr: nr(DRM_IOCTL_MODE_DESTROY_DUMB),
-        name: "MODE_DESTROY_DUMB",
-        size: 4,
-        handler: destroy_dumb,
-    },
+    def!(DRM_IOCTL_VERSION, "VERSION", DrmVersion, version),
+    def!(DRM_IOCTL_GEM_CLOSE, "GEM_CLOSE", DrmGemClose, gem_close),
+    def!(DRM_IOCTL_GET_CAP, "GET_CAP", DrmGetCap, get_cap),
+    def!(
+        DRM_IOCTL_SET_CLIENT_CAP,
+        "SET_CLIENT_CAP",
+        DrmSetClientCap,
+        set_client_cap
+    ),
+    def!(DRM_IOCTL_SET_MASTER, "SET_MASTER", Empty, set_master),
+    def!(DRM_IOCTL_DROP_MASTER, "DROP_MASTER", Empty, drop_master),
+    def!(
+        DRM_IOCTL_SET_CLIENT_NAME,
+        "SET_CLIENT_NAME",
+        DrmSetClientName,
+        set_client_name
+    ),
+    def!(
+        DRM_IOCTL_MODE_CREATE_DUMB,
+        "MODE_CREATE_DUMB",
+        DrmModeCreateDumb,
+        create_dumb
+    ),
+    def!(
+        DRM_IOCTL_MODE_MAP_DUMB,
+        "MODE_MAP_DUMB",
+        DrmModeMapDumb,
+        map_dumb
+    ),
+    def!(
+        DRM_IOCTL_MODE_DESTROY_DUMB,
+        "MODE_DESTROY_DUMB",
+        DrmModeDestroyDumb,
+        destroy_dumb
+    ),
 ];
 
 /// Runs request `req` on `file`.
@@ -133,66 +135,39 @@ pub(crate) fn dispatch(file: &Open, req: u32, arg: &mut [u8]) -> Result<usize, E
     Ok(r)
 }
 
-fn u32_at(b: &[u8], at: usize) -> u32 {
-    let mut x = [0u8; 4];
-    x.copy_from_slice(&b[at..at + 4]);
-    u32::from_ne_bytes(x)
-}
-
-fn u64_at(b: &[u8], at: usize) -> u64 {
-    let mut x = [0u8; 8];
-    x.copy_from_slice(&b[at..at + 8]);
-    u64::from_ne_bytes(x)
-}
-
-fn put_u32(b: &mut [u8], at: usize, v: u32) {
-    b[at..at + 4].copy_from_slice(&v.to_ne_bytes());
-}
-
-fn put_u64(b: &mut [u8], at: usize, v: u64) {
-    b[at..at + 8].copy_from_slice(&v.to_ne_bytes());
-}
-
 /// `drm_version`: names are copied out up to the lengths the caller
 /// gave, and the lengths are set to the full ones (no NUL).
-fn version(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
+fn version(f: &Open, a: &mut DrmVersion) -> Result<usize, Errno> {
     let env = crate::env().ok_or(Errno::ENXIO)?;
     let info = f.card.driver().info();
-    let put_i32 = |b: &mut [u8], at: usize, v: i32| b[at..at + 4].copy_from_slice(&v.to_ne_bytes());
-    put_i32(a, 0, info.major);
-    put_i32(a, 4, info.minor);
-    put_i32(a, 8, info.patch);
-    // (len at, pointer at, text)
-    for (len_at, ptr_at, text) in [
-        (16, 24, info.name),
-        (32, 40, info.date),
-        (48, 56, info.desc),
+    a.version_major = info.major;
+    a.version_minor = info.minor;
+    a.version_patchlevel = info.patch;
+    for (len, ptr, text) in [
+        (&mut a.name_len, a.name, info.name),
+        (&mut a.date_len, a.date, info.date),
+        (&mut a.desc_len, a.desc, info.desc),
     ] {
-        let cap = usize::try_from(u64_at(a, len_at)).unwrap_or(usize::MAX);
-        let ptr = u64_at(a, ptr_at);
+        let cap = usize::try_from(*len).unwrap_or(usize::MAX);
         let n = text.len().min(cap);
         if n != 0 && ptr != 0 {
             env.user.copy_out(ptr, &text.as_bytes()[..n])?;
         }
-        put_u64(a, len_at, text.len() as u64);
+        *len = text.len() as u64;
     }
     Ok(0)
 }
 
-fn gem_close(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
-    let handle = u32_at(a, 0);
-    f.handles
-        .lock()
-        .remove(handle)
-        .map(|_| 0)
-        .ok_or(Errno::EINVAL)
+fn gem_close(f: &Open, a: &mut DrmGemClose) -> Result<usize, Errno> {
+    // The buffer may be the last holder: free it outside the lock.
+    let gone = f.handles.lock().remove(a.handle);
+    gone.map(|_| 0).ok_or(Errno::EINVAL)
 }
 
-fn get_cap(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
-    let cap = u64_at(a, 0);
+fn get_cap(f: &Open, a: &mut DrmGetCap) -> Result<usize, Errno> {
     let d = f.card.driver();
     let dumb = d.dumb();
-    let v = match cap {
+    a.value = match a.capability {
         DRM_CAP_DUMB_BUFFER => u64::from(dumb.is_some()),
         DRM_CAP_VBLANK_HIGH_CRTC => 1,
         DRM_CAP_DUMB_PREFERRED_DEPTH => dumb.map_or(0, |l| u64::from(l.preferred_depth)),
@@ -206,13 +181,11 @@ fn get_cap(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
         DRM_CAP_SYNCOBJ | DRM_CAP_SYNCOBJ_TIMELINE | DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP => 0,
         other => d.cap(other).ok_or(Errno::EINVAL)?,
     };
-    put_u64(a, 8, v);
     Ok(0)
 }
 
-fn set_client_cap(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
-    let cap = u64_at(a, 0);
-    let value = u64_at(a, 8);
+fn set_client_cap(f: &Open, a: &mut DrmSetClientCap) -> Result<usize, Errno> {
+    let (cap, value) = (a.capability, a.value);
     if value > 1 {
         return Err(Errno::EINVAL);
     }
@@ -244,28 +217,26 @@ fn set_client_cap(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
     Ok(0)
 }
 
-fn set_master(f: &Open, _: &mut [u8]) -> Result<usize, Errno> {
+fn set_master(f: &Open, _: &mut Empty) -> Result<usize, Errno> {
     f.card.set_master(f.id).map(|()| 0)
 }
 
-fn drop_master(f: &Open, _: &mut [u8]) -> Result<usize, Errno> {
+fn drop_master(f: &Open, _: &mut Empty) -> Result<usize, Errno> {
     f.card.drop_master(f.id).map(|()| 0)
 }
 
 /// `drm_set_client_name`: at most 63 printable bytes, set once.
-fn set_client_name(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
+fn set_client_name(f: &Open, a: &mut DrmSetClientName) -> Result<usize, Errno> {
     const MAX: u64 = 64;
     let env = crate::env().ok_or(Errno::ENXIO)?;
-    let len = u64_at(a, 0);
-    let ptr = u64_at(a, 8);
-    if len > MAX {
+    if a.name_len > MAX {
         return Err(Errno::EINVAL);
     }
+    let len = usize::try_from(a.name_len).unwrap_or(0);
     let mut buf = Vec::new();
-    buf.try_reserve_exact(usize::try_from(len).unwrap_or(0))
-        .map_err(|_| Errno::ENOMEM)?;
-    buf.resize(usize::try_from(len).unwrap_or(0), 0);
-    env.user.copy_in(&mut buf, ptr)?;
+    buf.try_reserve_exact(len).map_err(|_| Errno::ENOMEM)?;
+    buf.resize(len, 0);
+    env.user.copy_in(&mut buf, a.name)?;
     if buf.iter().any(|b| !(0x20..0x7f).contains(b)) {
         return Err(Errno::EINVAL);
     }
@@ -278,13 +249,11 @@ fn set_client_name(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
 }
 
 /// `MODE_CREATE_DUMB`: width, height, bpp in; handle, pitch, size out.
-fn create_dumb(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
+fn create_dumb(f: &Open, a: &mut DrmModeCreateDumb) -> Result<usize, Errno> {
     const MAX_DIM: u32 = 16384;
     let env = crate::env().ok_or(Errno::ENXIO)?;
     let limits = f.card.driver().dumb().ok_or(Errno::ENOTTY)?;
-    let height = u32_at(a, 0);
-    let width = u32_at(a, 4);
-    let bpp = u32_at(a, 8);
+    let (width, height, bpp) = (a.width, a.height, a.bpp);
     if width == 0 || height == 0 || bpp == 0 || width > MAX_DIM || height > MAX_DIM || bpp > 64 {
         return Err(Errno::EINVAL);
     }
@@ -298,23 +267,21 @@ fn create_dumb(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
     let pages = size.div_ceil(PAGE_SIZE);
     let offset = f.card.alloc_offset(pages)?;
     let gem = Gem::new(env.pages, size, offset)?;
-    let size = gem.size();
-    let handle = f.handles.lock().insert(Arc::clone(&gem))?;
-    put_u32(a, 16, handle);
-    put_u32(a, 20, u32::try_from(pitch).map_err(|_| Errno::EINVAL)?);
-    put_u64(a, 24, size);
+    a.size = gem.size();
+    a.handle = f.handles.lock().insert(Arc::clone(&gem))?;
+    a.pitch = u32::try_from(pitch).map_err(|_| Errno::EINVAL)?;
     Ok(0)
 }
 
-fn map_dumb(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
+fn map_dumb(f: &Open, a: &mut DrmModeMapDumb) -> Result<usize, Errno> {
     f.card.driver().dumb().ok_or(Errno::ENOTTY)?;
-    let handle = u32_at(a, 0);
-    let gem = f.gem(handle).ok_or(Errno::ENOENT)?;
-    put_u64(a, 8, gem.mmap_offset());
+    let gem = f.gem(a.handle).ok_or(Errno::ENOENT)?;
+    a.offset = gem.mmap_offset();
     Ok(0)
 }
 
-fn destroy_dumb(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
+fn destroy_dumb(f: &Open, a: &mut DrmModeDestroyDumb) -> Result<usize, Errno> {
     f.card.driver().dumb().ok_or(Errno::ENOTTY)?;
-    gem_close(f, a)
+    let gone = f.handles.lock().remove(a.handle);
+    gone.map(|_| 0).ok_or(Errno::EINVAL)
 }

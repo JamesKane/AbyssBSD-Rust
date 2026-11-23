@@ -132,7 +132,11 @@ impl Card {
             name: SpinLock::new(None),
         });
         self.adopt_master(id);
-        self.files.lock().push(Arc::downgrade(&open));
+        {
+            let mut files = self.files.lock();
+            files.retain(|w| w.strong_count() > 0);
+            files.push(Arc::downgrade(&open));
+        }
         Ok(open)
     }
 
