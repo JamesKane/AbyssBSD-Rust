@@ -74,25 +74,62 @@ pub fn phy_path(n: u32) -> String {
     format!("\\_SB_.UCP{n}")
 }
 
-struct Core(MmioGrant<Bytes>);
+/// A register window the driver can give up while the encoder and the
+/// connector, which the display card holds, still refer to it: once the
+/// driver stops (before or after the card, as the order of detach falls),
+/// the grant goes back and reads give 0 and writes nothing. Without it the
+/// card's references kept the grants past the driver's detach (the ledger's
+/// "detach left 3 grant(s) outstanding").
+struct Window(SpinLock<Option<MmioGrant<Bytes>>>);
 
-impl dpr::Words for Core {
-    fn read(&self, offset: usize) -> u32 {
-        regs::Mmio::read32(&self.0, offset)
+impl Window {
+    fn new(g: MmioGrant<Bytes>) -> Self {
+        Self(SpinLock::new(Some(g)))
     }
+
+    fn read(&self, offset: usize) -> u32 {
+        self.0
+            .lock()
+            .as_ref()
+            .map_or(0, |g| regs::Mmio::read32(g, offset))
+    }
+
     fn write(&self, offset: usize, v: u32) {
-        regs::Mmio::write32(&self.0, offset, v);
+        if let Some(g) = self.0.lock().as_ref() {
+            regs::Mmio::write32(g, offset, v);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.0.lock().as_ref().map_or(0, |g| g.len())
+    }
+
+    /// Gives the grant back.
+    fn revoke(&self) {
+        let g = self.0.lock().take();
+        drop(g);
     }
 }
 
-struct PhyWindow(MmioGrant<Bytes>);
+struct Core(Window);
+
+impl dpr::Words for Core {
+    fn read(&self, offset: usize) -> u32 {
+        self.0.read(offset)
+    }
+    fn write(&self, offset: usize, v: u32) {
+        self.0.write(offset, v);
+    }
+}
+
+struct PhyWindow(Window);
 
 impl Words32 for PhyWindow {
     fn read(&self, offset: usize) -> u32 {
-        regs::Mmio::read32(&self.0, offset)
+        self.0.read(offset)
     }
     fn write(&self, offset: usize, v: u32) {
-        regs::Mmio::write32(&self.0, offset, v);
+        self.0.write(offset, v);
     }
 }
 
@@ -106,7 +143,7 @@ impl sky1_dp_tx::Delay for KernelDelay {
 
 /// The video adapter between the display processor and the core (section
 /// 1.10): pipeline 0's register, for the units that map it.
-struct Adapter(MmioGrant<Bytes>);
+struct Adapter(Window);
 
 impl Adapter {
     /// RGB at one pixel per clock, or two (bit 29).
@@ -115,9 +152,9 @@ impl Adapter {
         if at + 4 > self.0.len() {
             return;
         }
-        let v = regs::Mmio::read32(&self.0, at);
+        let v = self.0.read(at);
         let v = v & !(1 << 29) & !(3 << 30) | u32::from(two_pixels) << 29;
-        regs::Mmio::write32(&self.0, at, v);
+        self.0.write(at, v);
     }
 }
 
@@ -126,6 +163,9 @@ struct Link {
     dptx: Dptx,
     phy: Arc<UsbDpPhy>,
     adapter: Option<Adapter>,
+    /// The core's and the PHY interface's windows, to give back at stop.
+    core: Arc<Core>,
+    phy_win: Arc<PhyWindow>,
     vid_clk0: SpinLock<Option<ClockHandle>>,
     reset: SpinLock<Option<ResetHandle>>,
     apb_mhz: u32,
@@ -406,16 +446,16 @@ impl Driver for SkyDp {
         apb.enable(s).map_err(|_| AttachError::Device("apb_clk"))?;
         // The windows are the resources in firmware's order: the core, the
         // unused `dsc`, the PHY interface, the video adapter.
-        let core = Core(cx.mmio_bytes(0)?);
-        let phy_win = Arc::new(PhyWindow(cx.mmio_bytes(2)?));
-        let adapter = cx.mmio_bytes(3).ok().map(Adapter);
+        let core = Arc::new(Core(Window::new(cx.mmio_bytes(0)?)));
+        let phy_win = Arc::new(PhyWindow(Window::new(cx.mmio_bytes(2)?)));
+        let adapter = cx.mmio_bytes(3).ok().map(|g| Adapter(Window::new(g)));
         if !UsbDpPhy::is_combo(&*phy_win) {
             return Err(AttachError::Decline);
         }
         // A link firmware left running is taken over as it is.
         let lit_reg = dpr::source(0) + dpr::VIDEO_STREAM_ENABLE;
-        let lit = dpr::Words::read(&core, lit_reg) & 1 != 0
-            || dpr::Words::read(&core, dpr::SOURCE_ENABLE) & 1 != 0;
+        let lit = dpr::Words::read(&*core, lit_reg) & 1 != 0
+            || dpr::Words::read(&*core, dpr::SOURCE_ENABLE) & 1 != 0;
         let apb_mhz = apb
             .rate(s)
             .map(|h| u32::try_from(h.0 / 1_000_000).unwrap_or(0))
@@ -431,7 +471,7 @@ impl Driver for SkyDp {
         let phy = Arc::new(UsbDpPhy::with_core(
             shared.core.clone(),
             shared.regs.clone(),
-            phy_win,
+            phy_win.clone(),
             shared.plat.clone(),
         ));
         if !lit {
@@ -439,7 +479,7 @@ impl Driver for SkyDp {
         }
         let phy_dyn: Arc<dyn Phy> = phy.clone();
         let dptx = Dptx::new(
-            Arc::new(core),
+            core.clone(),
             Arc::new(KernelDelay),
             phy_dyn,
             // The boards cap at HBR2 (`cix,dp-max-rate` 540000).
@@ -457,6 +497,8 @@ impl Driver for SkyDp {
             dptx,
             phy,
             adapter,
+            core,
+            phy_win,
             vid_clk0: SpinLock::new(Some(vid0)),
             reset: SpinLock::new(Some(reset)),
             apb_mhz,
@@ -499,6 +541,13 @@ impl Driver for SkyDp {
         outputs::withdraw(self.unit);
         self.link.dptx.host_exit();
         self.link.phy.link_off();
+        // The card may outlive this driver and hold the encoder: the
+        // windows go back now.
+        self.link.core.0.revoke();
+        self.link.phy_win.0.revoke();
+        if let Some(a) = &self.link.adapter {
+            a.0.revoke();
+        }
     }
 }
 
