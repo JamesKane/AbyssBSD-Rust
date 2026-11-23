@@ -98,6 +98,7 @@ pub const RXCFG_BROAD: u32 = 0x08;
 pub const RXCFG_RUNT: u32 = 0x10;
 pub const RXCFG_ERRPKT: u32 = 0x20;
 pub const RXCFG_VLANSTRIP: u32 = 0x00c0_0000;
+pub const RXCFG_CONFIG_8125D: u32 = 0x4120_0c00;
 pub const RXCFG_CONFIG_8126: u32 = 0x4120_0d00;
 /// Every receive filter bit.
 pub const RXCFG_FILTERS: u32 =
@@ -105,6 +106,8 @@ pub const RXCFG_FILTERS: u32 =
 
 pub const EECMD_WRITECFG: u8 = 0xc0;
 pub const CFG1_SPEED_DOWN: u8 = 0x10;
+/// The clock-request enable of `CFG2`, off for ASPM (the RTL8125 family).
+pub const CFG2_CLKREQ_EN: u8 = 0x80;
 pub const CFG5_PME_STS: u8 = 0x01;
 
 pub const CSIAR_BYTE_EN: u32 = 0x0000_000f;

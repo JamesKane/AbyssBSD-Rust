@@ -125,7 +125,7 @@ Drivers planned from the clean-room specifications in `~/Projects/OS/chinese-wal
 | `vtnet` | VirtIO network device (multi-queue, checksum & TSO offloads) | — | **Planned** | P7 |
 | `em` (`e1000e`) | Intel I219 / 82574 1 GbE PCIe controllers | — | **Planned** | P8 |
 | `igc` | **Intel I225 / I226 2.5 GbE** PCIe controllers (onboard **I225-V** `8086:15f3` on the MSI PRO Z690-A build server) | — | **Planned** | P8 |
-| `rge` | **Realtek RTL8125 / Killer E3000 (2.5 GbE) & RTL8126 (5 GbE)** PCIe controllers (onboard NICs on the X870E `10ec:8125`, B650E Taichi Lite `10ec:3000`, and Orange Pi 6 Plus: multi-queue RSS, MSI-X, TSO, EEE, PHY microcode patching) | `specs/realtek-rtl8125-delta` | **Planned** | P8 |
+| `rge` | **Realtek RTL8125 / Killer E3000 (2.5 GbE) & RTL8126 (5 GbE)** PCIe controllers (onboard NICs on the X870E `10ec:8125`, B650E Taichi Lite `10ec:3000`, and Orange Pi 6 Plus: multi-queue RSS, MSI-X, TSO, EEE, PHY microcode patching) | `specs/realtek-rtl8125-delta` | **Supported** (RTL8126, the Orange Pi 6 Plus); **Supported, not yet on the board** (RTL8125D revision 1, the X870E's NIC); **Planned** (the other RTL8125 revisions, RTL8127, RSS, TSO) | P8 |
 | `dwc_eqos` (`dwmac`) | Synopsys DesignWare EQoS 1 GbE MAC (`0xCAC82000`) with MDIO child bus and Realtek RTL8211F RGMII PHY (onboard NIC on the Banana Pi BPI-SM10) | `specs/spacemit-k3` (`06-dwmac.md`) | **Planned** | P12 |
 | `tc956x` | **Toshiba TC9563** PCIe Gen3 switch + dual Synopsys DesignWare XGMAC2 v3.01a 2.5 GbE MACs, XPCS, SerDes PMA, and QCA8081 PHYs (onboard NICs on the Radxa Dragon Q8B) | `specs/tc956x` | **Planned** | Tier 2 (P8+) |
 
@@ -230,7 +230,7 @@ The AMD64 Tier 1 physical machine. Surveyed read-only from its Fedora 44 install
 | Display | Boot VGA (UEFI GOP) is the **NVIDIA RTX 4070** (`10de:2786`). The iGPU (Radeon 610M) is also present | The GOP framebuffer console is the primary bring-up console. Native GPU drivers belong to M-G |
 | Storage | NVMe 0: Samsung 980 PRO 2 TB, **Fedora system disk**. **Second NVMe: AbyssBSD media** (to be installed). AMD 600-series AHCI ×2 | AbyssBSD owns only the second NVMe. AHCI is exercised by the P3 driver |
 | Data disks | **2× WD 8 TB (Linux RAID 0, `md0`) and 1× HGST 6 TB (`md1` member), user data** | Never written. The storage stack attaches them read-only until P11, and `xtask deploy` refuses any target other than the designated media NVMe |
-| Network | **Realtek RTL8125 2.5 GbE** (`10ec:8125`), MediaTek MT7925 Wi-Fi 7 | `rge`-family driver (P8), shared with the RTL8126 on the Orange Pi 6 Plus. Wi-Fi is out of scope for Day 1 |
+| Network | **Realtek RTL8125D 2.5 GbE** (`10ec:8125` rev `0c`; Linux: RTL8125D, XID 688, hardware revision `0x68800000`, `MAC_R25D_1` in FreeBSD's `rge(4)`), MediaTek MT7925 Wi-Fi 7 | `rge`-family driver, shared with the RTL8126 on the Orange Pi 6 Plus: **RTL8125D_1 is programmed** (2026-11-23, from FreeBSD's `rge(4)`; first hardware run pending). Wi-Fi is out of scope for Day 1 |
 | USB | AMD 800-series chipset xHCI ×2, CPU xHCI ×3, ASMedia ASM4242 USB4 host router + xHCI | xHCI on PCI. USB4/Thunderbolt tunneling is out of scope for Day 1 |
 | Serial | No SPCR. ACPI lists FCH UARTs (`AMDI0020` ×5) and Super I/O ports (`PNP0500` ×4), but no rear-panel COM port is known | **No serial console.** See the console strategy below |
 | Other | TPM 2.0, AMD PSP/CCP, HD Audio ×3, I²C (`AMDI0010`), GPIO (`AMDI0030`) | Not Day 1 |

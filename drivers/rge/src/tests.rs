@@ -398,3 +398,145 @@ fn station_fallback() {
         assert_ne!(station(bad, 1), station(bad, 2));
     }
 }
+
+fn chip_d() -> Chip<Model> {
+    Chip::new(Model::default(), MacType::R25D1)
+}
+
+/// The X870E's NIC: Linux calls it RTL8125D, XID 688.
+#[test]
+fn rtl8125d_revision() {
+    let m = MacType::of(0x6880_0000).unwrap();
+    assert_eq!(m, MacType::R25D1);
+    assert_eq!(m.name(), "RTL8125D_1");
+    assert!(m.supported() && m.is_r25d() && !m.is_r26());
+    // The other RTL8125 revisions are identified, not programmed.
+    assert!(!MacType::R25.supported() && !MacType::R25B.supported());
+    assert!(!MacType::R25D2.supported());
+}
+
+/// The RTL8125D's MAC microcode: page 0 holds the nine-word patch, the
+/// others are cleared, page 2 keeps the version, then the breakpoints; and
+/// the clock request is cleared in `CFG2`, not `INT_CFG0`.
+#[test]
+fn rtl8125d_mac_microcode() {
+    let mut c = chip_d();
+    c.chip_init().unwrap();
+    let ev = log(&c);
+    let words: Vec<(u16, u16)> = ev
+        .iter()
+        .filter_map(|e| match *e {
+            Ev::Mac(r, v) if (0xf800..0xfa00).contains(&r) => Some((r, v)),
+            _ => None,
+        })
+        .collect();
+    // 3 pages of the whole window (0xf800..=0xf9fe, 256 words), after the
+    // MCU disable writes below 0xfc48 (not in the window).
+    assert_eq!(words.len(), 3 * 256);
+    let page = |p: usize| &words[p * 256..(p + 1) * 256];
+    assert_eq!(
+        page(0)[..9].iter().map(|w| w.1).collect::<Vec<_>>(),
+        [
+            0xe002, 0xe006, 0x4166, 0x9cf6, 0xc002, 0xb800, 0x14a4, 0xc102, 0xb900
+        ]
+    );
+    assert!(page(0)[9..].iter().all(|w| w.1 == 0));
+    assert!(page(1).iter().all(|w| w.1 == 0));
+    assert!(page(2)[..252].iter().all(|w| w.1 == 0));
+    assert_eq!(
+        page(2)[252..].iter().map(|w| w.1).collect::<Vec<_>>(),
+        [0x6938, 0x0a18, 0x0217, 0x0d2a]
+    );
+    // The breakpoints, last.
+    let tail: Vec<(u16, u16)> = ev
+        .iter()
+        .filter_map(|e| match *e {
+            Ev::Mac(r, v) if matches!(r, 0xfc26 | 0xfc28 | 0xfc48) => Some((r, v)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        &tail[tail.len() - 3..],
+        [(0xfc26, 0x8000), (0xfc28, 0x14a2), (0xfc48, 1)]
+    );
+    // CLKREQ off in CFG2 (bit 7), INT_CFG0's bit 3 left alone.
+    let s = c.regs.0.borrow();
+    assert_eq!(s.get(regs::CFG2, 1) & 0x80, 0);
+}
+
+/// The RTL8125D's PHY microcode goes in three parts (2403, 125, and the
+/// rest words), the patch window reopened between them; the configuration
+/// follows, and the version is recorded.
+#[test]
+fn rtl8125d_phy_microcode_and_config() {
+    let mut c = chip_d();
+    c.phy_config().unwrap();
+    let ev = log(&c);
+    let mcu = generated::R25D_1_PHY_MCU;
+    assert_eq!(mcu.len(), 3241);
+    // The three parts, each exactly as generated, with the patch window
+    // released and reopened (two `0xb820` writes) between them.
+    let evs: Vec<(u16, u16)> = ev
+        .iter()
+        .filter_map(|e| match *e {
+            Ev::Phy(r, v) => Some((r, v)),
+            _ => None,
+        })
+        .collect();
+    let at = evs.iter().position(|&w| w == mcu[0]).unwrap();
+    assert!(
+        evs[..at].iter().any(|&(r, v)| r == 0xb820 && v & 0x10 != 0),
+        "patch request"
+    );
+    let mut pos = at;
+    for part in [&mcu[..2403], &mcu[2403..2528], &mcu[2528..]] {
+        assert_eq!(&evs[pos..pos + part.len()], part);
+        pos += part.len();
+        if part.len() != 3241 - 2528 {
+            let gap: Vec<u16> = evs[pos..pos + 2].iter().map(|w| w.0).collect();
+            assert_eq!(gap, [0xb820, 0xb820], "release and reopen");
+            pos += 2;
+        }
+    }
+    // Then the release, and the version.
+    assert_eq!(evs[pos].0, 0xb820);
+    let s = c.regs.0.borrow();
+    assert_eq!(s.ind.get(&0x801e), Some(&0x0027), "version recorded");
+    // The configuration ran to its end (`0xa442` bit 7 set last), and EEE
+    // ended off with the RTL8125D's own bit set in 0xa432.
+    assert_eq!(s.phy.get(&0xa442).copied().unwrap_or(0) & 0x0080, 0x0080);
+    assert_eq!(s.phy.get(&0xa432).copied().unwrap_or(0) & 0x0010, 0x0010);
+    drop(s);
+    assert_eq!(c.read_mac_ocp(0xe040) & 3, 0);
+    // Only 2.5 Gb/s is the PHY's to advertise: 5 Gb/s stays as it was.
+    c.autoneg();
+    assert_eq!(c.read_phy_ocp(0xa5d4) & 0x0180, 0x0080);
+}
+
+/// The MAC setup the RTL8125D differs in (`rge_init_locked`).
+#[test]
+fn rtl8125d_configure() {
+    let c = chip_d();
+    c.configure(0x1_2345_6000, 0x8000_0000, true);
+    let s = c.regs.0.borrow();
+    assert_eq!(s.get(regs::RXCFG, 4), regs::RXCFG_CONFIG_8125D);
+    // The RTL8125D's own values: 0xe0c0, 0xe092, no 0x0382 write.
+    assert_eq!(s.mac.get(&0xe0c0), Some(&0x4403));
+    assert_eq!(s.mac.get(&0xe092).copied().unwrap_or(0) & 0x00ff, 0x0008);
+    assert!(!s.bytes.contains_key(&0x0382), "RTL8125's write only");
+    // 64 moderation timers cleared (32 on the RTL8126), no INT_CFG1.
+    assert!(s.bytes.contains_key(&(regs::INTMITI + 4 * 63)));
+    assert!(!s.bytes.contains_key(&regs::INT_CFG1));
+    // The L1 timeout is the RTL8126's.
+    assert!(!s.csi.contains_key(&0x890));
+    drop(s);
+    // The RTL8126 keeps its own.
+    let c = chip();
+    c.configure(0x1_2345_6000, 0x8000_0000, true);
+    let s = c.regs.0.borrow();
+    assert_eq!(s.get(regs::RXCFG, 4), regs::RXCFG_CONFIG_8126);
+    assert_eq!(s.mac.get(&0xe0c0), Some(&0x4000));
+    assert!(s.bytes.contains_key(&(regs::INTMITI + 4 * 31)));
+    assert!(!s.bytes.contains_key(&(regs::INTMITI + 4 * 32)));
+    assert!(s.csi.contains_key(&0x890));
+}

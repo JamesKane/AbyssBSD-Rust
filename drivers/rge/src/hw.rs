@@ -2,8 +2,9 @@
 //! Bringing the chip up: register access through the OCP, CSI, and EPHY
 //! windows, reset, the MAC and PHY microcode, and the PHY configuration.
 //!
-//! Only the RTL8126's two revisions are programmed for now (the Orange Pi
-//! 6 Plus's NICs are `RTL8126_2`); the other revisions are identified so
+//! The RTL8126's two revisions are programmed (the Orange Pi 6 Plus's NICs
+//! are `RTL8126_2`) and the RTL8125D's first revision (the X870E's NIC,
+//! hardware revision `0x68800000`); the other revisions are identified so
 //! attach can say what it found.
 //!
 //! Behavior reference: sys/dev/rge/if_rge_hw.c.
@@ -64,7 +65,19 @@ impl MacType {
     /// Whether the driver can program it yet.
     #[must_use]
     pub const fn supported(self) -> bool {
+        matches!(self, Self::R26_1 | Self::R26_2 | Self::R25D1)
+    }
+
+    /// An RTL8126 (5 GbE).
+    #[must_use]
+    pub const fn is_r26(self) -> bool {
         matches!(self, Self::R26_1 | Self::R26_2)
+    }
+
+    /// An RTL8125D (2.5 GbE).
+    #[must_use]
+    pub const fn is_r25d(self) -> bool {
+        matches!(self, Self::R25D1 | Self::R25D2)
     }
 }
 
@@ -384,8 +397,13 @@ impl<R: Regs> Chip<R> {
         if unlock {
             self.set8(regs::EECMD, regs::EECMD_WRITECFG);
         }
-        // The RTL8126's clock-request enable is in INT_CFG0.
-        self.clr8(regs::INT_CFG0, 0x08);
+        // The RTL8126's clock-request enable is in INT_CFG0, the RTL8125's
+        // in CFG2.
+        if self.mac.is_r26() {
+            self.clr8(regs::INT_CFG0, 0x08);
+        } else {
+            self.clr8(regs::CFG2, regs::CFG2_CLKREQ_EN);
+        }
         self.clr8(regs::CFG5, regs::CFG5_PME_STS);
         if unlock {
             self.clr8(regs::EECMD, regs::EECMD_WRITECFG);
@@ -475,6 +493,33 @@ impl<R: Regs> Chip<R> {
         self.switch_mcu_ram_page(0);
     }
 
+    /// The RTL8125D's MAC microcode: a fixed sequence over the three RAM
+    /// pages, then its breakpoints (`rge_mac_config_mcu`, `MAC_R25D_1`).
+    /// FreeBSD leaves page 2 selected, and so does this.
+    fn mac_config_mcu(&mut self) {
+        // Page 0 holds the patch; the others are cleared.
+        const PATCH: [u16; 9] = [
+            0xe002, 0xe006, 0x4166, 0x9cf6, 0xc002, 0xb800, 0x14a4, 0xc102, 0xb900,
+        ];
+        // What page 2 keeps at 0xf9f8: the microcode's version.
+        const VERSION: [u16; 4] = [0x6938, 0x0a18, 0x0217, 0x0d2a];
+        for page in 0..3 {
+            self.switch_mcu_ram_page(page);
+            for (k, &v) in PATCH.iter().enumerate() {
+                self.write_mac_ocp(0xf800 + 2 * k as u16, if page == 0 { v } else { 0 });
+            }
+            for reg in (0xf812..=0xf9f6).step_by(2) {
+                self.write_mac_ocp(reg, 0);
+            }
+            for (k, &v) in VERSION.iter().enumerate() {
+                self.write_mac_ocp(0xf9f8 + 2 * k as u16, if page == 2 { v } else { 0 });
+            }
+        }
+        self.write_mac_ocp(0xfc26, 0x8000);
+        self.write_mac_ocp(0xfc28, 0x14a2);
+        self.write_mac_ocp(0xfc48, 0x0001);
+    }
+
     /// MAC initialisation (`rge_hw_init`).
     fn hw_init(&mut self) {
         self.disable_aspm_clkreq();
@@ -489,7 +534,11 @@ impl<R: Regs> Chip<R> {
         }
         self.regs.delay_us(3000);
         self.write_mac_ocp(0xfc26, 0);
-        self.mac_config_ext_mcu();
+        if self.mac.is_r26() {
+            self.mac_config_ext_mcu();
+        } else {
+            self.mac_config_mcu();
+        }
         // Set PCIe uncorrectable error status.
         let v = self.read_csi(0x108);
         self.write_csi(0x108, v | 0x0010_0000);
@@ -523,8 +572,19 @@ impl<R: Regs> Chip<R> {
         self.hw_reset()
     }
 
+    /// The multi-gigabit advertisement bits this chip has in `0xa5d4`: 2.5
+    /// Gb/s, and 5 Gb/s on the RTL8126.
+    const fn advertised(&self) -> u16 {
+        if self.mac.is_r26() {
+            regs::ADV_5000TFDX | regs::ADV_2500TFDX
+        } else {
+            regs::ADV_2500TFDX
+        }
+    }
+
     /// Resets the PHY, loads its microcode and configuration, and turns
-    /// off EEE (`rge_phy_config`; the RTL8126 has no EPHY setup).
+    /// off EEE (`rge_phy_config`; neither the RTL8126 nor the RTL8125D has
+    /// EPHY setup).
     ///
     /// # Errors
     ///
@@ -540,7 +600,7 @@ impl<R: Regs> Chip<R> {
             mii::GTCR,
             gtcr & !(mii::GTCR_ADV_1000TFDX | mii::GTCR_ADV_1000THDX),
         );
-        self.phy_clr(0xa5d4, regs::ADV_5000TFDX | regs::ADV_2500TFDX);
+        self.phy_clr(0xa5d4, self.advertised());
         self.write_mii(
             mii::BMCR,
             mii::BMCR_RESET | mii::BMCR_AUTOEN | mii::BMCR_STARTNEG,
@@ -561,15 +621,21 @@ impl<R: Regs> Chip<R> {
         self.rcode_version = self.read_phy_ocp(0xa438);
         let config = match self.mac {
             MacType::R26_1 => generated::R26_1_PHY_CONFIG,
+            MacType::R25D1 => generated::R25D_1_PHY_CONFIG,
             _ => generated::R26_2_PHY_CONFIG,
         };
         program::run(config, &mut &*self);
         self.phy_clr(0xa5b4, 0x8000);
         // Disable EEE.
         self.mac_clr(0xe040, 0x0003);
+        if self.mac.is_r25d() {
+            self.phy_set(0xa432, 0x0010);
+        }
         self.phy_clr(0xa5d0, 0x0006);
         self.phy_clr(0xa6d4, 0x0001);
-        self.phy_clr(0xa6d4, 0x0002);
+        if self.mac.is_r26() {
+            self.phy_clr(0xa6d4, 0x0002);
+        }
         self.phy_clr(0xa6d8, 0x0010);
         self.phy_clr(0xa428, 0x0080);
         self.phy_clr(0xa4a2, 0x0200);
@@ -615,6 +681,24 @@ impl<R: Regs> Chip<R> {
                 self.patch_phy_mcu(true);
                 for &(r, v) in rest {
                     self.write_phy_ocp(r, v);
+                }
+            }
+            MacType::R25D1 => {
+                // In three parts (2403 and 125 words, then the rest), the
+                // patch window reopened between them.
+                let mcu = generated::R25D_1_PHY_MCU;
+                let (first, rest) = mcu.split_at(2403);
+                let (second, third) = rest.split_at(2528 - 2403);
+                for (k, part) in [first, second, third].into_iter().enumerate() {
+                    if k > 0 {
+                        self.patch_phy_mcu(true);
+                    }
+                    for &(r, v) in part {
+                        self.write_phy_ocp(r, v);
+                    }
+                    if k < 2 {
+                        self.patch_phy_mcu(false);
+                    }
                 }
             }
             _ => {
@@ -685,13 +769,23 @@ impl<R: Regs> Chip<R> {
         self.regs.write32(regs::RXDESC_ADDR_HI, (rx >> 32) as u32);
         self.regs.write32(regs::TXDESC_ADDR_LO, tx as u32);
         self.regs.write32(regs::TXDESC_ADDR_HI, (tx >> 32) as u32);
-        self.regs.write32(regs::RXCFG, regs::RXCFG_CONFIG_8126);
+        let (r26, r25d) = (self.mac.is_r26(), self.mac.is_r25d());
+        let rxcfg = if r25d {
+            regs::RXCFG_CONFIG_8125D
+        } else {
+            regs::RXCFG_CONFIG_8126
+        };
+        self.regs.write32(regs::RXCFG, rxcfg);
         self.regs.write32(regs::TXCFG, regs::TXCFG_CONFIG);
         let v = self.read_csi(0x70c) & !0x3f00_0000;
         self.write_csi(0x70c, v | 0x2700_0000);
-        // Disable the L1 timeout.
-        let v = self.read_csi(0x890) & !0x0000_0001;
-        self.write_csi(0x890, v);
+        if r26 {
+            // Disable the L1 timeout.
+            let v = self.read_csi(0x890) & !0x0000_0001;
+            self.write_csi(0x890, v);
+        } else if !r25d {
+            self.regs.write16(0x0382, 0x221b);
+        }
         self.regs.write8(regs::RSS_CTRL, 0);
         // One receive queue.
         let v = self.regs.read16(regs::RXQUEUE_CTRL) & !0x001c;
@@ -700,7 +794,9 @@ impl<R: Regs> Chip<R> {
         self.write_mac_ocp(0xc140, 0xffff);
         self.write_mac_ocp(0xc142, 0xffff);
         self.mac_set(0xeb58, 0x0001);
-        self.clr8(0xd8, 0x02);
+        if r26 {
+            self.clr8(0xd8, 0x02);
+        }
         self.mac_modify(0xe614, 0x0700, 0x0300);
         // One queue: (fls(1) - 1) in bits 11:10.
         self.mac_modify(0xe63e, 0x0c00, 0);
@@ -714,14 +810,16 @@ impl<R: Regs> Chip<R> {
         self.regs.write8(regs::TDFNR, 0x10);
         self.mac_clr(0xe040, 0x1000);
         self.mac_modify(0xea1c, 0x0003, 0x0001);
-        self.write_mac_ocp(0xe0c0, 0x4000);
+        self.write_mac_ocp(0xe0c0, if r25d { 0x4403 } else { 0x4000 });
         self.mac_set(0xe052, 0x0060);
         self.mac_clr(0xe052, 0x0088);
         self.mac_modify(0xd430, 0x0fff, 0x045f);
         self.set8(regs::DLLPR, regs::DLLPR_PFM_EN | regs::DLLPR_TX_10M_PS_EN);
-        // Disable EEE plus.
-        self.mac_clr(0xe080, 0x0002);
-        self.mac_clr(0xea1c, 0x0304);
+        if !r25d {
+            // Disable EEE plus.
+            self.mac_clr(0xe080, 0x0002);
+        }
+        self.mac_clr(0xea1c, if r26 { 0x0304 } else { 0x0004 });
         // Clear the TCAM entries.
         self.mac_set(0xeb54, 0x0001);
         self.regs.delay_us(1);
@@ -737,23 +835,30 @@ impl<R: Regs> Chip<R> {
         ] {
             self.regs.write32(t, 0);
         }
-        // Clear the interrupt moderation timers (32 on the RTL8126).
-        for i in 0..32 {
+        // Clear the interrupt moderation timers (32 on the RTL8126, 64 on
+        // the RTL8125D).
+        for i in 0..if r26 { 32 } else { 64 } {
             self.regs.write32(regs::INTMITI + 4 * i, 0);
         }
-        self.clr8(
-            regs::INT_CFG0,
-            regs::INT_CFG0_TIMEOUT_BYPASS
-                | regs::INT_CFG0_RDU_BYPASS_8126
-                | regs::INT_CFG0_MITIGATION_BYPASS,
-        );
-        self.regs.write16(regs::INT_CFG1, 0);
+        if r26 {
+            self.clr8(
+                regs::INT_CFG0,
+                regs::INT_CFG0_TIMEOUT_BYPASS
+                    | regs::INT_CFG0_RDU_BYPASS_8126
+                    | regs::INT_CFG0_MITIGATION_BYPASS,
+            );
+            self.regs.write16(regs::INT_CFG1, 0);
+        }
         self.mac_set(0xc0ac, 0x1f80);
         self.write_mac_ocp(0xe098, 0xc302);
         self.mac_clr(0xe032, 0x0003);
         let v = self.read_csi(0x98) & !0x0000_ff00;
         self.write_csi(0x98, v);
-        self.mac_clr(0xe092, 0x00ff);
+        if r25d {
+            self.mac_modify(0xe092, 0x00ff, 0x0008);
+        } else {
+            self.mac_clr(0xe092, 0x00ff);
+        }
         // No hardware VLAN tagging yet.
         self.clr32(regs::RXCFG, regs::RXCFG_VLANSTRIP);
         let c = self.regs.read16(regs::CPLUSCMD);
@@ -792,10 +897,11 @@ impl<R: Regs> Chip<R> {
         // Disable Gigabit Lite.
         self.phy_clr(0xa428, 0x0200);
         self.phy_clr(0xa5ea, 0x0001);
-        self.phy_clr(0xa5ea, 0x0007);
-        let adv = self.read_phy_ocp(0xa5d4) & !(regs::ADV_5000TFDX | regs::ADV_2500TFDX)
-            | regs::ADV_2500TFDX
-            | regs::ADV_5000TFDX;
+        if self.mac.is_r26() {
+            self.phy_clr(0xa5ea, 0x0007);
+        }
+        let speeds = self.advertised();
+        let adv = self.read_phy_ocp(0xa5d4) & !speeds | speeds;
         let anar = mii::ANAR_TX_FD | mii::ANAR_TX | mii::ANAR_10_FD | mii::ANAR_10;
         self.write_mii(mii::ANAR, anar | mii::ANAR_PAUSE_ASYM | mii::ANAR_PAUSE_SYM);
         self.write_mii(mii::GTCR, mii::GTCR_ADV_1000TFDX | mii::GTCR_ADV_1000THDX);

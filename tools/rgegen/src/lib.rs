@@ -9,9 +9,9 @@
 //!
 //! - the MAC microcode patches (`rtl8126_*_mac_bps_regs` and `_vals`, in
 //!   `if_rge_microcode.h`);
-//! - the PHY microcode (`mac_r26_*_mcu`);
-//! - each chip's PHY configuration function (`rge_phy_config_mac_r26_*`
-//!   in `if_rge_hw.c`), as a list of [`Op`]s.
+//! - the PHY microcode (`mac_r26_*_mcu`, `mac_r25d_1_mcu`);
+//! - each chip's PHY configuration function (`rge_phy_config_mac_r26_*`,
+//!   `rge_phy_config_mac_r25d_1` in `if_rge_hw.c`), as a list of [`Op`]s.
 //!
 //! The function bodies are a handful of statement shapes; anything else
 //! is an error, so a change upstream cannot be dropped silently.
@@ -154,6 +154,37 @@ pub fn u16_array(text: &str, name: &str) -> Result<Vec<u16>, Error> {
         .collect()
 }
 
+/// The body of the object-like macro `name`, its continuation lines
+/// joined.
+fn macro_body(text: &str, name: &str) -> Result<String, Error> {
+    let head = format!("#define {name}");
+    let mut lines = text.lines();
+    while let Some(l) = lines.next() {
+        let rest = l.trim_start();
+        let Some(after) = rest.strip_prefix(&head) else {
+            continue;
+        };
+        if !after.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let mut out = String::new();
+        let mut line = after.to_string();
+        loop {
+            let more = line.trim_end().ends_with('\\');
+            out.push_str(line.trim_end().trim_end_matches('\\'));
+            out.push(' ');
+            if !more {
+                return Ok(out);
+            }
+            line = lines
+                .next()
+                .ok_or_else(|| Error(format!("macro {name}: ends in a continuation")))?
+                .to_string();
+        }
+    }
+    err(format!("no macro {name}"))
+}
+
 /// The (register, value) pairs of a `struct rge_hw_regaddr_array` array.
 ///
 /// # Errors
@@ -162,6 +193,15 @@ pub fn u16_array(text: &str, name: &str) -> Result<Vec<u16>, Error> {
 pub fn pair_array(text: &str, name: &str) -> Result<Vec<(u16, u16)>, Error> {
     let empty = BTreeMap::new();
     let body = initializer(text, name)?;
+    // An initializer that is one macro name stands for that macro's body.
+    let expanded;
+    let body =
+        if !body.contains('{') && body.trim().chars().all(|c| c.is_alphanumeric() || c == '_') {
+            expanded = macro_body(text, body.trim())?;
+            expanded.as_str()
+        } else {
+            body
+        };
     let mut out = Vec::new();
     for item in body.split('}') {
         let item = item.trim().trim_start_matches(',').trim();
@@ -197,20 +237,32 @@ fn statements(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut depth = 0;
+    let mut braces = 0;
+    let flush = |cur: &mut String, out: &mut Vec<String>| {
+        let s = cur.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !s.is_empty() {
+            out.push(s);
+        }
+        cur.clear();
+    };
     for c in body.chars() {
         match c {
             '(' => depth += 1,
             ')' => depth -= 1,
+            '{' => braces += 1,
             _ => {}
         }
-        if c == ';' && depth == 0 {
+        if c == '}' {
+            braces -= 1;
+            cur.push(c);
+            // A braced `for` body ends its statement.
+            if braces == 0 {
+                flush(&mut cur, &mut out);
+            }
+        } else if c == ';' && depth == 0 && braces == 0 {
             // A `for` header's own `;`s are inside its parentheses, so a
             // loop and its one-statement body end here together.
-            let s = cur.split_whitespace().collect::<Vec<_>>().join(" ");
-            if !s.is_empty() {
-                out.push(s);
-            }
-            cur.clear();
+            flush(&mut cur, &mut out);
         } else {
             cur.push(c);
         }
@@ -281,6 +333,58 @@ fn function<'a>(source: &'a str, name: &str) -> Result<&'a str, Error> {
     braced(source, at)
 }
 
+/// A loop bound or register of the forms `n`, `arr[i]`, and `n + i * m`,
+/// for iteration `i`.
+fn eval(
+    e: &str,
+    i: usize,
+    arrays: &BTreeMap<String, Vec<u16>>,
+    defines: &BTreeMap<String, u64>,
+) -> Result<u16, Error> {
+    let e = e.trim();
+    if let Some(a) = e.strip_suffix("[i]") {
+        return arrays
+            .get(a)
+            .and_then(|v| v.get(i))
+            .copied()
+            .ok_or_else(|| Error(format!("bad loop value {e}")));
+    }
+    if let Some((base, step)) = e.split_once(" + i * ") {
+        let v = number(base, defines)? + i as u64 * number(step, defines)?;
+        return u16::try_from(v).map_err(|_| Error(format!("{e} does not fit 16 bits")));
+    }
+    u16_of(e, defines)
+}
+
+/// One statement of a loop body, at iteration `i`.
+fn loop_op(
+    stmt: &str,
+    i: usize,
+    arrays: &BTreeMap<String, Vec<u16>>,
+    defines: &BTreeMap<String, u64>,
+    name: &str,
+) -> Result<Op, Error> {
+    let two = |f: &str| -> Result<Option<(u16, u16)>, Error> {
+        match call(stmt, f) {
+            Some(a) if a.len() == 2 => Ok(Some((
+                eval(a[0], i, arrays, defines)?,
+                eval(a[1], i, arrays, defines)?,
+            ))),
+            Some(_) => err(format!("{name}: bad loop statement {stmt}")),
+            None => Ok(None),
+        }
+    };
+    if let Some((r, v)) = two("rge_write_phy_ocp")? {
+        Ok(Op::Write(r, v))
+    } else if let Some((r, v)) = two("RGE_PHY_SETBIT")? {
+        Ok(Op::Set(r, v))
+    } else if let Some((r, v)) = two("RGE_PHY_CLRBIT")? {
+        Ok(Op::Clear(r, v))
+    } else {
+        err(format!("{name}: unrecognized loop statement: {stmt}"))
+    }
+}
+
 /// A PHY configuration function as [`Op`]s.
 ///
 /// # Errors
@@ -328,21 +432,22 @@ pub fn program(
             continue;
         }
         if let Some((start, end, body)) = for_loop(&stmt, i, &arrays, defines)? {
-            let args = call(body, "rge_write_phy_ocp")
-                .ok_or_else(|| Error(format!("{name}: bad loop body {body}")))?;
-            let [reg, value] = args[..] else {
-                return err(format!("{name}: bad loop body {body}"));
-            };
-            let arr = value
-                .strip_suffix("[i]")
-                .and_then(|a| arrays.get(a))
-                .ok_or_else(|| Error(format!("{name}: bad loop value {value}")))?;
-            let reg = n(reg)?;
+            // One statement, or several in braces.
+            let inner = body
+                .strip_prefix('{')
+                .and_then(|b| b.strip_suffix('}'))
+                .unwrap_or(body);
+            let mut parts: Vec<String> = Vec::new();
+            for st in inner.split(';') {
+                let st = st.trim();
+                if !st.is_empty() {
+                    parts.push(st.to_string());
+                }
+            }
             for k in start..end {
-                let v = *arr
-                    .get(k)
-                    .ok_or_else(|| Error(format!("{name}: loop past its array")))?;
-                ops.push(Op::Write(reg, v));
+                for st in &parts {
+                    ops.push(loop_op(st, k, &arrays, defines, name)?);
+                }
             }
             i = end;
             continue;
@@ -386,7 +491,8 @@ pub fn program(
 pub struct Chip {
     /// The Rust name's prefix (`R26_2`).
     pub name: &'static str,
-    /// The MAC microcode: (register, value) pairs.
+    /// The MAC microcode: (register, value) pairs. Empty for a chip whose
+    /// MAC microcode is a short fixed sequence in the driver.
     pub mac_bps: Vec<(u16, u16)>,
     /// The PHY microcode.
     pub phy_mcu: Vec<(u16, u16)>,
@@ -421,6 +527,14 @@ pub fn chips(rgereg_h: &str, microcode_h: &str, hw_c: &str) -> Result<Vec<Chip>,
             phy_config: program(&hw, &format!("rge_phy_config_mac_r26_{c}"), &defs)?,
         });
     }
+    // The RTL8125D's first revision: its MAC microcode is a dozen fixed
+    // writes (`rge_mac_config_mcu`), kept in the driver.
+    out.push(Chip {
+        name: "R25D_1",
+        mac_bps: Vec::new(),
+        phy_mcu: pair_array(&micro, "mac_r25d_1_mcu")?,
+        phy_config: program(&hw, "rge_phy_config_mac_r25d_1", &defs)?,
+    });
     Ok(out)
 }
 
@@ -448,7 +562,7 @@ pub fn render(chips: &[Chip], provenance: &str) -> String {
 // ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-//! Realtek's register programs for the RTL8126, generated by `cargo xtask
+//! Realtek's register programs for the RTL8126 and RTL8125D, generated by `cargo xtask
 //! rgegen` from {provenance}. Do not edit.
 
 use crate::program::Op;
@@ -456,12 +570,14 @@ use crate::program::Op;
     );
     for c in chips {
         let n = c.name;
-        let _ = writeln!(s, "/// The {n} MAC microcode: (MAC OCP register, value).");
-        let _ = writeln!(s, "pub static {n}_MAC_BPS: &[(u16, u16)] = &[");
-        for (r, v) in &c.mac_bps {
-            let _ = writeln!(s, "({r:#06x}, {v:#06x}),");
+        if !c.mac_bps.is_empty() {
+            let _ = writeln!(s, "/// The {n} MAC microcode: (MAC OCP register, value).");
+            let _ = writeln!(s, "pub static {n}_MAC_BPS: &[(u16, u16)] = &[");
+            for (r, v) in &c.mac_bps {
+                let _ = writeln!(s, "({r:#06x}, {v:#06x}),");
+            }
+            let _ = writeln!(s, "];\n");
         }
-        let _ = writeln!(s, "];\n");
         let _ = writeln!(s, "/// The {n} PHY microcode: (PHY OCP register, value).");
         let _ = writeln!(s, "pub static {n}_PHY_MCU: &[(u16, u16)] = &[");
         for (r, v) in &c.phy_mcu {
@@ -510,6 +626,11 @@ rge_phy_config_mac_rx(struct rge_softc *sc)
 	for (; i < nitems(vals); i++)
 		rge_write_phy_ocp(sc, 0xb87e, vals[i]);
 	rge_patch_phy_mcu(sc, 1);
+	for (i = 0; i < 3; i++) {
+		rge_write_phy_ocp(sc, 0xa436, 0x8064 + i * 3);
+		RGE_PHY_CLRBIT(sc, 0xa438, 0x0700);
+	}
+	RGE_PHY_SETBIT(sc, 0xa430, 0x1001);
 }
 ";
 
@@ -529,6 +650,13 @@ rge_phy_config_mac_rx(struct rge_softc *sc)
                 Op::Clear(0xa5b4, 0x8000),
                 Op::Write(0xb87e, 3),
                 Op::PatchMcu(true),
+                Op::Write(0xa436, 0x8064),
+                Op::Clear(0xa438, 0x0700),
+                Op::Write(0xa436, 0x8067),
+                Op::Clear(0xa438, 0x0700),
+                Op::Write(0xa436, 0x806a),
+                Op::Clear(0xa438, 0x0700),
+                Op::Set(0xa430, 0x1001),
             ]
         );
         // Anything else is refused.
@@ -541,6 +669,13 @@ rge_phy_config_mac_rx(struct rge_softc *sc)
         let h = "static const uint16_t r[] = {\n\t0xf800, 0xf802,\n};\n\
                  static const struct rge_hw_regaddr_array m[] = {\n\t{ 0xa436, 0x8023 }, { 0xa438, 0x4701 },\n};";
         assert_eq!(u16_array(h, "r").unwrap(), [0xf800, 0xf802]);
+        // An initializer that is a macro of pairs.
+        let m = "#define PAIRS \\\n\t{ 0xa436, 0x8023 }, \\\n\t{ 0xa438, 0x4701 }\n\
+                 static const struct rge_hw_regaddr_array k[] = {\n\tPAIRS\n};";
+        assert_eq!(
+            pair_array(m, "k").unwrap(),
+            [(0xa436, 0x8023), (0xa438, 0x4701)]
+        );
         assert_eq!(
             pair_array(h, "m").unwrap(),
             [(0xa436, 0x8023), (0xa438, 0x4701)]

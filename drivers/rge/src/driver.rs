@@ -789,13 +789,17 @@ pub(crate) fn station(a: [u8; 6], unit: u32) -> [u8; 6] {
 
 impl Driver for Rge {
     const NAME: &'static str = "rge";
-    // The RTL8126; the RTL8125 family and the RTL8127 come with their
-    // programming (the X870E's NIC is an RTL8125-family part).
-    const IDS: Ids = Ids::Pci(&[PciId::device(0x10ec, 0x8126)]);
+    // The RTL8126 and the RTL8125 (the X870E's NIC is an RTL8125D, hardware
+    // revision 0x688). Attach says which revisions it can program; the
+    // other RTL8125 revisions and the RTL8127 come with their programming.
+    const IDS: Ids = Ids::Pci(&[PciId::device(0x10ec, 0x8126), PciId::device(0x10ec, 0x8125)]);
     const CONCURRENCY: bus::Concurrency = bus::Concurrency::Concurrent;
 
-    fn describe(_: &Ident) -> String {
-        "RTL8126".into()
+    fn describe(ident: &Ident) -> String {
+        match ident {
+            Ident::Pci(i, _, _) if i.device == 0x8125 => "RTL8125".into(),
+            _ => "RTL8126".into(),
+        }
     }
 
     fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
