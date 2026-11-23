@@ -168,15 +168,24 @@ impl Link {
     /// Reads the sink: capabilities, then the monitor's data. Whether a
     /// usable sink is there.
     fn read_sink(&self) -> bool {
-        if self.dptx.probe().is_err() {
+        if let Err(e) = self.dptx.probe() {
+            bus::manager().log(format_args!("sky1_dp: no sink data: {e:?}"));
             *self.edid.lock() = None;
             return false;
         }
-        let parsed = self
-            .dptx
-            .edid()
-            .ok()
-            .and_then(|raw| edid::parse(&raw).ok().map(|e| (raw, e)));
+        let parsed = match self.dptx.edid() {
+            Ok(raw) => match edid::parse(&raw) {
+                Ok(e) => Some((raw, e)),
+                Err(e) => {
+                    bus::manager().log(format_args!("sky1_dp: EDID not usable: {e:?}"));
+                    None
+                }
+            },
+            Err(e) => {
+                bus::manager().log(format_args!("sky1_dp: EDID not read: {e:?}"));
+                None
+            }
+        };
         if let Some((_, e)) = &parsed {
             *self.sink_bpc.lock() = u32::from(e.bpc.unwrap_or(8));
         }
