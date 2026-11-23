@@ -83,6 +83,25 @@ pub static X86_64: &[DriverDecl] = drivers![
     timers::ACPI_TIMER,
     ichwd::DRIVER,
     amdsbwd::DRIVER,
+    amdsmn::DRIVER,
+    amdtemp::DRIVER,
+];
+
+/// What `hostb` adds under every host bridge on x86_64: FreeBSD's `identify`
+/// routines for `amdsmn` and `amdtemp` (`files.x86`), both declining a bridge
+/// that is not an AMD processor's. `amdtemp` reads through `amdsmn`.
+#[cfg(any(target_arch = "x86_64", not(target_os = "none")))]
+pub static HOSTB_CHILDREN: &[pci::hostb::Child] = &[
+    pci::hostb::Child {
+        class: "amdsmn",
+        description: "AMD System Management Network",
+        after: None,
+    },
+    pci::hostb::Child {
+        class: "amdtemp",
+        description: "AMD CPU on-die thermal sensors",
+        after: Some("amdsmn"),
+    },
 ];
 
 /// The aarch64 kernel's drivers: the ACPI host bridge

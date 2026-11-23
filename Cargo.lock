@@ -86,6 +86,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "amdsmn"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+ "pci",
+ "sync",
+]
+
+[[package]]
+name = "amdtemp"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "amdsmn",
+ "bus",
+ "pci",
+ "sync",
+ "sysctl",
+]
+
+[[package]]
 name = "aml"
 version = "0.0.0"
 
@@ -282,6 +304,8 @@ dependencies = [
  "acpi-platform",
  "ahci",
  "amdsbwd",
+ "amdsmn",
+ "amdtemp",
  "aml",
  "atrtc",
  "bus",

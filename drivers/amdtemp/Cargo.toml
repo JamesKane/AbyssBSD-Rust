@@ -1,0 +1,17 @@
+[package]
+name = "amdtemp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+amdsmn = { path = "../amdsmn" }
+bus = { path = "../../sys/bus" }
+pci = { path = "../../sys/pci" }
+sync = { path = "../../sys/sync" }
+sysctl = { path = "../../sys/sysctl" }
+
+[lints]
+workspace = true

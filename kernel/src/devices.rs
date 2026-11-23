@@ -302,6 +302,9 @@ pub(crate) fn init(s: &Sleepable) {
             smmu::sysctl_init(t);
         });
     }
+    // What `hostb` adds under a host bridge: x86's `amdsmn` and `amdtemp`.
+    #[cfg(target_arch = "x86_64")]
+    pci::hostb::set_children(driver_table::HOSTB_CHILDREN);
     let drivers = drivers();
     let root = bus::init(
         s,

@@ -34,6 +34,8 @@ xhci-driver = { path = "../../drivers/xhci" }
 # The x86_64 kernel's own, and every host build's (docs/MODULES.md §3.2).
 [target.'cfg(any(target_arch = "x86_64", not(target_os = "none")))'.dependencies]
 amdsbwd = { path = "../../drivers/amdsbwd" }
+amdsmn = { path = "../../drivers/amdsmn" }
+amdtemp = { path = "../../drivers/amdtemp" }
 atrtc = { path = "../../drivers/atrtc" }
 ichwd = { path = "../../drivers/ichwd" }
 isa = { path = "../../drivers/isa" }

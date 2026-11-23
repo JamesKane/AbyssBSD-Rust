@@ -250,7 +250,9 @@ fn the_tables_share_the_common_drivers() {
             "hpet",
             "acpi_timer",
             "ichwd",
-            "amdsbwd"
+            "amdsbwd",
+            "amdsmn",
+            "amdtemp"
         ]
     );
     assert!(
