@@ -75,6 +75,7 @@ Legend:
 | Firmware mailbox & transport | — | PCC (PCCT type 2/3 in AML) + SCMI (clocks, resets, power domains, perf) | RPMI over SBI MPXY | `lib/aml` (PCC region: **Experimental**); `specs/sky1-soc`, `specs/spacemit-k3` (SCMI/RPMI providers: **Planned**) | **Experimental** (AML PCC) / **Planned** (SCMI & RPMI providers) | P3 / P8 / P11 / P12 |
 | IOMMU | Intel VT-d (DMAR), AMD-Vi (IVRS) | Arm SMMUv3 (IORT; `drivers/smmu`, [IOMMU.md](IOMMU.md)), Arm SMMUv2 (SC8280XP) | RISC-V IOMMU (`0xC0F00000`) | `drivers/smmu`, `sys/iommu`, `lib/iommu`; `specs/adreno-a690`, `specs/qcom-sc8280xp` | **Experimental** (SMMUv3: attached, not yet translating); **Planned** (the rest) | P9 (SMMUv3, [ADR-0022](adr/0022-smmuv3-in-p9.md)) / P11 (x86, SMMUv2) / Later |
 | CPU frequency & idle | ACPI `_CST`/`_PSS`/CPPC (`_CPC`), `MWAIT`, HWP | PSCI `_LPI` idle, ACPI CPPC (`_CPC` with SCMI fastchannel & AMU), Qualcomm EPSS (`QCOM0617`) | ACPI / SBI HSM idle & CPPC | `sys/acpi/src/cppc.rs`, `sys/cpufreq` (CPPC: **Supported** on the Orange Pi 6 Plus), `kernel/src/hwpstate_amd.rs` (AMD CPPC through the MSRs, as FreeBSD's `hwpstate_amd`: **Supported** on the X870E, 2026-11-23); idle states and `_CST`/`_PSS`/HWP: **Planned**; `specs/qcom-sc8280xp` (drivers: **Planned**) | **Supported** (CPPC, ARM64 and AMD64 on AMD); **Planned** (idle, Intel HWP, RV64) | P8.4 / P10 / P11 |
+| Temperature sensors | AMD Family 17h/19h/1Ah on-die sensors through the SMN (`amdsmn`, `amdtemp`; `dev.cpu.N.temperature`) | — | — | `drivers/amdsmn`, `drivers/amdtemp` | **Experimental** (verified on the X870E, 2026-11-23; not yet committed) | P10 |
 
 ### Buses and interconnects
 
@@ -96,8 +97,8 @@ Drivers planned from the clean-room specifications in `~/Projects/OS/chinese-wal
 
 | Device / Subsystem | Target Platform | Description | Spec / Crate | Status | Phase |
 |---|---|---|---|---|---|
-| CIX Sky1 SoC infrastructure | Orange Pi 6 Plus / Radxa Orion O6 (Sky1) | CIX mailbox, SCMI clock (`CLKT`) & power-domain providers, S5 reset controllers (`RSTL`/`RSNL`/`DLKL`), subsystem RCSUs, and CIX GPT (`CIXH1007`) | `specs/sky1-soc` | **Planned** | P8 / P11 |
-| CIX Sky1 GPIO, I²C, SPI/XSPI & pinctrl | Orange Pi 6 Plus / Radxa Orion O6 (Sky1) | Cadence GPIO r1p02 (`CIXH1002`, `CIXH1003`), Cadence I²C r1p14, Cadence SPI r1p6 & XSPI flash, and pad/pin controllers (`CIXH1001`) | `specs/sky1-peripherals` (`01`–`03`, `05`) | **Planned** | P8 |
+| CIX Sky1 SoC infrastructure | Orange Pi 6 Plus / Radxa Orion O6 (Sky1) | CIX mailbox (`cix_mbox`), SCMI clocks from the `CLKT` tables (`sky1_clk`), the two S5 reset controllers (`sky1_reset`), the shared register windows (`sky1_syscon`), and the platform tables (`RSTL`/`RSNL`/`DLKL`, `platform/cix-sky1`). Power-domain providers, subsystem RCSUs, and CIX GPT (`CIXH1007`) are not written | `drivers/cix-mbox`, `drivers/sky1-clk`, `drivers/sky1-reset`, `drivers/sky1-syscon`, `platform/cix-sky1`; `specs/sky1-soc` | **Supported** (mailbox, clocks, resets, shared windows: in use on the board since P8); **Planned** (power-domain providers, RCSUs, GPT) | P8 / P11 |
+| CIX Sky1 GPIO, I²C, SPI/XSPI & pinctrl | Orange Pi 6 Plus / Radxa Orion O6 (Sky1) | Cadence GPIO r1p02 (`CIXH1002`, `CIXH1003`) with `gpiobus`/`gpioc`, Cadence I²C r1p14 with `iicbus`/`iic`, and the two pin controllers (`MUX0`, `CIXHA016`). Cadence SPI r1p6 & XSPI flash have no driver | `drivers/cdns-gpio`, `drivers/cdnc-i2c`, `drivers/sky1-pinctrl`, `sys/gpio`, `sys/iicbus`; `specs/sky1-peripherals` (`01`–`03`, `05`) | **Supported** (GPIO, I²C, pinctrl); **Planned** (SPI, XSPI) | P8 / P9 |
 | Realtek RTS5453H USB-C PD controller | Orange Pi 6 Plus / Radxa Orion O6 (Sky1) | I²C USB Type-C Power Delivery controller: port status, data/power role, and DisplayPort Alt-Mode HPD/pin-assignment reporting to the combo PHY and DP-TX | `specs/sky1-peripherals` (`04-usb-pd-rts5453.md`), the sibling port's `rts5453.c` | **Supported, not yet on the board** (`drivers/rts5453`: polled status and the sibling's sysctls, P9); **Planned** (feeding the PHY and DP-TX, M-G) | P9 / M-G |
 | ITE IT8689E / IT87952E Super I/O & Gigabyte WMI | Ryzen 9 7900X / Gigabyte X870E AORUS ELITE WIFI7 | LPC Super I/O Environment Controller (`0x8689` / `0x8695` / `0x8696`): 16-bit fan tachometers, 6-channel PWM fan control, voltages, PECI/AMD-TSI temperatures, SMBus interlock, and Gigabyte WMI temperature sensor interface | `specs/ite-it87-superio` | **Planned** | Later |
 | SpacemiT K3 clocks, resets, pinctrl, GPIO, I²C, SPI, PWM, PDMA, PMIC & thermal | Banana Pi BPI-SM10 (SpacemiT K3) | APBS/MPMU/APBC/APMU/DCIU clocks & resets, pinctrl/GPIO, TWSI I²C, QSPI, PWM, peripheral DMA, P1 PMIC, power domains, and thermal sensors (fallback where not owned by UEFI/ACPI + RPMI) | `specs/spacemit-k3` (`01`, `02`, `04`, `05`, `09`–`11`, `14`, `15`) | **Planned** | P12 / Later |
@@ -121,8 +122,8 @@ Drivers planned from the clean-room specifications in `~/Projects/OS/chinese-wal
 
 | Driver | Hardware / Interface | Crate / Spec | Status | Phase |
 |---|---|---|---|---|
-| `lo` | Loopback network interface | `sys/socket` / net stack | **Planned** | P6 / P7 |
-| `vtnet` | VirtIO network device (multi-queue, checksum & TSO offloads) | — | **Planned** | P7 |
+| `lo` | Loopback network interface | `sys/net`, `sys/inet` | **Supported** | P6 / P7 |
+| `vtnet` | VirtIO network device, published as `vtnetN` | `drivers/virtio-net` | **Supported** | P7 |
 | `em` (`e1000e`) | Intel I219 / 82574 1 GbE PCIe controllers | — | **Planned** | P8 |
 | `igc` | **Intel I225 / I226 2.5 GbE** PCIe controllers (onboard **I225-V** `8086:15f3` on the MSI PRO Z690-A build server) | — | **Planned** | P8 |
 | `rge` | **Realtek RTL8125 / Killer E3000 (2.5 GbE) & RTL8126 (5 GbE)** PCIe controllers (onboard NICs on the X870E `10ec:8125`, B650E Taichi Lite `10ec:3000`, and Orange Pi 6 Plus: multi-queue RSS, MSI-X, TSO, EEE, PHY microcode patching) | `specs/realtek-rtl8125-delta` | **Supported** (RTL8126, the Orange Pi 6 Plus); **Supported, not yet on the board** (RTL8125D revision 1, the X870E's NIC); **Planned** (the other RTL8125 revisions, RTL8127, RSS, TSO) | P8 |
@@ -135,6 +136,8 @@ Drivers planned from the clean-room specifications in `~/Projects/OS/chinese-wal
 |---|---|---|---|---|
 | `hkbd` | USB HID keyboards (`kbd` under `kbdmux`, LED control, key repeat, `evdev`) | `drivers/hkbd`, `sys/input`, `sys/evdev` | **Supported** | Track U (P6) |
 | `hms` | USB HID mice and absolute pointing devices / tablets (`evdev` `/dev/input/event*` and `/dev/sysmouse`) | `drivers/hms`, `sys/evdev` | **Supported** | Track U (P6) |
+| `hcons` | USB HID Consumer Control collections on `hidbus` (a keyboard's media keys) | `drivers/hcons` | **Supported** | Track U (P6) |
+| `hsctrl` | USB HID System Control collections on `hidbus` (a keyboard's power, sleep, and wake keys) | `drivers/hsctrl` | **Supported** | Track U (P6) |
 | `vtinput` | VirtIO input devices: keyboards, mice, and tablets (`virtio 1.2 §5.8`, `kbdmux` and `evdev`) | `drivers/virtio-input`, `sys/evdev` | **Supported** | Track U (P6) |
 
 ### Graphics and display (M-G)
@@ -143,9 +146,9 @@ See [docs/GRAPHICS.md](GRAPHICS.md) for the DRM/KMS architecture and step order.
 
 | Driver | Hardware / Target | Description | Spec / Crate | Status | Phase |
 |---|---|---|---|---|---|
-| `gop-kms` | All UEFI platforms (QEMU, bhyve, X870E, B650E, Z690-A, Orange Pi 6 Plus, BPI-SM10) | Simple atomic KMS driver over the UEFI GOP boot framebuffer (`/dev/dri/card0`) with seamless handover to native display drivers | [GRAPHICS.md §7.5](GRAPHICS.md#75-firmware-handover) | **Planned** | M-G.1 |
+| `gop-kms` | All UEFI platforms (QEMU, bhyve, X870E, B650E, Z690-A, Orange Pi 6 Plus, BPI-SM10) | Simple atomic KMS driver over the UEFI GOP boot framebuffer (`/dev/dri/card0`) with seamless handover to native display drivers | `drivers/gop-kms`, `sys/drm`, [GRAPHICS.md §7.5](GRAPHICS.md#75-firmware-handover) | **Supported** (merged to main 2026-11-23) | M-G.1 |
 | `virtio-gpu` | QEMU (`x86_64`, `aarch64`, `riscv64`) | VirtIO GPU 2D KMS and 3D (Venus / virglrenderer) with host-visible blob memory, fences, and `dma-buf` | [GRAPHICS.md §9](GRAPHICS.md#9-drivers-and-order) | **Planned** | M-G.2 / M-G.3 |
-| `linlondp` + `sky1-dp-tx` | Orange Pi 6 Plus / Radxa Orion O6 (CIX Sky1) | Arm China **Linlon-D6** (Mali-D71 / Komeda family) DPU (`CIXH5010`) + 5× **Trilinear DPTX** DisplayPort 1.4 transmitters (`CIXH502F`), USB-C/DP combo PHY, eDP panel (`CIXH5040`), and backlight (`CIXH5041`) | `specs/linlon-dpu`, `specs/sky1-dp-tx` | **Planned** | M-G.4 |
+| `linlondp` + `sky1-dp-tx` | Orange Pi 6 Plus / Radxa Orion O6 (CIX Sky1) | Arm China **Linlon-D6** (Mali-D71 / Komeda family) DPU (`CIXH5010`) + 5× **Trilinear DPTX** DisplayPort 1.4 transmitters (`CIXH502F`), USB-C/DP combo PHY, eDP panel (`CIXH5040`), and backlight (`CIXH5041`) | `drivers/linlondp`, `drivers/sky1-dp-tx`, `drivers/sky1-dp`, `drivers/sky1-usbdp-phy`; `specs/linlon-dpu`, `specs/sky1-dp-tx` | **Supported** on the board (Sway on the DPU, 4K60 over DisplayPort; merged to main 2026-11-23); **Planned** (eDP panel `CIXH5040`, backlight `CIXH5041`, the second pipeline, hot-plug retraining: [GRAPHICS.md §15](GRAPHICS.md)) | M-G.4 |
 | `panthor` | Orange Pi 6 Plus / Radxa Orion O6 (CIX Sky1) & RK3588 | Arm **Immortalis-G720** (and Mali-G610) CSF GPU (`CIXH5000`): MCU firmware loader, Command Stream Frontend (CSF) scheduler, GPU MMU (`IoAddressSpace`), tiler heap, and DRM render node for Mesa `panvk` | `specs/panthor` | **Planned** | M-G.5 |
 | `amdgpu` / native AMD64 GPU | X870E, B650E Taichi Lite, Z690-A | AMD Radeon 610M (RDNA2 iGPU on 7900X & 9700X), AMD Radeon RX 6700 XT (RDNA2 Navi 22 `1002:73df` on Z690-A), NVIDIA RTX 4070 (Ada `10de:2786` on X870E), or NVIDIA RTX 5070 Ti (Blackwell `10de:2c05` on B650E) native DRM/KMS and render driver | [GRAPHICS.md §9](GRAPHICS.md#9-drivers-and-order) | **Planned** | M-G.6 |
 | `msm` (MDSS DPU1 + DP) | Radxa Dragon Q8B (Qualcomm SC8280XP, Tier 2) | Dual-MDSS v8.1 / DPU1 display processor (`0x0ae00000`), 4× DP/eDP controllers, `DISP_CC_0`, and QMP V5 5nm USB4/USB3/DP combo PHYs | `specs/qcom-mdss-dpu` | **Planned** | Tier 2 (M-G) |
@@ -195,11 +198,11 @@ for this hardware, and its Q8B `lessons.md` has the general bring-up hazards.
 
 **Access and workflow**
 
-- Today the board runs Ubuntu (CIX kernel) and FreeBSD 16-CURRENT from its NVMe. Nothing touches
-  it before P6's exit. When the board's gating phase arrives (P8), **it is reimaged for AbyssBSD**. Before that, capture the ground truth (`acpidump` tables, `devinfo`,
-  `pciconf`, Linux register dumps) into `tests/corpus/opi6p/`, because the reference OSes will be
-  gone afterwards.
-- Network: `192.168.0.25`, whichever OS is booted (user `jkane`, key login). Ubuntu: passwordless
+- The board's Crucial NVMe holds Ubuntu (CIX kernel) and FreeBSD 16-CURRENT, which stays the
+  default boot and is not written. AbyssBSD runs from the Samsung 990 PRO (since 2026-11-10),
+  booted by BootNext from FreeBSD. The ground truth (`acpidump` tables, `devinfo`, `pciconf`,
+  Linux register dumps) is in `tests/corpus/opi6p/`.
+- Network: `192.168.0.19` (DHCP: it was `.25` and moves after a router reset), whichever OS is booted (user `jkane`, key login). Ubuntu: passwordless
   `sudo`. FreeBSD: `su` (no root password); root ssh is refused, and the console is `ttyv0` only,
   so the serial header is silent under it.
 - **Never read `/dev/mem` on the board under FreeBSD.** Reading ACPI tables that way panicked it
@@ -229,7 +232,7 @@ The AMD64 Tier 1 physical machine. Surveyed read-only from its Fedora 44 install
 | CPU frequency | `amd-pstate-epp` under Linux (MSR-based CPPC; the firmware's `_CPC` is all fixed-hardware MSRs, `0xC00102B0`-`B4`). Highest performance of CPU0: 196 | `hwpstate_amd` (as FreeBSD's): enables CPPC on all 24 cores and programs the request as FreeBSD does (EPP 0, minimum = lowest, maximum = desired = highest); `dev.cpu.N.freq` is measured with APERF/MPERF (4.4-5.6 GHz seen), `dev.hwpstate_amd.N.{epp,minimum_performance,maximum_performance,desired_performance}` change it (verified: a maximum of 100 gives 3.4 GHz, 60 gives 2.0 GHz) |
 | Temperatures | Linux: `k10temp` (Tctl and per-CCD) through the SMN; ACPI offers only a dummy thermal zone (`TZ10`, a constant 17 °C) | `amdsmn` and `amdtemp`, children of `hostb0` as on FreeBSD (2026-11-23): `dev.amdtemp.0.core0.sensor0` (Tctl), `dev.amdtemp.0.ccd0`/`ccd1`, and `dev.cpu.N.temperature` on all 24 CPUs. Seen: idle Tctl 51 °C with the dies at 40 °C, 95 °C within 14 s of an all-core load |
 | Display | Boot VGA (UEFI GOP) is the **NVIDIA RTX 4070** (`10de:2786`). The iGPU (Radeon 610M) is also present | The GOP framebuffer console is the primary bring-up console. Native GPU drivers belong to M-G |
-| Storage | NVMe 0: Samsung 980 PRO 2 TB, **Fedora system disk**. **Second NVMe: AbyssBSD media** (to be installed). AMD 600-series AHCI ×2 | AbyssBSD owns only the second NVMe. AHCI is exercised by the P3 driver |
+| Storage | NVMe 0: Samsung 980 PRO 2 TB, **Fedora system disk**. **Second NVMe (`nda1`): AbyssBSD media**, a WD PC SN740 256 GB (serial `24413C804394`): a 512 MiB ESP (`abyssefi`), a 118 GiB UFS2 root (`abyssroot`), and the rest unallocated; installed 2026-11-23, booted by BootNext (`Boot0003`). AMD 600-series AHCI ×2 | AbyssBSD owns only the second NVMe. AHCI is exercised by the P3 driver |
 | Data disks | **2× WD 8 TB (Linux RAID 0, `md0`) and 1× HGST 6 TB (`md1` member), user data** | Never written. The storage stack attaches them read-only until P11, and `xtask deploy` refuses any target other than the designated media NVMe |
 | Network | **Realtek RTL8125D 2.5 GbE** (`10ec:8125` rev `0c`; Linux: RTL8125D, XID 688, hardware revision `0x68800000`, `MAC_R25D_1` in FreeBSD's `rge(4)`), MediaTek MT7925 Wi-Fi 7 | `rge`-family driver, shared with the RTL8126 on the Orange Pi 6 Plus: **RTL8125D_1 is programmed** (2026-11-23, from FreeBSD's `rge(4)`; first hardware run pending). Wi-Fi is out of scope for Day 1 |
 | USB | AMD 800-series chipset xHCI ×2, CPU xHCI ×3, ASMedia ASM4242 USB4 host router + xHCI | xHCI on PCI. USB4/Thunderbolt tunneling is out of scope for Day 1 |
@@ -281,7 +284,7 @@ The primary AMD64 development workstation (`192.168.0.15`, Fedora Linux 44). Sur
 ## 7. Board profile: AMD64 Intel Core i7-12700KF / MSI PRO Z690-A DDR4
 
 The FreeBSD 15.1-RELEASE build, test, and `bhyve` benchmark server (`abyss-build` at
-`192.168.0.2`), and the Intel hybrid-core bare-metal reference platform. Surveyed read-only on
+`192.168.0.14`), and the Intel hybrid-core bare-metal reference platform. Surveyed read-only on
 2026-10-28.
 
 | Item | Fact | What it means for AbyssBSD |
@@ -303,7 +306,7 @@ The FreeBSD 15.1-RELEASE build, test, and `bhyve` benchmark server (`abyss-build
 
 **Access and workflow.**
 
-- Runs FreeBSD 15.1-RELEASE at `192.168.0.2` (ssh alias `abyss-build`, user `jkane`, `doas`).
+- Runs FreeBSD 15.1-RELEASE at `192.168.0.14` (ssh alias `abyss-build`, user `jkane`, `doas`).
 - Hosts the self-hosted CI pipeline, `bhyve` virtual Tier 1 gate, P2–P6 performance gate (pinned to
   P-cores), and FreeBSD differential/filesystem reference tooling ([BUILD-AND-TEST.md](BUILD-AND-TEST.md)).
 - Bare-metal testing on this machine is occasional (manual USB boot outside CI windows) to validate
