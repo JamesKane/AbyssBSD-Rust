@@ -24,6 +24,7 @@ use crate::atomic as at;
 use crate::card::{Open, client};
 use crate::gem::Gem;
 use crate::kms_ioctl as k;
+use crate::vblank as vb;
 
 type Handler = fn(&Open, &Sleepable, &mut [u8]) -> Result<usize, Errno>;
 
@@ -85,6 +86,24 @@ macro_rules! defs {
 
 const TABLE: &[Def] = &[
     def!(DRM_IOCTL_VERSION, "VERSION", DrmVersion, version),
+    defs!(
+        DRM_IOCTL_WAIT_VBLANK,
+        "WAIT_VBLANK",
+        DrmWaitVblank,
+        vb::wait_vblank
+    ),
+    def!(
+        DRM_IOCTL_CRTC_GET_SEQUENCE,
+        "CRTC_GET_SEQUENCE",
+        DrmCrtcGetSequence,
+        vb::get_sequence
+    ),
+    def!(
+        DRM_IOCTL_CRTC_QUEUE_SEQUENCE,
+        "CRTC_QUEUE_SEQUENCE",
+        DrmCrtcQueueSequence,
+        vb::queue_sequence
+    ),
     def!(DRM_IOCTL_GET_MAGIC, "GET_MAGIC", DrmAuth, get_magic),
     def!(DRM_IOCTL_AUTH_MAGIC, "AUTH_MAGIC", DrmAuth, auth_magic),
     // Leases are not built: callers (wlroots) take this refusal and go on.
@@ -369,6 +388,10 @@ fn no_leases<T>(_: &Open, _: &mut T) -> Result<usize, Errno> {
 /// `PRIME_HANDLE_TO_FD`: a descriptor for the buffer a handle names.
 fn prime_handle_to_fd(f: &Open, s: &Sleepable, a: &mut DrmPrimeHandle) -> Result<usize, Errno> {
     let env = crate::env().ok_or(Errno::ENXIO)?;
+    // Sharing buffers needs the master's say-so (`DRM_AUTH`).
+    if !f.is_authenticated() {
+        return Err(Errno::EACCES);
+    }
     if a.flags & !(DRM_CLOEXEC | DRM_RDWR) != 0 {
         return Err(Errno::EINVAL);
     }
@@ -382,6 +405,9 @@ fn prime_handle_to_fd(f: &Open, s: &Sleepable, a: &mut DrmPrimeHandle) -> Result
 /// a buffer the file already has keeps its handle.
 fn prime_fd_to_handle(f: &Open, s: &Sleepable, a: &mut DrmPrimeHandle) -> Result<usize, Errno> {
     let env = crate::env().ok_or(Errno::ENXIO)?;
+    if !f.is_authenticated() {
+        return Err(Errno::EACCES);
+    }
     if a.flags != 0 {
         return Err(Errno::EINVAL);
     }

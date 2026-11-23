@@ -152,6 +152,12 @@ pub trait CrtcHw: Send + Sync {
     fn gamma_size(&self) -> u32 {
         0
     }
+    /// Turns the vertical blanking interrupt on while something waits
+    /// for a frame, and off when nothing does (a controller with the
+    /// interrupt off saves its wakeups).
+    fn vblank_enable(&self, on: bool) {
+        let _ = on;
+    }
     /// Whether the hardware raises a vertical blanking interrupt, whose
     /// handler calls [`Kms::vblank`]. Without one the core times frames
     /// itself, from the mode's refresh rate.
@@ -363,10 +369,21 @@ pub(crate) struct Pending {
     pub event: Option<(Weak<Open>, Vec<u8>)>,
 }
 
+/// What waits for a frame count (`WAIT_VBLANK`, `CRTC_QUEUE_SEQUENCE`):
+/// an event built in advance, or nothing for a thread that sleeps.
+pub(crate) struct Waiter {
+    pub target: u64,
+    pub event: Option<(Weak<Open>, Vec<u8>)>,
+}
+
 /// A display controller's running state: the frame count and what waits
 /// for the next frame.
 #[derive(Default)]
 pub(crate) struct CrtcRt {
+    /// When the last frame began, in nanoseconds of uptime.
+    pub last_ns: u64,
+    /// Waits for a frame count.
+    pub waiters: Vec<Waiter>,
     /// Whether the frame timer is running.
     pub armed: bool,
     pub seq: u64,

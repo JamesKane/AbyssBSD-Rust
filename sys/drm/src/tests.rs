@@ -1799,6 +1799,7 @@ fn a_buffer_crosses_to_another_file_through_a_descriptor() {
     let c = card(true, true);
     let a = open(&c);
     let b = open(&c);
+    vouch(&a, &b);
     let handle = dumb(&a, 64, 64);
     a.gem(handle)
         .unwrap()
@@ -2126,5 +2127,219 @@ fn leases_are_refused_as_unsupported_so_callers_go_on_without() {
         .err(),
         Some(Errno::EOPNOTSUPP)
     );
+    c.unregister(&s());
+}
+
+// ---- frames ----
+
+/// A lit display: the card, its file, and the objects.
+fn lit() -> (Arc<crate::Card>, Arc<crate::Open>, Ids) {
+    let (c, _calls) = card_logged();
+    let f = open(&c);
+    let i = ids(&f);
+    let fb = make_fb(&f, 1920, 1080);
+    set_crtc(&f, &i, fb).unwrap();
+    (c, f, i)
+}
+
+fn wait(
+    f: &Arc<crate::Open>,
+    kind: u32,
+    sequence: u32,
+    signal: u64,
+) -> Result<DrmWaitVblank, Errno> {
+    ctl(
+        f,
+        DRM_IOCTL_WAIT_VBLANK,
+        &DrmWaitVblank {
+            kind,
+            sequence,
+            word0: signal,
+            word1: 0,
+        },
+    )
+}
+
+#[test]
+fn a_blocked_wait_ends_at_its_frame_and_says_when() {
+    let (c, f, _) = lit();
+    let k = c.driver().kms().unwrap();
+    let before = k.frames(0);
+    // Zero frames from now returns at once.
+    let now = wait(&f, DRM_VBLANK_RELATIVE, 0, 0).unwrap();
+    assert_eq!(u64::from(now.sequence), before);
+    assert_eq!(k.frames(0), before);
+    // Three frames from now: the frame timer is fired for each.
+    let r = wait(&f, DRM_VBLANK_RELATIVE, 3, 0).unwrap();
+    assert_eq!(u64::from(r.sequence), before + 3);
+    assert_eq!(k.frames(0), before + 3);
+    // The time is the frame's, in seconds and microseconds.
+    assert_eq!((r.word0, r.word1), (5, 0));
+    // Absolute: to a count in the future, and one already past, which
+    // returns where it is.
+    let abs = wait(
+        &f,
+        DRM_VBLANK_ABSOLUTE,
+        u32::try_from(before + 5).unwrap(),
+        0,
+    )
+    .unwrap();
+    assert_eq!(u64::from(abs.sequence), before + 5);
+    let past = wait(&f, DRM_VBLANK_ABSOLUTE, 1, 0).unwrap();
+    assert_eq!(u64::from(past.sequence), before + 5);
+    c.unregister(&s());
+}
+
+#[test]
+fn a_wait_can_be_asked_for_as_an_event() {
+    let (c, f, i) = lit();
+    let k = c.driver().kms().unwrap();
+    let before = k.frames(0);
+    let r = wait(&f, DRM_VBLANK_RELATIVE | DRM_VBLANK_EVENT, 2, 0xbeef).unwrap();
+    assert_eq!(
+        u64::from(r.sequence),
+        before + 2,
+        "the reply names the frame it will come at"
+    );
+    assert!(read_event(&f).is_none());
+    fire(c.unit());
+    assert!(read_event(&f).is_none(), "one frame is not enough");
+    fire(c.unit());
+    let ev = read_event(&f).expect("the event at the second frame");
+    assert_eq!(ev.base.kind, DRM_EVENT_VBLANK);
+    assert_eq!((ev.user_data, ev.crtc_id), (0xbeef, i.crtc));
+    assert_eq!(u64::from(ev.sequence), before + 2);
+    assert_eq!((ev.tv_sec, ev.tv_usec), (5, 0));
+    // Nothing waits now, so the timer stops.
+    fire(c.unit());
+    assert_eq!(k.frames(0), before + 2);
+    // An event for a frame already past goes at once.
+    wait(&f, DRM_VBLANK_ABSOLUTE | DRM_VBLANK_EVENT, 0, 7).unwrap();
+    assert_eq!(read_event(&f).unwrap().user_data, 7);
+    c.unregister(&s());
+}
+
+#[test]
+fn what_a_wait_refuses() {
+    let (c, f, _) = lit();
+    assert_eq!(
+        wait(&f, DRM_VBLANK_RELATIVE | DRM_VBLANK_SIGNAL, 1, 0).err(),
+        Some(Errno::EINVAL)
+    );
+    // The second controller does not exist.
+    assert_eq!(
+        wait(&f, DRM_VBLANK_RELATIVE | DRM_VBLANK_SECONDARY, 1, 0).err(),
+        Some(Errno::EINVAL)
+    );
+    c.unregister(&s());
+
+    // A controller that is off has no frames to wait for.
+    let (c, _calls) = card_logged();
+    let g = open(&c);
+    ids(&g);
+    assert_eq!(
+        wait(&g, DRM_VBLANK_RELATIVE, 1, 0).err(),
+        Some(Errno::EINVAL)
+    );
+    c.unregister(&s());
+}
+
+fn read_sequence_event(f: &Arc<crate::Open>) -> Option<(u32, u64, i64, u64)> {
+    let mut b = [0u8; 64];
+    let mut r = vfs::ReadBuf::new(&mut b);
+    match f.read(&s(), &mut r, 0, true) {
+        Ok(32) => {
+            let b = r.filled();
+            Some((
+                u32_of(b, 0),
+                read_u64(b, 8),
+                read_u64(b, 16).cast_signed(),
+                read_u64(b, 24),
+            ))
+        }
+        _ => None,
+    }
+}
+
+#[test]
+fn sequences_are_counted_and_queued() {
+    let (c, f, i) = lit();
+    let k = c.driver().kms().unwrap();
+    let get = |f: &Arc<crate::Open>| {
+        ctl(
+            f,
+            DRM_IOCTL_CRTC_GET_SEQUENCE,
+            &DrmCrtcGetSequence {
+                crtc_id: i.crtc,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let start = get(&f);
+    assert_eq!(start.active, 1);
+    assert_eq!(start.sequence, k.frames(0));
+
+    let queue = |flags, sequence, user_data| {
+        let a = DrmCrtcQueueSequence {
+            crtc_id: i.crtc,
+            flags,
+            sequence,
+            user_data,
+        };
+        ctl(&f, DRM_IOCTL_CRTC_QUEUE_SEQUENCE, &a)
+    };
+    let q = queue(DRM_CRTC_SEQUENCE_RELATIVE, 2, 0x51).unwrap();
+    assert_eq!(q.sequence, start.sequence + 2);
+    assert_eq!(queue(0x8, 1, 0).err(), Some(Errno::EINVAL), "unknown flags");
+    // A count already past is an error, or the next frame if asked.
+    assert_eq!(queue(0, 1, 0).err(), Some(Errno::EINVAL));
+    let next = queue(DRM_CRTC_SEQUENCE_NEXT_ON_MISS, 1, 0x52).unwrap();
+    assert_eq!(next.sequence, start.sequence + 1);
+
+    fire(c.unit());
+    let first = read_sequence_event(&f).expect("the next-frame event");
+    assert_eq!(
+        (first.0, first.1, first.3),
+        (DRM_EVENT_CRTC_SEQUENCE, 0x52, start.sequence + 1)
+    );
+    assert_eq!(first.2, 5_000_000_000, "its time is in nanoseconds");
+    fire(c.unit());
+    let second = read_sequence_event(&f).expect("the relative event");
+    assert_eq!((second.1, second.3), (0x51, start.sequence + 2));
+    let end = get(&f);
+    assert_eq!(end.sequence, start.sequence + 2);
+    assert_eq!(end.sequence_ns, 5_000_000_000);
+    c.unregister(&s());
+}
+
+/// The master `m` vouches for file `g`.
+fn vouch(m: &Arc<crate::Open>, g: &Arc<crate::Open>) {
+    let magic = ctl(g, DRM_IOCTL_GET_MAGIC, &DrmAuth { magic: 0 })
+        .unwrap()
+        .magic;
+    ctl(m, DRM_IOCTL_AUTH_MAGIC, &DrmAuth { magic }).unwrap();
+}
+
+#[test]
+fn sharing_buffers_needs_the_masters_say_so() {
+    let c = card(true, true);
+    let master = open(&c);
+    let guest = open(&c);
+    let handle = dumb(&guest, 16, 16);
+    // A file nobody vouched for cannot export or import.
+    assert_eq!(
+        prime(&guest, DRM_IOCTL_PRIME_HANDLE_TO_FD, handle, 0, -1).err(),
+        Some(Errno::EACCES)
+    );
+    assert_eq!(
+        prime(&guest, DRM_IOCTL_PRIME_FD_TO_HANDLE, 0, 0, 101).err(),
+        Some(Errno::EACCES)
+    );
+    // The master needs no vouching; once vouched for, the guest can.
+    let h = dumb(&master, 16, 16);
+    assert!(prime(&master, DRM_IOCTL_PRIME_HANDLE_TO_FD, h, 0, -1).is_ok());
+    vouch(&master, &guest);
+    assert!(prime(&guest, DRM_IOCTL_PRIME_HANDLE_TO_FD, handle, 0, -1).is_ok());
     c.unregister(&s());
 }

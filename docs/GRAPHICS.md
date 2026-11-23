@@ -450,7 +450,7 @@ Each step that puts a display up exits with the same **acceptance capture**: a `
 a Sway session, taken on the machine under test and kept with the run's results, showing two
 windows in their Sway frames:
 
-1. a `foot` terminal running `fastfetch`, which names AbyssBSD, the kernel, the CPU, and the GPU;
+1. a `foot` terminal running `fastfetch`, which names the OS (as FreeBSD 15.1-RELEASE: the compatibility contract keeps `uname -s` and `os-release` FreeBSD, docs/compat-deviations.md), the CPU, and the GPU;
 2. glmark2's 3D jellyfish scene (`glmark2-es2-wayland -b jellyfish:show-fps=true --run-forever`),
    with its frame rate on screen.
 

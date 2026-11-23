@@ -337,7 +337,7 @@ impl Kms {
     /// # Errors
     ///
     /// `EINTR` if the thread is interrupted first.
-    fn wait(&self, s: &Sleepable, done: impl FnMut() -> bool) -> Result<(), Errno> {
+    pub(crate) fn wait(&self, s: &Sleepable, done: impl FnMut() -> bool) -> Result<(), Errno> {
         #[cfg(not(test))]
         {
             self.done
@@ -463,7 +463,9 @@ impl Kms {
             break touched;
         };
         for i in &touched {
-            if !self.crtcs[*i].hw.vblank_interrupt() {
+            if self.crtcs[*i].hw.vblank_interrupt() {
+                self.crtcs[*i].hw.vblank_enable(true);
+            } else {
                 self.arm_timer(*i);
             }
         }
@@ -600,7 +602,25 @@ impl Kms {
         let (seq, pending) = {
             let mut r = rt.lock();
             r.seq += 1;
-            (r.seq, core::mem::take(&mut r.pending))
+            r.last_ns = now_ns;
+            // Events waiting on a frame count, those due now: sent in
+            // place, each reserved, so nothing here allocates.
+            let seq = r.seq;
+            let mut i = 0;
+            while i < r.waiters.len() {
+                if r.waiters[i].target <= seq {
+                    let w = r.waiters.swap_remove(i);
+                    if let Some((file, mut ev)) = w.event {
+                        stamp_wait_event(&mut ev, now_ns, seq, self.crtcs[crtc].id.0);
+                        if let Some(f) = file.upgrade() {
+                            f.send_reserved(ev);
+                        }
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            (seq, core::mem::take(&mut r.pending))
         };
         let id = self.crtcs[crtc].id.0;
         for p in pending {
@@ -620,6 +640,12 @@ impl Kms {
                 if let Some(f) = file.upgrade() {
                     f.send_reserved(ev);
                 }
+            }
+        }
+        if self.crtcs[crtc].hw.vblank_interrupt() {
+            let r = rt.lock();
+            if r.pending.is_empty() && r.waiters.is_empty() {
+                self.crtcs[crtc].hw.vblank_enable(false);
             }
         }
         self.done.wake_all();
@@ -687,7 +713,7 @@ impl Kms {
     }
 
     /// Starts the frame timer of `crtc` if it is not running.
-    fn arm_timer(&self, crtc: usize) {
+    pub(crate) fn arm_timer(&self, crtc: usize) {
         let Some(env) = crate::env() else { return };
         let frame = {
             let st = self.state.lock();
@@ -695,7 +721,7 @@ impl Kms {
         };
         let frame = if frame == 0 { DEFAULT_FRAME_NS } else { frame };
         let mut r = self.rt[crtc].lock();
-        if r.pending.is_empty() || r.armed {
+        if (r.pending.is_empty() && r.waiters.is_empty()) || r.armed {
             return;
         }
         r.armed = true;
@@ -716,6 +742,35 @@ impl Kms {
             r.pending.clear();
         }
         self.done.wake_all();
+    }
+}
+
+/// Fills in the time, count and controller of a wait event built in
+/// advance: a vertical blanking event (`WAIT_VBLANK`, whose time is in
+/// seconds and microseconds) or a sequence event (`CRTC_QUEUE_SEQUENCE`,
+/// in nanoseconds), by its type.
+fn stamp_wait_event(ev: &mut [u8], now_ns: u64, seq: u64, crtc: u32) {
+    let kind = u32::from_ne_bytes([ev[0], ev[1], ev[2], ev[3]]);
+    if kind == DRM_EVENT_CRTC_SEQUENCE {
+        let user_data = u64_at(ev, 8);
+        DrmEventCrtcSequence {
+            base: DrmEvent { kind, length: 32 },
+            user_data,
+            time_ns: i64::try_from(now_ns).unwrap_or(i64::MAX),
+            sequence: seq,
+        }
+        .encode(ev);
+    } else {
+        let user_data = u64_at(ev, 8);
+        DrmEventVblank {
+            base: DrmEvent { kind, length: 32 },
+            user_data,
+            tv_sec: u32::try_from(now_ns / 1_000_000_000).unwrap_or(u32::MAX),
+            tv_usec: u32::try_from(now_ns % 1_000_000_000 / 1000).unwrap_or(0),
+            sequence: u32::try_from(seq & 0xffff_ffff).unwrap_or(0),
+            crtc_id: crtc,
+        }
+        .encode(ev);
     }
 }
 

@@ -31,6 +31,7 @@ pub mod kms;
 mod kms_ioctl;
 #[cfg(test)]
 mod tests;
+mod vblank;
 
 pub use build::{KmsBuilder, in_formats_blob};
 pub use card::{Card, Open, register};

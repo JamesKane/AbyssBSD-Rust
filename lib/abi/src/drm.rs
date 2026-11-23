@@ -271,6 +271,11 @@ pub struct DrmEventCrtcSequence {
     pub sequence: u64,
 }
 
+/// `drm_crtc_queue_sequence`'s flags: `sequence` counts from now, and a
+/// missed absolute one goes to the next frame.
+pub const DRM_CRTC_SEQUENCE_RELATIVE: u32 = 0x1;
+pub const DRM_CRTC_SEQUENCE_NEXT_ON_MISS: u32 = 0x2;
+
 pub const DRM_EVENT_VBLANK: u32 = 0x01;
 pub const DRM_EVENT_FLIP_COMPLETE: u32 = 0x02;
 pub const DRM_EVENT_CRTC_SEQUENCE: u32 = 0x03;
