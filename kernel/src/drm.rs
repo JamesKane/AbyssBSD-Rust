@@ -18,11 +18,27 @@ impl drm::UserMemory for UserCopies {
     }
 }
 
+/// A frame timer: a softclock callout, so its handler runs in thread
+/// context and may take sleeping locks.
+struct FrameTimer(core::pin::Pin<alloc::boxed::Box<crate::softclock::Callout>>);
+
+impl drm::Ticker for FrameTimer {
+    fn arm(&self, delay_ns: u64, f: fn(&sched::Sleepable, usize), arg: usize) {
+        self.0.as_ref().reset(delay_ns, f, arg);
+    }
+
+    fn cancel(&self) {
+        self.0.stop();
+    }
+}
+
 /// Gives the core its environment; before a display driver registers.
 pub(crate) fn init() {
     drm::init(drm::Env {
         user: &UserCopies,
         pages: crate::mm::space::page_ops(),
         log: |args| kprintln!("{args}"),
+        now_ns: crate::time::now_ns,
+        ticker: || alloc::boxed::Box::new(FrameTimer(crate::softclock::Callout::new())),
     });
 }

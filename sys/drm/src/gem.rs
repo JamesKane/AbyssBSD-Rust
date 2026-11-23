@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! GEM buffers: a buffer is a VM object, a handle names it in one Direct Rendering Manager
+//! Graphics execution manager buffers: a buffer is a VM object, a handle names it in one Direct Rendering Manager
 //! file, and a fake file offset names it for `mmap`.
 //!
 //! Behavior reference: `docs/GRAPHICS.md` §4.1, §4.2.

@@ -5,8 +5,8 @@
 //!
 //! Behavior reference: the atomic kernel mode setting model of `docs/GRAPHICS.md` §7.3;
 //! the rules are those every compositor already meets (a plane's source
-//! lies inside its framebuffer, an active CRTC has a mode, a connector
-//! reaches only a CRTC its encoder can).
+//! lies inside its framebuffer, an active display controller has a mode, a connector
+//! reaches only a display controller its encoder can).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -196,7 +196,7 @@ pub struct SrcRect {
     pub h: u32,
 }
 
-/// A destination rectangle on the CRTC, in pixels (`CRTC_X` and so on).
+/// A destination rectangle on the display controller, in pixels (`CRTC_X` and so on).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DstRect {
     pub x: i32,
@@ -214,7 +214,7 @@ pub struct PlaneState {
     pub dst: DstRect,
 }
 
-/// A CRTC's requested state.
+/// A display controller's requested state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CrtcState {
     pub active: bool,
@@ -224,7 +224,7 @@ pub struct CrtcState {
 /// What a plane can do.
 #[derive(Clone, Copy, Debug)]
 pub struct PlaneCaps<'a> {
-    /// Bit `i` set: it can scan out on CRTC `i` (in index order).
+    /// Bit `i` set: it can scan out on display controller `i` (in index order).
     pub possible_crtcs: u32,
     pub formats: &'a [Fourcc],
     /// Scaling it supports, as source-to-destination ratios in 16.16
@@ -235,11 +235,11 @@ pub struct PlaneCaps<'a> {
 /// Why a state is refused. Each is `EINVAL` to userland.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckError {
-    /// A framebuffer without a CRTC, or a CRTC without a framebuffer.
+    /// A framebuffer without a display controller, or a display controller without a framebuffer.
     HalfBound,
-    /// The plane cannot scan out on that CRTC.
+    /// The plane cannot scan out on that display controller.
     CrtcNotPossible,
-    /// The plane is on a CRTC that is off.
+    /// The plane is on a display controller that is off.
     CrtcInactive,
     FormatUnsupported,
     /// The source is empty or leaves its framebuffer.
@@ -248,12 +248,12 @@ pub enum CheckError {
     BadDestination,
     /// A scale the plane cannot do.
     Scaling,
-    /// An active CRTC without a mode, or a mode set on an inactive one.
+    /// An active display controller without a mode, or a mode set on an inactive one.
     ModeMismatch,
     Mode(ModeError),
-    /// A connector routed to a CRTC its encoder cannot reach.
+    /// A connector routed to a display controller its encoder cannot reach.
     ConnectorCrtc,
-    /// Two connectors on one CRTC (no cloning).
+    /// Two connectors on one display controller (no cloning).
     CloneUnsupported,
 }
 
@@ -274,7 +274,7 @@ pub struct Visible {
 }
 
 /// Checks plane state `st` against its `caps` and, if it names one, the
-/// CRTC's index and state; returns the clipped geometry.
+/// display controller's index and state; returns the clipped geometry.
 ///
 /// # Errors
 ///
@@ -387,8 +387,8 @@ fn clip(st: &PlaneState, mode: Option<&Mode>) -> Visible {
     }
 }
 
-/// Checks a CRTC's state: active means a good mode, inactive means none
-/// is needed (a mode left on an inactive CRTC is fine, as userland
+/// Checks a display controller's state: active means a good mode, inactive means none
+/// is needed (a mode left on an inactive display controller is fine, as userland
 /// writes it back).
 ///
 /// # Errors
@@ -403,8 +403,8 @@ pub fn check_crtc(st: &CrtcState) -> Result<(), CheckError> {
 }
 
 /// Checks connector routing: each connector's `(mask, crtc index)` has
-/// its CRTC in the mask of CRTCs its encoders reach, and no two share a
-/// CRTC.
+/// its display controller in the mask of display controllers its encoders reach, and no two share a
+/// display controller.
 ///
 /// # Errors
 ///

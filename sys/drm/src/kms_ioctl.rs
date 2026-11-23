@@ -108,7 +108,7 @@ pub(crate) fn get_crtc(f: &Open, a: &mut DrmModeCrtc) -> Result<usize, Errno> {
     let k = kms_of(f)?;
     let i = k.crtc_index(ObjId(a.crtc_id)).ok_or(Errno::ENOENT)?;
     let st = k.state.lock();
-    // The legacy view of a CRTC is what its primary plane shows.
+    // The legacy view of a display controller is what its primary plane shows.
     let primary = k
         .planes
         .iter()
@@ -137,7 +137,7 @@ pub(crate) fn get_crtc(f: &Open, a: &mut DrmModeCrtc) -> Result<usize, Errno> {
     Ok(0)
 }
 
-/// The encoder a connector bound to a CRTC uses: its first.
+/// The encoder a connector bound to a display controller uses: its first.
 fn bound_encoder(k: &Kms, conn: usize) -> Option<usize> {
     let st = k.state.lock();
     st.conns[conn].crtc?;
@@ -212,7 +212,7 @@ pub(crate) fn get_connector(f: &Open, a: &mut DrmModeGetConnector) -> Result<usi
 pub(crate) fn get_plane_resources(f: &Open, a: &mut DrmModeGetPlaneRes) -> Result<usize, Errno> {
     let k = kms_of(f)?;
     // Without universal planes a client sees overlays only; primary and
-    // cursor planes are reached through the CRTC calls.
+    // cursor planes are reached through the display controller calls.
     let universal = f.has_client_cap(client::UNIVERSAL_PLANES);
     let ids: Vec<u32> = k
         .planes

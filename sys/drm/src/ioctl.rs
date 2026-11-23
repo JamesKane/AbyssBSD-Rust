@@ -18,12 +18,14 @@ use abi::drm::*;
 use abi::errno::Errno;
 use abi::ioctl::IOC_OUT;
 use addr::PAGE_SIZE;
+use sched::Sleepable;
 
+use crate::atomic as at;
 use crate::card::{Open, client};
 use crate::gem::Gem;
 use crate::kms_ioctl as k;
 
-type Handler = fn(&Open, &mut [u8]) -> Result<usize, Errno>;
+type Handler = fn(&Open, &Sleepable, &mut [u8]) -> Result<usize, Errno>;
 
 /// One core request: its number, name (for the log), and the size of the
 /// structure its handler reads.
@@ -53,9 +55,27 @@ macro_rules! def {
             nr: ioctl_nr($req),
             name: $name,
             size: <$ty as Wire>::SIZE,
-            handler: |f, b| {
+            handler: |f, _, b| {
                 let mut a = <$ty as Wire>::decode(b);
                 let r = $h(f, &mut a)?;
+                a.encode(b);
+                Ok(r)
+            },
+        }
+    };
+}
+
+/// [`def!`] for a handler that may sleep: `$h(&Open, &Sleepable, &mut
+/// $ty)`.
+macro_rules! defs {
+    ($req:ident, $name:literal, $ty:ty, $h:path) => {
+        Def {
+            nr: ioctl_nr($req),
+            name: $name,
+            size: <$ty as Wire>::SIZE,
+            handler: |f, s, b| {
+                let mut a = <$ty as Wire>::decode(b);
+                let r = $h(f, s, &mut a)?;
                 a.encode(b);
                 Ok(r)
             },
@@ -178,10 +198,51 @@ const TABLE: &[Def] = &[
         DrmModeClosefb,
         k::close_fb
     ),
+    defs!(
+        DRM_IOCTL_MODE_ATOMIC,
+        "MODE_ATOMIC",
+        DrmModeAtomic,
+        at::atomic
+    ),
+    defs!(
+        DRM_IOCTL_MODE_SETCRTC,
+        "MODE_SETCRTC",
+        DrmModeCrtc,
+        at::set_crtc
+    ),
+    defs!(
+        DRM_IOCTL_MODE_PAGE_FLIP,
+        "MODE_PAGE_FLIP",
+        DrmModeCrtcPageFlip,
+        at::page_flip
+    ),
+    defs!(
+        DRM_IOCTL_MODE_SETPLANE,
+        "MODE_SETPLANE",
+        DrmModeSetPlane,
+        at::set_plane
+    ),
+    defs!(
+        DRM_IOCTL_MODE_OBJ_SETPROPERTY,
+        "MODE_OBJ_SETPROPERTY",
+        DrmModeObjSetProperty,
+        at::obj_set_property
+    ),
+    defs!(
+        DRM_IOCTL_MODE_SETPROPERTY,
+        "MODE_SETPROPERTY",
+        DrmModeConnectorSetProperty,
+        at::set_property
+    ),
 ];
 
 /// Runs request `req` on `file`.
-pub(crate) fn dispatch(file: &Open, req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
+pub(crate) fn dispatch(
+    file: &Open,
+    s: &Sleepable,
+    req: u32,
+    arg: &mut [u8],
+) -> Result<usize, Errno> {
     if !is_drm_ioctl(req) {
         return Err(Errno::ENOTTY);
     }
@@ -208,7 +269,7 @@ pub(crate) fn dispatch(file: &Open, req: u32, arg: &mut [u8]) -> Result<usize, E
     k.resize(def.size, 0);
     let common = arg.len().min(def.size);
     k[..common].copy_from_slice(&arg[..common]);
-    let r = (def.handler)(file, &mut k)?;
+    let r = (def.handler)(file, s, &mut k)?;
     if req & IOC_OUT != 0 {
         arg[..common].copy_from_slice(&k[..common]);
     }

@@ -19,8 +19,10 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+mod atomic;
 mod build;
 pub mod card;
+mod commit;
 pub mod driver;
 pub mod gem;
 mod ioctl;
@@ -46,6 +48,17 @@ pub trait UserMemory: Sync {
     fn copy_out(&self, dst: u64, src: &[u8]) -> Result<(), Errno>;
 }
 
+/// A one-shot timer whose handler runs in thread context (the kernel's
+/// softclock): the core times frames with it when a display controller
+/// has no vertical blanking interrupt.
+pub trait Ticker: Send + Sync {
+    /// Runs `f(arg)` in `delay_ns` nanoseconds, replacing any arming not
+    /// yet run.
+    fn arm(&self, delay_ns: u64, f: fn(&sched::Sleepable, usize), arg: usize);
+    /// Disarms it.
+    fn cancel(&self);
+}
+
 /// What the kernel gives the core, once.
 #[allow(
     missing_debug_implementations,
@@ -57,6 +70,10 @@ pub struct Env {
     pub pages: &'static dyn PageOps,
     /// Where the core says what it refused (`kprintln!`).
     pub log: fn(core::fmt::Arguments<'_>),
+    /// Nanoseconds of uptime.
+    pub now_ns: fn() -> u64,
+    /// A new timer.
+    pub ticker: fn() -> alloc::boxed::Box<dyn Ticker>,
 }
 
 static ENV: Once<Env> = Once::new();

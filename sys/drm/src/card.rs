@@ -27,6 +27,14 @@ const GID_VIDEO: u32 = 44;
 const EVENT_SPACE: usize = 4096;
 
 static UNITS: SpinLock<BTreeSet<u32>> = SpinLock::new(BTreeSet::new());
+/// The registered cards by unit, for timer callbacks that name one.
+static CARDS: SpinLock<alloc::collections::BTreeMap<u32, alloc::sync::Weak<Card>>> =
+    SpinLock::new(alloc::collections::BTreeMap::new());
+
+/// The card with unit `unit`, if it is registered.
+pub(crate) fn card_by_unit(unit: u32) -> Option<Arc<Card>> {
+    CARDS.lock().get(&unit)?.upgrade()
+}
 
 /// A registered Direct Rendering Manager device.
 pub struct Card {
@@ -80,6 +88,10 @@ pub fn register(driver: Arc<dyn DrmDriver>) -> Result<Arc<Card>, Errno> {
         return Err(Errno::ENXIO);
     }
     let _ = card.path.set(path);
+    CARDS.lock().insert(unit, Arc::downgrade(&card));
+    if let Some(k) = card.driver.kms() {
+        k.attach(unit);
+    }
     Ok(card)
 }
 
@@ -111,6 +123,10 @@ impl Card {
             f.hangup();
         }
         *self.master.lock() = None;
+        if let Some(k) = self.driver.kms() {
+            k.shutdown();
+        }
+        CARDS.lock().remove(&self.unit);
         UNITS.lock().remove(&self.unit);
     }
 
@@ -120,7 +136,8 @@ impl Card {
             return Err(Errno::ENODEV);
         }
         let id = self.next_file.fetch_add(1, Ordering::Relaxed);
-        let open = Arc::new(Open {
+        let open = Arc::new_cyclic(|me| Open {
+            me: me.clone(),
             card: Arc::clone(self),
             id,
             handles: SpinLock::new(HandleTable::new()),
@@ -206,7 +223,10 @@ impl CharDevice for Node {
 #[derive(Default)]
 struct Events {
     queue: VecDeque<Vec<u8>>,
+    /// Bytes queued or promised to a commit in flight.
     bytes: usize,
+    /// Events promised and not yet sent: queue room is already made.
+    reserved: usize,
 }
 
 /// `DRM_CLIENT_CAP_*` a file turned on.
@@ -221,6 +241,7 @@ pub(crate) mod client {
 /// An open Direct Rendering Manager file (`drm_file`): its handles, events, and client
 /// capabilities. Closing it drops them and gives up mastership.
 pub struct Open {
+    pub(crate) me: alloc::sync::Weak<Open>,
     pub(crate) card: Arc<Card>,
     pub(crate) id: u64,
     pub(crate) handles: SpinLock<HandleTable>,
@@ -271,6 +292,46 @@ impl Open {
         self.wait.wake_all();
         self.notify.notify(0);
         Ok(())
+    }
+
+    /// Promises room for an event of `len` bytes, so that sending it
+    /// later cannot fail or allocate (a completion path must not).
+    ///
+    /// # Errors
+    ///
+    /// `ENOMEM` if the file has no room.
+    pub(crate) fn reserve_event(&self, len: usize) -> Result<(), Errno> {
+        let mut e = self.events.lock();
+        if e.bytes + len > EVENT_SPACE {
+            return Err(Errno::ENOMEM);
+        }
+        let want = e.queue.len() + e.reserved + 1;
+        let have = e.queue.capacity();
+        if want > have {
+            let extra = want - e.queue.len();
+            e.queue.try_reserve(extra).map_err(|_| Errno::ENOMEM)?;
+        }
+        e.bytes += len;
+        e.reserved += 1;
+        Ok(())
+    }
+
+    /// Gives back a promise of `len` bytes that will not be used.
+    pub(crate) fn cancel_event(&self, len: usize) {
+        let mut e = self.events.lock();
+        e.bytes = e.bytes.saturating_sub(len);
+        e.reserved = e.reserved.saturating_sub(1);
+    }
+
+    /// Sends an event that [`Open::reserve_event`] promised room for.
+    pub(crate) fn send_reserved(&self, event: Vec<u8>) {
+        {
+            let mut e = self.events.lock();
+            e.reserved = e.reserved.saturating_sub(1);
+            e.queue.push_back(event);
+        }
+        self.wait.wake_all();
+        self.notify.notify(0);
     }
 
     fn hangup(&self) {
@@ -419,12 +480,12 @@ impl CharDevice for Open {
 
     fn ioctl_file(
         &self,
-        _s: &Sleepable,
+        s: &Sleepable,
         req: u32,
         arg: &mut [u8],
         _fflag: u32,
     ) -> Result<usize, Errno> {
-        crate::ioctl::dispatch(self, req, arg)
+        crate::ioctl::dispatch(self, s, req, arg)
     }
 
     fn revoke(&self, _s: &Sleepable) {

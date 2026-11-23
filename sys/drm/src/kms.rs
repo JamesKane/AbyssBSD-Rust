@@ -8,16 +8,21 @@
 //! builds the graph with [`KmsBuilder`]. The core owns the state, checks
 //! it (`lib/kms-check`) and tells the objects to commit.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, AtomicU64};
 
 use abi::drm::*;
 use abi::errno::Errno;
 use drm_fourcc::{Fourcc, MOD_LINEAR, Modifier};
 use kms_check::{DstRect, Mode, ObjId, SrcRect};
+use sched::WaitQueue;
 use sync::SpinLock;
 
+use crate::Ticker;
+use crate::card::Open;
 use crate::gem::Gem;
 
 /// A property's number in a device.
@@ -111,15 +116,61 @@ impl Connection {
     }
 }
 
-/// A CRTC's hardware: one display pipeline (scanout engine and timing).
+/// What a display controller is being asked to do in a commit.
+#[derive(Debug)]
+pub struct CrtcUpdate<'a> {
+    /// Its place in the device's list of display controllers.
+    pub index: usize,
+    pub old: &'a CrtcSt,
+    pub new: &'a CrtcSt,
+    /// Whether the controller turns on or off, or changes mode.
+    pub modeset: bool,
+}
+
+/// What a plane is being asked to do in a commit.
+#[derive(Debug)]
+pub struct PlaneUpdate<'a> {
+    /// Its place in the device's list of planes.
+    pub index: usize,
+    /// The display controller it scans out on, if any.
+    pub crtc: Option<usize>,
+    pub fb: Option<&'a Arc<Fb>>,
+    /// The part of it that shows, clipped to the mode.
+    pub visible: kms_check::Visible,
+    pub old: &'a PlaneSt,
+    pub new: &'a PlaneSt,
+}
+
+/// A display controller's hardware: one display pipeline (scanout engine
+/// and timing generator; the Direct Rendering Manager calls it a CRTC).
 pub trait CrtcHw: Send + Sync {
     /// Properties it adds to the standard ones.
     fn properties(&self) -> &[PropSpec] {
         &[]
     }
-    /// The size of the gamma LUT, 0 for none.
+    /// The size of the gamma lookup table, 0 for none.
     fn gamma_size(&self) -> u32 {
         0
+    }
+    /// Whether the hardware raises a vertical blanking interrupt, whose
+    /// handler calls [`Kms::vblank`]. Without one the core times frames
+    /// itself, from the mode's refresh rate.
+    fn vblank_interrupt(&self) -> bool {
+        false
+    }
+    /// Refuses a state the hardware cannot do, beyond the generic rules.
+    ///
+    /// # Errors
+    ///
+    /// `EINVAL` (or another error number) for a state it cannot show.
+    fn check(&self, update: &CrtcUpdate<'_>) -> Result<(), Errno> {
+        let _ = update;
+        Ok(())
+    }
+    /// Programs the controller; called after its planes' commits, so it
+    /// is the place to latch the new state (a shadow register flush).
+    fn commit(&self, update: &CrtcUpdate<'_>) {
+        let _ = update;
     }
 }
 
@@ -139,12 +190,32 @@ pub trait PlaneHw: Send + Sync {
     fn properties(&self) -> &[PropSpec] {
         &[]
     }
+    /// Refuses a state the hardware cannot do, beyond the generic rules.
+    ///
+    /// # Errors
+    ///
+    /// `EINVAL` (or another error number) for a state it cannot show.
+    fn check(&self, update: &PlaneUpdate<'_>) -> Result<(), Errno> {
+        let _ = update;
+        Ok(())
+    }
+    /// Programs the layer.
+    fn commit(&self, update: &PlaneUpdate<'_>) {
+        let _ = update;
+    }
 }
 
-/// An encoder's hardware: a transmitter between a CRTC and a connector.
+/// An encoder's hardware: a transmitter between a display controller and
+/// a connector.
 pub trait EncoderHw: Send + Sync {
     /// `DRM_MODE_ENCODER_*`.
     fn kind(&self) -> u32;
+    /// Starts sending display controller `crtc`'s output in `mode`.
+    fn enable(&self, crtc: usize, mode: &Mode) {
+        let _ = (crtc, mode);
+    }
+    /// Stops sending.
+    fn disable(&self) {}
 }
 
 /// A connector's hardware: a port, and what is plugged into it.
@@ -155,7 +226,7 @@ pub trait ConnectorHw: Send + Sync {
     fn detect(&self) -> Connection;
     /// The modes the display accepts, the preferred first.
     fn modes(&self) -> Vec<Mode>;
-    /// Its EDID, if it has one.
+    /// Its display identification data (EDID), if it has any.
     fn edid(&self) -> Option<Vec<u8>> {
         None
     }
@@ -189,7 +260,7 @@ pub struct PlaneSt {
     pub extra: Vec<u64>,
 }
 
-/// A CRTC's state.
+/// A display controller's state.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CrtcSt {
     pub active: bool,
@@ -285,6 +356,24 @@ pub(crate) struct Std {
     pub conn_crtc_id: PropId,
 }
 
+/// A commit's completion, waiting for its frame: the event it owes the
+/// file that asked, built in advance so that sending allocates nothing.
+pub(crate) struct Pending {
+    pub id: u64,
+    pub event: Option<(Weak<Open>, Vec<u8>)>,
+}
+
+/// A display controller's running state: the frame count and what waits
+/// for the next frame.
+#[derive(Default)]
+pub(crate) struct CrtcRt {
+    /// Whether the frame timer is running.
+    pub armed: bool,
+    pub seq: u64,
+    pub pending: Vec<Pending>,
+    pub ticker: Option<Box<dyn Ticker>>,
+}
+
 /// The display side of a card.
 pub struct Kms {
     pub(crate) limits: KmsLimits,
@@ -299,6 +388,18 @@ pub struct Kms {
     pub(crate) fbs: SpinLock<BTreeMap<ObjId, Arc<Fb>>>,
     /// Each plane's `IN_FORMATS` blob.
     pub(crate) in_formats: Vec<ObjId>,
+    /// Per display controller: frames and pending completions.
+    pub(crate) rt: Vec<SpinLock<CrtcRt>>,
+    /// Woken when a completion is sent.
+    pub(crate) done: WaitQueue,
+    /// One commit programs the hardware at a time.
+    pub(crate) commit_lock: SpinLock<()>,
+    pub(crate) commit_id: AtomicU64,
+    /// The framebuffer each plane shows, kept while the device has
+    /// forgotten it (removed, but still on screen).
+    pub(crate) shown: SpinLock<Vec<Option<Arc<Fb>>>>,
+    /// The card's unit, for the timer's callback to find it again.
+    pub(crate) unit: AtomicU32,
     pub(crate) next_id: SpinLock<u32>,
 }
 
@@ -317,7 +418,7 @@ impl core::fmt::Debug for Kms {
 /// The most blobs and framebuffers the device holds, a guard against a
 /// client that never frees.
 const MAX_OBJECTS: usize = 4096;
-/// The biggest blob (a mode list or an EDID is far smaller).
+/// The biggest blob (a mode list or a display's identification data is far smaller).
 pub const MAX_BLOB: usize = 1 << 20;
 
 impl Kms {
@@ -455,7 +556,7 @@ impl Kms {
         self.blobs.lock().retain(|_, b| b.owner != owner);
     }
 
-    /// The current value of property `prop` on object `obj` (a CRTC,
+    /// The current value of property `prop` on object `obj` (a display controller,
     /// plane or connector), for the property ioctls.
     pub(crate) fn value(&self, obj: ObjId, prop: PropId) -> Option<u64> {
         let st = self.state.lock();

@@ -132,6 +132,8 @@ fn setup() {
             user: arena,
             pages,
             log: |a| LOG.lock().unwrap().push(std::format!("{a}")),
+            now_ns: || 5_000_000_000,
+            ticker: || Box::new(TestTicker(Mutex::new(None))),
         });
         vfs::devices::set_registry(Box::leak(Box::new(TestDevfs)));
         USER.set(arena).ok();
@@ -139,6 +141,44 @@ fn setup() {
 }
 
 static USER: std::sync::OnceLock<&'static Arena> = std::sync::OnceLock::new();
+
+type Timer = (usize, fn(&Sleepable, usize));
+static TIMERS: Mutex<Vec<Timer>> = Mutex::new(Vec::new());
+
+/// A timer that waits to be fired by hand ([`fire`]) or by [`pump`].
+struct TestTicker(Mutex<Option<usize>>);
+
+impl crate::Ticker for TestTicker {
+    fn arm(&self, _delay_ns: u64, f: fn(&Sleepable, usize), arg: usize) {
+        *self.0.lock().unwrap() = Some(arg);
+        let mut t = TIMERS.lock().unwrap();
+        t.retain(|(a, _)| *a != arg);
+        t.push((arg, f));
+    }
+    fn cancel(&self) {
+        if let Some(arg) = self.0.lock().unwrap().take() {
+            TIMERS.lock().unwrap().retain(|(a, _)| *a != arg);
+        }
+    }
+}
+
+/// Fires the frame timers of card `unit`, as the softclock would.
+fn fire(unit: u32) {
+    let due: Vec<Timer> = {
+        let mut t = TIMERS.lock().unwrap();
+        let (due, keep) = t.drain(..).partition(|(a, _)| *a >> 8 == unit as usize);
+        *t = keep;
+        due
+    };
+    for (arg, f) in due {
+        f(&s(), arg);
+    }
+}
+
+/// A blocking commit waits for its frame: here it gets one.
+pub(crate) fn idle(unit: u32) {
+    fire(unit);
+}
 
 struct Mock {
     dumb: Option<DumbLimits>,
@@ -171,9 +211,21 @@ fn card(dumb: bool, kms: bool) -> Arc<crate::Card> {
     setup();
     crate::register(Arc::new(Mock {
         dumb: dumb.then(DumbLimits::default),
-        kms: kms.then(mock_display),
+        kms: kms.then(|| mock_display(&Calls::default())),
     }))
     .unwrap()
+}
+
+/// A card with a display whose hardware calls are recorded.
+fn card_logged() -> (Arc<crate::Card>, Calls) {
+    setup();
+    let calls = Calls::default();
+    let c = crate::register(Arc::new(Mock {
+        dumb: Some(DumbLimits::default()),
+        kms: Some(mock_display(&calls)),
+    }))
+    .unwrap();
+    (c, calls)
 }
 
 /// Opens the card through its node, as devfs does.
@@ -430,16 +482,16 @@ fn unknown_requests_are_logged_and_refused() {
     let c = card(false, false);
     let f = open(&c);
     LOG.lock().unwrap().clear();
-    // _IOWR('d', 0xA2, ...) is SETCRTC: not in this slice.
+    // _IOWR('d', 0xA3, ...) is CURSOR: not in this slice.
     assert_eq!(
-        call(&f, DRM_IOCTL_MODE_SETCRTC, &mut [0; 104]),
+        call(&f, DRM_IOCTL_MODE_CURSOR, &mut [0; 28]),
         Err(Errno::ENOTTY)
     );
     assert!(
         LOG.lock()
             .unwrap()
             .iter()
-            .any(|l| l.contains("0xa2") && l.contains("not implemented"))
+            .any(|l| l.contains("0xa3") && l.contains("not implemented"))
     );
     // Not a DRM request at all.
     assert_eq!(
@@ -529,13 +581,31 @@ use abi::drm::Wire;
 use drm_fourcc::{Fourcc, format};
 use kms_check::Mode;
 
-struct MockCrtc;
-impl CrtcHw for MockCrtc {}
+/// What the hardware was told, in order.
+type Calls = Arc<Mutex<Vec<String>>>;
+
+struct MockCrtc(Calls);
+impl CrtcHw for MockCrtc {
+    fn commit(&self, u: &crate::kms::CrtcUpdate<'_>) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(std::format!("crtc{} active={}", u.index, u.new.active));
+    }
+}
 
 const PLANE_FORMATS: &[Fourcc] = &[format::XRGB8888, format::ARGB8888];
 
-struct MockPlane;
+struct MockPlane(Calls);
 impl PlaneHw for MockPlane {
+    fn commit(&self, u: &crate::kms::PlaneUpdate<'_>) {
+        let fb = u.fb.map_or(0, |f| f.id.0);
+        self.0.lock().unwrap().push(std::format!(
+            "plane{} fb={fb} shown={}",
+            u.index,
+            u.visible.shown
+        ));
+    }
     fn formats(&self) -> &[Fourcc] {
         PLANE_FORMATS
     }
@@ -549,10 +619,20 @@ impl PlaneHw for MockPlane {
     }
 }
 
-struct MockEncoder;
+struct MockEncoder(Calls);
 impl EncoderHw for MockEncoder {
     fn kind(&self) -> u32 {
         DRM_MODE_ENCODER_TMDS
+    }
+    fn enable(&self, crtc: usize, m: &Mode) {
+        self.0.lock().unwrap().push(std::format!(
+            "enable crtc{crtc} {}x{}",
+            m.hdisplay,
+            m.vdisplay
+        ));
+    }
+    fn disable(&self) {
+        self.0.lock().unwrap().push("disable".into());
     }
 }
 
@@ -586,17 +666,25 @@ impl ConnectorHw for MockConnector {
 
 /// One display controller, a primary and an overlay plane, an encoder
 /// and an embedded DisplayPort connector.
-fn mock_display() -> crate::kms::Kms {
+fn mock_display(calls: &Calls) -> crate::kms::Kms {
     let mut b = KmsBuilder::new(KmsLimits {
         min_width: 16,
         max_width: 4096,
         min_height: 16,
         max_height: 4096,
     });
-    let c = b.crtc(Arc::new(MockCrtc));
-    b.plane(Arc::new(MockPlane), PlaneKind::Primary, 1 << c);
-    b.plane(Arc::new(MockPlane), PlaneKind::Overlay, 1 << c);
-    let e = b.encoder(Arc::new(MockEncoder), 1 << c, 0);
+    let c = b.crtc(Arc::new(MockCrtc(calls.clone())));
+    b.plane(
+        Arc::new(MockPlane(calls.clone())),
+        PlaneKind::Primary,
+        1 << c,
+    );
+    b.plane(
+        Arc::new(MockPlane(calls.clone())),
+        PlaneKind::Overlay,
+        1 << c,
+    );
+    let e = b.encoder(Arc::new(MockEncoder(calls.clone())), 1 << c, 0);
     b.connector(Arc::new(MockConnector), &[e]);
     b.build().unwrap()
 }
@@ -1050,6 +1138,613 @@ fn a_card_without_a_display_refuses_display_requests() {
     assert_eq!(
         ctl(&f, DRM_IOCTL_MODE_GETRESOURCES, &DrmModeCardRes::default()).err(),
         Some(Errno::ENOTTY)
+    );
+    c.unregister(&s());
+}
+
+// ---- commits ----
+
+struct Ids {
+    crtc: u32,
+    conn: u32,
+    primary: u32,
+    overlay: u32,
+}
+
+/// Turns on universal planes and returns the display's objects.
+fn ids(f: &Arc<crate::Open>) -> Ids {
+    let set = DrmSetClientCap {
+        capability: DRM_CLIENT_CAP_UNIVERSAL_PLANES,
+        value: 1,
+    };
+    ctl(f, DRM_IOCTL_SET_CLIENT_CAP, &set).unwrap();
+    let r = DrmModeCardRes {
+        crtc_id_ptr: BASE + 0xc000,
+        connector_id_ptr: BASE + 0xc100,
+        count_crtcs: 1,
+        count_connectors: 1,
+        ..Default::default()
+    };
+    ctl(f, DRM_IOCTL_MODE_GETRESOURCES, &r).unwrap();
+    let list = DrmModeGetPlaneRes {
+        plane_id_ptr: BASE + 0xc200,
+        count_planes: 2,
+    };
+    ctl(f, DRM_IOCTL_MODE_GETPLANERESOURCES, &list).unwrap();
+    let planes = ids_at(0xc200, 2);
+    Ids {
+        crtc: ids_at(0xc000, 1)[0],
+        conn: ids_at(0xc100, 1)[0],
+        primary: planes[0],
+        overlay: planes[1],
+    }
+}
+
+/// A buffer and a framebuffer of `w` by `h`, as a dumb buffer in
+/// `XRGB8888`.
+fn make_fb(f: &Arc<crate::Open>, w: u32, h: u32) -> u32 {
+    let mut d = create_dumb_arg(h, w, 32);
+    call(f, DRM_IOCTL_MODE_CREATE_DUMB, &mut d).unwrap();
+    let mut a = DrmModeFbCmd2 {
+        width: w,
+        height: h,
+        pixel_format: format::XRGB8888.0,
+        ..Default::default()
+    };
+    a.handles[0] = u32_of(&d, 16);
+    a.pitches[0] = u32_of(&d, 20);
+    ctl(f, DRM_IOCTL_MODE_ADDFB2, &a).unwrap().fb_id
+}
+
+fn mode1080() -> DrmModeModeinfo {
+    MockConnector.modes()[0].to_info()
+}
+
+/// The legacy way to light the display: one framebuffer on the
+/// controller, the connector named.
+fn set_crtc(f: &Arc<crate::Open>, i: &Ids, fb: u32) -> Result<DrmModeCrtc, Errno> {
+    put(0xd000, &i.conn.to_ne_bytes());
+    let a = DrmModeCrtc {
+        set_connectors_ptr: BASE + 0xd000,
+        count_connectors: 1,
+        crtc_id: i.crtc,
+        fb_id: fb,
+        mode_valid: 1,
+        mode: mode1080(),
+        ..Default::default()
+    };
+    ctl(f, DRM_IOCTL_MODE_SETCRTC, &a)
+}
+
+fn take(calls: &Calls) -> Vec<String> {
+    core::mem::take(&mut *calls.lock().unwrap())
+}
+
+fn read_event(f: &Arc<crate::Open>) -> Option<DrmEventVblank> {
+    let mut b = [0u8; 64];
+    let mut r = vfs::ReadBuf::new(&mut b);
+    match f.read(&s(), &mut r, 0, true) {
+        Ok(32) => Some(DrmEventVblank {
+            base: DrmEvent {
+                kind: u32_of(r.filled(), 0),
+                length: u32_of(r.filled(), 4),
+            },
+            user_data: read_u64(r.filled(), 8),
+            tv_sec: u32_of(r.filled(), 16),
+            tv_usec: u32_of(r.filled(), 20),
+            sequence: u32_of(r.filled(), 24),
+            crtc_id: u32_of(r.filled(), 28),
+        }),
+        _ => None,
+    }
+}
+
+#[test]
+fn set_crtc_programs_the_hardware_in_order_and_off_again() {
+    let (c, calls) = card_logged();
+    let f = open(&c);
+    let i = ids(&f);
+    let fb = make_fb(&f, 1920, 1080);
+
+    let got = set_crtc(&f, &i, fb).unwrap();
+    assert_eq!(got.crtc_id, i.crtc);
+    // Planes, then the controller, then the encoder.
+    assert_eq!(
+        take(&calls),
+        [
+            std::format!("plane0 fb={fb} shown=true"),
+            "crtc0 active=true".into(),
+            "enable crtc0 1920x1080".into()
+        ]
+    );
+    let now = ctl(
+        &f,
+        DRM_IOCTL_MODE_GETCRTC,
+        &DrmModeCrtc {
+            crtc_id: i.crtc,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!((now.mode_valid, now.fb_id), (1, fb));
+    assert_eq!(now.mode.hdisplay, 1920);
+    let plane = ctl(
+        &f,
+        DRM_IOCTL_MODE_GETPLANE,
+        &DrmModeGetPlane {
+            plane_id: i.primary,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!((plane.crtc_id, plane.fb_id), (i.crtc, fb));
+    let conn = ctl(
+        &f,
+        DRM_IOCTL_MODE_GETCONNECTOR,
+        &DrmModeGetConnector {
+            connector_id: i.conn,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(conn.encoder_id != 0, "a connector in use names its encoder");
+
+    // Off: the encoder stops first.
+    set_crtc(&f, &i, 0).unwrap();
+    assert_eq!(
+        take(&calls),
+        ["disable", "plane0 fb=0 shown=false", "crtc0 active=false"]
+    );
+    let now = ctl(
+        &f,
+        DRM_IOCTL_MODE_GETCRTC,
+        &DrmModeCrtc {
+            crtc_id: i.crtc,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(now.mode_valid, 0);
+    c.unregister(&s());
+}
+
+#[test]
+fn a_refused_commit_touches_nothing() {
+    let (c, calls) = card_logged();
+    let f = open(&c);
+    let i = ids(&f);
+    // A buffer smaller than the mode cannot fill it.
+    let small = make_fb(&f, 1280, 720);
+    assert_eq!(set_crtc(&f, &i, small).err(), Some(Errno::EINVAL));
+    // Nor can a mode that is not a mode.
+    let fb = make_fb(&f, 1920, 1080);
+    let mut bad = DrmModeCrtc {
+        crtc_id: i.crtc,
+        fb_id: fb,
+        mode_valid: 1,
+        mode: mode1080(),
+        ..Default::default()
+    };
+    bad.mode.hsync_start = 100;
+    assert_eq!(
+        ctl(&f, DRM_IOCTL_MODE_SETCRTC, &bad).err(),
+        Some(Errno::EINVAL)
+    );
+    // An active controller with no connector.
+    bad.mode = mode1080();
+    assert_eq!(
+        ctl(&f, DRM_IOCTL_MODE_SETCRTC, &bad).err(),
+        Some(Errno::EINVAL)
+    );
+    assert!(take(&calls).is_empty());
+    // Unknown objects.
+    assert_eq!(
+        set_crtc(
+            &f,
+            &Ids {
+                crtc: 9999,
+                ..ids_copy(&i)
+            },
+            fb
+        )
+        .err(),
+        Some(Errno::ENOENT)
+    );
+    // Only the master changes the display.
+    let other = open(&c);
+    assert_eq!(set_crtc(&other, &i, fb).err(), Some(Errno::EACCES));
+    c.unregister(&s());
+}
+
+fn ids_copy(i: &Ids) -> Ids {
+    Ids {
+        crtc: i.crtc,
+        conn: i.conn,
+        primary: i.primary,
+        overlay: i.overlay,
+    }
+}
+
+/// The property `name` of `obj`.
+fn pid(f: &Arc<crate::Open>, obj: u32, kind: u32, name: &str) -> u32 {
+    props_of(f, obj, kind)
+        .iter()
+        .find(|(_, _, n)| n == name)
+        .unwrap()
+        .0
+}
+
+/// Calls the atomic ioctl with these `(object, [(property, value)])`.
+fn atomic(
+    f: &Arc<crate::Open>,
+    flags: u32,
+    user_data: u64,
+    changes: &[(u32, Vec<(u32, u64)>)],
+) -> Result<DrmModeAtomic, Errno> {
+    let objs: Vec<u8> = changes.iter().flat_map(|(o, _)| o.to_ne_bytes()).collect();
+    let counts: Vec<u8> = changes
+        .iter()
+        .flat_map(|(_, p)| u32::try_from(p.len()).unwrap().to_ne_bytes())
+        .collect();
+    let props: Vec<u8> = changes
+        .iter()
+        .flat_map(|(_, p)| p.iter().flat_map(|(i, _)| i.to_ne_bytes()))
+        .collect();
+    let values: Vec<u8> = changes
+        .iter()
+        .flat_map(|(_, p)| p.iter().flat_map(|(_, v)| v.to_ne_bytes()))
+        .collect();
+    put(0xe000, &objs);
+    put(0xe100, &counts);
+    put(0xe200, &props);
+    put(0xe400, &values);
+    let a = DrmModeAtomic {
+        flags,
+        count_objs: u32::try_from(changes.len()).unwrap(),
+        objs_ptr: BASE + 0xe000,
+        count_props_ptr: BASE + 0xe100,
+        props_ptr: BASE + 0xe200,
+        prop_values_ptr: BASE + 0xe400,
+        reserved: 0,
+        user_data,
+    };
+    ctl(f, DRM_IOCTL_MODE_ATOMIC, &a)
+}
+
+/// The atomic changes that light the display with `fb`.
+fn light(f: &Arc<crate::Open>, i: &Ids, fb: u32) -> Vec<(u32, Vec<(u32, u64)>)> {
+    // The mode as a blob.
+    put(0xf000, &enc(&mode1080()));
+    let blob = ctl(
+        f,
+        DRM_IOCTL_MODE_CREATEPROPBLOB,
+        &DrmModeCreateBlob {
+            data: BASE + 0xf000,
+            length: 68,
+            blob_id: 0,
+        },
+    )
+    .unwrap()
+    .blob_id;
+    let (c, p, k) = (
+        DRM_MODE_OBJECT_CRTC,
+        DRM_MODE_OBJECT_PLANE,
+        DRM_MODE_OBJECT_CONNECTOR,
+    );
+    std::vec![
+        (
+            i.crtc,
+            std::vec![
+                (pid(f, i.crtc, c, "ACTIVE"), 1),
+                (pid(f, i.crtc, c, "MODE_ID"), u64::from(blob))
+            ]
+        ),
+        (
+            i.conn,
+            std::vec![(pid(f, i.conn, k, "CRTC_ID"), u64::from(i.crtc))]
+        ),
+        (
+            i.primary,
+            std::vec![
+                (pid(f, i.primary, p, "FB_ID"), u64::from(fb)),
+                (pid(f, i.primary, p, "CRTC_ID"), u64::from(i.crtc)),
+                (pid(f, i.primary, p, "SRC_X"), 0),
+                (pid(f, i.primary, p, "SRC_Y"), 0),
+                (pid(f, i.primary, p, "SRC_W"), 1920 << 16),
+                (pid(f, i.primary, p, "SRC_H"), 1080 << 16),
+                (pid(f, i.primary, p, "CRTC_X"), 0),
+                (pid(f, i.primary, p, "CRTC_Y"), 0),
+                (pid(f, i.primary, p, "CRTC_W"), 1920),
+                (pid(f, i.primary, p, "CRTC_H"), 1080),
+            ]
+        ),
+    ]
+}
+
+#[test]
+fn atomic_commits_complete_at_the_frame_with_their_event() {
+    let (c, calls) = card_logged();
+    let f = open(&c);
+    let i = ids(&f);
+    let fb = make_fb(&f, 1920, 1080);
+    let changes = light(&f, &i, fb);
+    let modeset = DRM_MODE_ATOMIC_ALLOW_MODESET;
+
+    // Atomic is a client capability.
+    assert_eq!(atomic(&f, modeset, 0, &changes).err(), Some(Errno::EINVAL));
+    let on = DrmSetClientCap {
+        capability: DRM_CLIENT_CAP_ATOMIC,
+        value: 1,
+    };
+    ctl(&f, DRM_IOCTL_SET_CLIENT_CAP, &on).unwrap();
+
+    // Turning the display on is a modeset, and must say so.
+    assert_eq!(
+        atomic(&f, DRM_MODE_ATOMIC_NONBLOCK, 0, &changes).err(),
+        Some(Errno::EINVAL)
+    );
+    // A test commits nothing.
+    atomic(&f, modeset | DRM_MODE_ATOMIC_TEST_ONLY, 0, &changes).unwrap();
+    assert!(take(&calls).is_empty());
+    assert_eq!(
+        atomic(
+            &f,
+            modeset | DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_PAGE_FLIP_EVENT,
+            0,
+            &changes
+        )
+        .err(),
+        Some(Errno::EINVAL)
+    );
+    assert_eq!(
+        atomic(&f, DRM_MODE_PAGE_FLIP_ASYNC, 0, &[]).err(),
+        Some(Errno::EINVAL)
+    );
+
+    // The real one returns at once, and its event waits for the frame.
+    atomic(
+        &f,
+        modeset | DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT,
+        0xfeed,
+        &changes,
+    )
+    .unwrap();
+    assert_eq!(take(&calls).len(), 3);
+    assert_eq!(f.poll(abi::event::POLLIN, None), 0);
+    assert_eq!(c.driver().kms().unwrap().frames(0), 0);
+    fire(c.unit());
+    assert_eq!(c.driver().kms().unwrap().frames(0), 1);
+    let ev = read_event(&f).expect("a flip event");
+    assert_eq!(
+        ev.base,
+        DrmEvent {
+            kind: DRM_EVENT_FLIP_COMPLETE,
+            length: 32
+        }
+    );
+    assert_eq!((ev.user_data, ev.crtc_id, ev.sequence), (0xfeed, i.crtc, 1));
+    assert_eq!((ev.tv_sec, ev.tv_usec), (5, 0));
+    assert!(read_event(&f).is_none());
+
+    // Nothing waits now, so no further frames are timed.
+    fire(c.unit());
+    assert_eq!(c.driver().kms().unwrap().frames(0), 1);
+    c.unregister(&s());
+}
+
+#[test]
+fn page_flips_wait_their_turn_and_keep_their_size() {
+    let (c, calls) = card_logged();
+    let f = open(&c);
+    let i = ids(&f);
+    let fb = make_fb(&f, 1920, 1080);
+    let next = make_fb(&f, 1920, 1080);
+    let odd = make_fb(&f, 1280, 720);
+    set_crtc(&f, &i, fb).unwrap();
+    take(&calls);
+
+    let flip = |fb_id, flags, user_data| {
+        let a = DrmModeCrtcPageFlip {
+            crtc_id: i.crtc,
+            fb_id,
+            flags,
+            reserved: 0,
+            user_data,
+        };
+        ctl(&f, DRM_IOCTL_MODE_PAGE_FLIP, &a)
+    };
+    assert_eq!(
+        flip(odd, 0, 0).err(),
+        Some(Errno::EINVAL),
+        "a flip keeps the size"
+    );
+    assert_eq!(
+        flip(next, DRM_MODE_PAGE_FLIP_ASYNC, 0).err(),
+        Some(Errno::EINVAL)
+    );
+    assert_eq!(flip(7777, 0, 0).err(), Some(Errno::ENOENT));
+    flip(next, DRM_MODE_PAGE_FLIP_EVENT, 7).unwrap();
+    assert_eq!(
+        take(&calls),
+        [
+            std::format!("plane0 fb={next} shown=true"),
+            "crtc0 active=true".into()
+        ]
+    );
+    // The first has not had its frame: a second must wait, and says so.
+    assert_eq!(
+        flip(fb, DRM_MODE_PAGE_FLIP_EVENT, 8).err(),
+        Some(Errno::EBUSY)
+    );
+    fire(c.unit());
+    let ev = read_event(&f).expect("the first flip's event");
+    assert_eq!(ev.user_data, 7);
+    // Now it can, and the event of a flip to what is already shown still
+    // comes.
+    flip(fb, DRM_MODE_PAGE_FLIP_EVENT, 9).unwrap();
+    flip_again_is_busy(&f, &i, fb);
+    fire(c.unit());
+    assert_eq!(read_event(&f).unwrap().user_data, 9);
+    // A flip with no event reserves none.
+    flip(next, 0, 0).unwrap();
+    fire(c.unit());
+    assert!(read_event(&f).is_none());
+    c.unregister(&s());
+}
+
+fn flip_again_is_busy(f: &Arc<crate::Open>, i: &Ids, fb: u32) {
+    let a = DrmModeCrtcPageFlip {
+        crtc_id: i.crtc,
+        fb_id: fb,
+        flags: 0,
+        reserved: 0,
+        user_data: 0,
+    };
+    assert_eq!(
+        ctl(f, DRM_IOCTL_MODE_PAGE_FLIP, &a).err(),
+        Some(Errno::EBUSY)
+    );
+}
+
+#[test]
+fn a_flip_whose_file_closed_is_dropped_quietly() {
+    let (c, _calls) = card_logged();
+    let f = open(&c);
+    let i = ids(&f);
+    let fb = make_fb(&f, 1920, 1080);
+    let next = make_fb(&f, 1920, 1080);
+    set_crtc(&f, &i, fb).unwrap();
+    let a = DrmModeCrtcPageFlip {
+        crtc_id: i.crtc,
+        fb_id: next,
+        flags: DRM_MODE_PAGE_FLIP_EVENT,
+        reserved: 0,
+        user_data: 1,
+    };
+    ctl(&f, DRM_IOCTL_MODE_PAGE_FLIP, &a).unwrap();
+    drop(f);
+    fire(c.unit());
+    c.unregister(&s());
+}
+
+#[test]
+fn planes_can_be_set_and_clipped() {
+    let (c, calls) = card_logged();
+    let f = open(&c);
+    let i = ids(&f);
+    let fb = make_fb(&f, 1920, 1080);
+    set_crtc(&f, &i, fb).unwrap();
+    take(&calls);
+
+    // An overlay half off the right edge still shows.
+    let small = make_fb(&f, 200, 100);
+    let a = DrmModeSetPlane {
+        plane_id: i.overlay,
+        crtc_id: i.crtc,
+        fb_id: small,
+        flags: 0,
+        crtc_x: 1820,
+        crtc_y: 10,
+        crtc_w: 200,
+        crtc_h: 100,
+        src_x: 0,
+        src_y: 0,
+        src_w: 200 << 16,
+        src_h: 100 << 16,
+    };
+    ctl(&f, DRM_IOCTL_MODE_SETPLANE, &a).unwrap();
+    assert_eq!(
+        take(&calls),
+        [
+            std::format!("plane1 fb={small} shown=true"),
+            "crtc0 active=true".into()
+        ]
+    );
+    // Wholly off screen: no error, nothing shown.
+    let off = DrmModeSetPlane { crtc_x: 5000, ..a };
+    ctl(&f, DRM_IOCTL_MODE_SETPLANE, &off).unwrap();
+    assert_eq!(
+        take(&calls)[0],
+        std::format!("plane1 fb={small} shown=false")
+    );
+    // A source outside its buffer is refused.
+    let bad = DrmModeSetPlane {
+        src_w: 300 << 16,
+        ..a
+    };
+    assert_eq!(
+        ctl(&f, DRM_IOCTL_MODE_SETPLANE, &bad).err(),
+        Some(Errno::EINVAL)
+    );
+    // Switching it off.
+    ctl(
+        &f,
+        DRM_IOCTL_MODE_SETPLANE,
+        &DrmModeSetPlane {
+            plane_id: i.overlay,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(take(&calls)[0], "plane1 fb=0 shown=false");
+    c.unregister(&s());
+}
+
+#[test]
+fn power_off_turns_the_controller_off_and_on_again() {
+    let (c, calls) = card_logged();
+    let f = open(&c);
+    let i = ids(&f);
+    let fb = make_fb(&f, 1920, 1080);
+    set_crtc(&f, &i, fb).unwrap();
+    take(&calls);
+    let dpms = pid(&f, i.conn, DRM_MODE_OBJECT_CONNECTOR, "DPMS");
+    let set = |v| DrmModeConnectorSetProperty {
+        value: v,
+        prop_id: dpms,
+        connector_id: i.conn,
+    };
+    ctl(&f, DRM_IOCTL_MODE_SETPROPERTY, &set(DRM_MODE_DPMS_OFF)).unwrap();
+    assert_eq!(take(&calls).last().unwrap(), "crtc0 active=false");
+    assert_eq!(
+        ctl(&f, DRM_IOCTL_MODE_SETPROPERTY, &set(9)).err(),
+        Some(Errno::EINVAL)
+    );
+    c.unregister(&s());
+}
+
+#[test]
+fn immutable_and_unknown_properties_are_refused() {
+    let (c, _calls) = card_logged();
+    let f = open(&c);
+    let i = ids(&f);
+    let p = DRM_MODE_OBJECT_PLANE;
+    let ty = pid(&f, i.primary, p, "type");
+    let set = |obj, kind, prop, value| {
+        let a = DrmModeObjSetProperty {
+            value,
+            prop_id: prop,
+            obj_id: obj,
+            obj_type: kind,
+        };
+        ctl(&f, DRM_IOCTL_MODE_OBJ_SETPROPERTY, &a)
+    };
+    assert_eq!(set(i.primary, p, ty, 0).err(), Some(Errno::EINVAL));
+    // A property of another object.
+    let active = pid(&f, i.crtc, DRM_MODE_OBJECT_CRTC, "ACTIVE");
+    assert_eq!(set(i.primary, p, active, 1).err(), Some(Errno::EINVAL));
+    assert_eq!(set(i.primary, p, 9999, 1).err(), Some(Errno::ENOENT));
+    // A driver property takes only its range.
+    let zpos = pid(&f, i.primary, p, "zpos");
+    assert_eq!(set(i.primary, p, zpos, 9).err(), Some(Errno::EINVAL));
+    set(i.primary, p, zpos, 2).unwrap();
+    assert_eq!(
+        props_of(&f, i.primary, p)
+            .iter()
+            .find(|(_, _, n)| n == "zpos")
+            .unwrap()
+            .1,
+        2
     );
     c.unregister(&s());
 }

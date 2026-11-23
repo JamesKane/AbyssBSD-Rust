@@ -49,13 +49,13 @@ impl KmsBuilder {
         }
     }
 
-    /// Adds a CRTC; returns its index.
+    /// Adds a display controller; returns its index.
     pub fn crtc(&mut self, hw: Arc<dyn CrtcHw>) -> usize {
         self.crtcs.push(hw);
         self.crtcs.len() - 1
     }
 
-    /// Adds a plane that can scan out on the CRTCs in `possible_crtcs`.
+    /// Adds a plane that can scan out on the display controllers in `possible_crtcs`.
     pub fn plane(&mut self, hw: Arc<dyn PlaneHw>, kind: PlaneKind, possible_crtcs: u32) -> usize {
         self.planes.push((hw, kind, possible_crtcs));
         self.planes.len() - 1
@@ -83,10 +83,11 @@ impl KmsBuilder {
     ///
     /// # Errors
     ///
-    /// `EINVAL` for a graph that points outside itself or has no CRTC;
+    /// `EINVAL` for a graph that points outside itself or has no display controller;
     /// `ENOMEM`.
     pub fn build(self) -> Result<Kms, Errno> {
         let ncrtc = self.crtcs.len();
+        let nplanes = self.planes.len();
         if ncrtc == 0 || ncrtc > 32 {
             return Err(Errno::EINVAL);
         }
@@ -231,7 +232,7 @@ impl KmsBuilder {
             let mut ids = std_crtc.to_vec();
             let mut extra = Vec::new();
             for s in hw.properties() {
-                ids.push(add(s.name, s.kind, s.immutable, true));
+                ids.push(add(s.name, s.kind, s.immutable, false));
                 extra.push(s.default);
             }
             state.crtcs.push(CrtcSt {
@@ -249,7 +250,7 @@ impl KmsBuilder {
             let mut ids = std_plane.to_vec();
             let mut extra = Vec::new();
             for s in hw.properties() {
-                ids.push(add(s.name, s.kind, s.immutable, true));
+                ids.push(add(s.name, s.kind, s.immutable, false));
                 extra.push(s.default);
             }
             state.planes.push(PlaneSt {
@@ -278,7 +279,7 @@ impl KmsBuilder {
             let mut ids = std_conn.to_vec();
             let mut extra = Vec::new();
             for s in hw.properties() {
-                ids.push(add(s.name, s.kind, s.immutable, true));
+                ids.push(add(s.name, s.kind, s.immutable, false));
                 extra.push(s.default);
             }
             state.conns.push(ConnSt {
@@ -315,6 +316,14 @@ impl KmsBuilder {
             blobs: SpinLock::new(blobs),
             fbs: SpinLock::new(BTreeMap::new()),
             in_formats,
+            rt: (0..ncrtc)
+                .map(|_| SpinLock::new(CrtcRt::default()))
+                .collect(),
+            shown: SpinLock::new(alloc::vec![None; nplanes]),
+            done: sched::WaitQueue::new(),
+            commit_lock: SpinLock::new(()),
+            commit_id: core::sync::atomic::AtomicU64::new(1),
+            unit: core::sync::atomic::AtomicU32::new(0),
             next_id: SpinLock::new(next),
         })
     }
