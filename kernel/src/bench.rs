@@ -1244,18 +1244,19 @@ fn wakeup_latency(s: &Sleepable) {
     report_lat("wakeup.latency", &mut shared.samples.lock());
 }
 
-/// One kernel page invalidated on every CPU.
+/// One kernel page invalidated on every CPU. The page is mapped in the
+/// kernel's virtual memory arena, as the FreeBSD side's `kva_alloc` and
+/// `pmap_qenter` do: an address in the direct map shares its translation
+/// table entries with what every CPU runs on, so invalidating it also
+/// costs the CPUs that merely answer.
 fn tlb_shootdown(s: &Sleepable) {
-    let page = Layout::from_size_align(4096, 4096).expect("layout");
-    // SAFETY: the layout has a nonzero size.
-    let p = unsafe { alloc::alloc::alloc(page) };
-    assert!(!p.is_null(), "bench: out of memory");
-    let va = VirtAddr::new(p as u64);
+    let va = VirtAddr::new(crate::mm::KVA.lock().alloc(4096, 4096).expect("bench: no kva"));
+    crate::mm::map_fresh(va, 4096, pt::Attrs::KERNEL_RW).expect("bench: out of memory");
     throughput(s, "tlb.shootdown", 1, move |_| {
         crate::mm::flush_range(va, 4096);
         crate::smp::shootdown(va, 4096);
         1
     });
-    // SAFETY: allocated above with the same layout.
-    unsafe { alloc::alloc::dealloc(p, page) };
+    crate::mm::unmap_and_free(va, 4096);
+    crate::mm::KVA.lock().free(va.get(), 4096).expect("bench: kva free");
 }
