@@ -123,6 +123,8 @@ fn platform_now() -> u64 {
 /// [`HZ_SHIFT`] bits, set by [`init`]: a switch converts with a multiply
 /// and a shift, not a 128-bit division.
 static HZ_MULT: AtomicU64 = AtomicU64::new(0);
+/// Platform clock ticks in one `hz` tick, set by [`init`].
+static HZ_TICKS: AtomicU64 = AtomicU64::new(u64::MAX);
 const HZ_SHIFT: u32 = 40;
 
 /// Platform clock `t` in FreeBSD's `hz` ticks ([`pctcpu::HZ`]); 0 before
@@ -157,12 +159,23 @@ pub fn now_ns() -> u64 {
 /// message and channel are cleared, as `sleepq_resume_thread` does, and
 /// its CPU-share window passes over the time asleep.
 pub(crate) fn mark_awake(inner: &mut thread::Inner, state: State) {
+    mark_awake_at(inner, state, platform_now());
+}
+
+/// As [`mark_awake`], at platform time `now`. A thread that slept less
+/// than an `hz` tick leaves its window as it is, as ULE's `sched_wakeup`
+/// does (`slptick != ticks`): the switch that puts it on a CPU brings the
+/// window up to date anyway.
+pub(crate) fn mark_awake_at(inner: &mut thread::Inner, state: State, now: u64) {
+    let slept = inner.slept_at;
     inner.state = state;
     inner.wmesg = "";
     inner.wchan = 0;
     inner.sintr = false;
     inner.slept_at = 0;
-    inner.pct.update(hz_now(), false);
+    if slept == 0 || now.wrapping_sub(slept) >= HZ_TICKS.load(Ordering::Relaxed) {
+        inner.pct.update(hz_of(now), false);
+    }
 }
 
 /// Names the current thread's sleeps `msg` (FreeBSD's wait message, as
@@ -424,6 +437,7 @@ pub fn init(p: &'static dyn Platform) {
     assert!(PLATFORM.set(p).is_ok(), "sched::init called twice");
     let mult = (u128::from(pctcpu::HZ) << HZ_SHIFT) / u128::from(p.frequency().max(1));
     HZ_MULT.store(u64::try_from(mult).unwrap_or(u64::MAX), Ordering::Relaxed);
+    HZ_TICKS.store((p.frequency() / pctcpu::HZ).max(1), Ordering::Relaxed);
     hal::critical::set_preempt_handler(owed_preempt);
 }
 
@@ -836,9 +850,10 @@ pub(crate) fn make_runnable(t: Arc<Thread>) {
     if !matches!(inner.state, State::Sleeping | State::New) {
         return;
     }
-    mark_awake(&mut inner, State::Runnable);
+    let now = platform().now();
+    mark_awake_at(&mut inner, State::Runnable, now);
     // Time asleep lowers usage, raising a time-sharing thread's priority.
-    let prio = account(&mut inner, thread::Event::Woken, platform().now());
+    let prio = account(&mut inner, thread::Event::Woken, now);
     let target = choose_cpu(inner.cpu, inner.bound);
     inner.cpu = target;
     let Some(c) = cpu(target) else {
