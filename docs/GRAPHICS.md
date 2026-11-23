@@ -645,3 +645,34 @@ Still open: the sync polarity inversion and the rest of the list above need a mo
 firmware's; the connector's readout does not yet say the link rate and lanes; `sky1_dptx4` leaves three
 grants outstanding at detach (the card still holds its windows); the broker's named-component branch ran
 for the first time here and worked (streams of the unit translate; the framebuffer range kept scanning).
+
+#### 15.6.1 Second half of the session: a real EDID and a mode firmware never ran
+
+On a second monitor (an older Acer whose mode is 1680x1050 at 59.95 Hz) the first Sway modeset failed with
+the monitor's own "Input Not Supported" box, which exposed that the connector had **never read an EDID**: both
+monitors had been offered the fallback list (1920x1080, 1280x720, 1024x768, 640x480; make and model
+"Unknown"). Findings, in the order found, all fixed:
+
+1. **Link shutdown.** The spec's rule that the bring-up after a link shutdown re-initialises the host side
+   with a reset first (sky1-dp-tx 02 §2.11.2) was not followed: shutdown left the PHY interface in `DP_RESET`
+   and the next training started from it. Switching 1920x1080 to 1280x720 on the first monitor went black
+   and stayed black at the way back. A flag set at shutdown now makes the next enable run the full
+   re-initialisation.
+2. **Silent failures.** `link_up`, `stream_on` and the EDID path returned without saying why. The encoder
+   and the sink read now log (`sky1_dp: link up, Rbr x4, 8 bits a component`, `EDID not read: ...`).
+3. **The channel's DEFER on an I2C read.** The sink answers the EDID's I2C-over-AUX read with the channel's
+   own reply field DEFER (`AUX_REPLY_CODE` = 2, `AUX_REPLY_DATA_COUNT` = 0) while the I2C field reads ACK. The
+   driver looked only at the I2C field for an I2C request, saw an ACK with no data and failed. The native
+   field applies first (sky1-dp-tx 01 §1.4.3), and a DEFER there is retried (32 tries for an I2C request).
+   Short I2C replies are also continued now, as the standard asks, though the board did not need it.
+
+Confirmed on hardware: with the Acer's EDID read, the connector offers its one mode, Sway sets it, and the
+picture is stable. That mode was never run by firmware, so this is the first picture from the display
+processor's and transmitter's computed timing (back-porch adjust, transfer unit, data count, the vendor's
+inverted sync polarities, link training at `Rbr x4`). It does not prove the polarities are right: a monitor
+that locks to the signal regardless of polarity would show the same.
+
+Open: five `F_TRANSLATION` faults from the unit's stream (`0xf4000`, `0x13caa00`, `0x13caa80`, `0x13cab00`,
+`0xfd3000`) at the moment of the mode set, then none; the display recovers. Not yet explained (a fetch from a
+stale layer address while the pipeline restarts, or a buffer unmapped before the latch). The DisplayPort
+transmitter's detach still leaves three grants outstanding.
