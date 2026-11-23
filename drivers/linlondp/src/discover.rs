@@ -242,13 +242,11 @@ pub fn walk(w: &dyn Words, window: usize) -> Result<Layout, Error> {
             continue;
         }
         let inst = ((bi >> 4) & 0xF) as usize;
-        // With a legacy block there is no per-block line size: the
-        // global one stands in.
-        let max_line = if legacy_lines {
-            g.max_line
-        } else {
-            w.read(at + common::MAX_LINE_SIZE)
-        };
+        // The global line size stands in for every block's. Reading a
+        // block's own `MAX_LINE_SIZE` (offset 8) is refused on the board:
+        // the interconnect monitor reports a non-secure access error at
+        // `0x208` of each unit's window (2026-11-23).
+        let max_line = g.max_line;
         let block = Block {
             offset: at,
             info: bi,
