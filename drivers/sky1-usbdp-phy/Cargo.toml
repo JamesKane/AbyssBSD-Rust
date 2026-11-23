@@ -1,0 +1,13 @@
+[package]
+name = "sky1-usbdp-phy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+sky1-dp-tx = { path = "../sky1-dp-tx" }
+sync = { path = "../../sys/sync" }
+
+[lints]
+workspace = true

@@ -972,6 +972,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sky1-usbdp-phy"
+version = "0.0.0"
+dependencies = [
+ "sky1-dp-tx",
+ "sync",
+]
+
+[[package]]
 name = "smbios"
 version = "0.0.0"
 

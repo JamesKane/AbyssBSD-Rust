@@ -515,3 +515,21 @@ Questions for the board: whether the sync inversion (`Config::invert_sync`, spec
 is right for a sink that honours the polarity bits; the DATA_CONTROL and TU_CONFIG field meanings;
 whether the interrupt cause is clear on read; whether the PHY wants lane 0's drive for every lane; the
 exact `CIXH502F` `_DSD`, `CLKT` and `RSTL` names (needs the DSDT; the corpus has them).
+
+### 15.2 USB-C/DisplayPort combo PHY (`drivers/sky1-usbdp-phy`)
+
+Built and host tested (simulated registers and interface window): the initialisation tables for DP only,
+USB plus DP in both orientations, and USB only; powering the shared core in the specified order with
+orientation first and the clock retried; the controller-side interface (prepare, init, power-state
+handshakes); the rate change (PLL1 bracket, per-rate values, lane selection by mode and orientation);
+drive levels with the table's filler cells; and `sky1_dp_tx::link::Phy` over it.
+
+Not built: the USB 3 side's use of the same core (shared-user accounting), the Type-C controller that
+supplies mode and orientation (`rts5453` exists for the PD side), the S5 orientation write and reset and
+clock handles (a `Platform` trait stands for them), the eDP PHY of unit 2, and the firmware-handover byte.
+
+Board questions: the 8.1 Gb/s `SS_CTRL3`/`SS_CTRL4` writes (taken as `0x0062` to control 3 and `0x0004`
+to control 4; the vendor's text writes control 3 twice); whether PLL1's lock bit (`0xE001` bit 7) is
+valid (recorded, not required); the PMA lane map encoding on a flipped cable in DP-only mode; whether
+the orientation reaches the S5 bit after a hot plug under ACPI; whether lane 0's drive suits all lanes.
+The board's boot display (DP 4) is PHY 3 in DP-only mode.
