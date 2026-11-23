@@ -186,7 +186,19 @@ impl Dptx {
     ///
     /// [`Error::Aux`].
     pub fn edid(&self) -> Result<Vec<u8>, Error> {
-        let first = self.aux().read_edid_block(0)?;
+        // A sink may refuse the monitor's data while it is powered down
+        // (a monitor behind a KVM switch NACKed the read on the board), so
+        // it is woken first, and a refusal is tried again a few times.
+        let _ = self.sink_power(1);
+        let mut first = self.aux().read_edid_block(0);
+        for _ in 0..3 {
+            if first.is_ok() {
+                break;
+            }
+            self.d.delay_us(20_000);
+            first = self.aux().read_edid_block(0);
+        }
+        let first = first?;
         let blocks = usize::from(first[126]).min(3) + 1;
         let mut out = first.to_vec();
         for i in 1..blocks {

@@ -24,6 +24,9 @@ pub enum AuxError {
     },
     /// The sink refused (NACK).
     Nack,
+    /// An I2C request was refused: the request code, the address, and the
+    /// reply code (native field in bits 1:0, I2C field in 3:2).
+    I2cNack { cmd: u8, addr: u8, code: u8 },
     /// The sink kept deferring.
     Defer,
 }
@@ -128,6 +131,13 @@ impl<'a> Aux<'a> {
             1 => Reply::Nack,
             _ => Reply::Defer,
         };
+        if reply == Reply::Nack && !native {
+            return Err(AuxError::I2cNack {
+                cmd: u8::try_from(cmd & 0xFF).unwrap_or(0xFF),
+                addr: u8::try_from(addr & 0xFF).unwrap_or(0xFF),
+                code: u8::try_from(code & 0xFF).unwrap_or(0xFF),
+            });
+        }
         let mut received = 0;
         if reply == Reply::Ack && !read.is_empty() {
             let n = (self.w.read(regs::AUX_REPLY_DATA_COUNT) & 0xFF) as usize;
