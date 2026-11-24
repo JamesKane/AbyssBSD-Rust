@@ -205,16 +205,37 @@ impl<R: Regs> Chip<R> {
         self.write_mac_ocp(reg, self.read_mac_ocp(reg) & !mask | b);
     }
 
+    /// Waits up to `tries` steps of `step_us` microseconds, delaying before
+    /// each check (`DELAY` then test, as the vendor loops do); whether
+    /// `done` held.
+    fn wait_after(&self, tries: u32, step_us: u32, mut done: impl FnMut() -> bool) -> bool {
+        for _ in 0..tries {
+            self.regs.delay_us(step_us);
+            if done() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// As [`Self::wait_after`], checking before each delay.
+    fn wait_before(&self, tries: u32, step_us: u32, mut done: impl FnMut() -> bool) -> bool {
+        for _ in 0..tries {
+            if done() {
+                return true;
+            }
+            self.regs.delay_us(step_us);
+        }
+        false
+    }
+
     /// Writes a PHY OCP register.
     pub fn write_phy_ocp(&self, reg: u16, val: u16) {
         let cmd = (u32::from(reg) >> 1) << regs::OCP_ADDR_SHIFT | regs::OCP_BUSY | u32::from(val);
         self.regs.write32(regs::PHYOCP, cmd);
-        for _ in 0..20_000 {
-            self.regs.delay_us(1);
-            if self.regs.read32(regs::PHYOCP) & regs::OCP_BUSY == 0 {
-                break;
-            }
-        }
+        self.wait_after(20_000, 1, || {
+            self.regs.read32(regs::PHYOCP) & regs::OCP_BUSY == 0
+        });
     }
 
     /// Reads a PHY OCP register.
@@ -222,13 +243,10 @@ impl<R: Regs> Chip<R> {
         self.regs
             .write32(regs::PHYOCP, (u32::from(reg) >> 1) << regs::OCP_ADDR_SHIFT);
         let mut v = 0;
-        for _ in 0..20_000 {
-            self.regs.delay_us(1);
+        self.wait_after(20_000, 1, || {
             v = self.regs.read32(regs::PHYOCP);
-            if v & regs::OCP_BUSY != 0 {
-                break;
-            }
-        }
+            v & regs::OCP_BUSY != 0
+        });
         (v & regs::OCP_DATA_MASK) as u16
     }
 
@@ -266,12 +284,9 @@ impl<R: Regs> Chip<R> {
                 | regs::CSIAR_BYTE_EN << regs::CSIAR_BYTE_EN_SHIFT
                 | regs::CSIAR_BUSY,
         );
-        for _ in 0..20_000 {
-            self.regs.delay_us(1);
-            if self.regs.read32(regs::CSIAR) & regs::CSIAR_BUSY == 0 {
-                break;
-            }
-        }
+        self.wait_after(20_000, 1, || {
+            self.regs.read32(regs::CSIAR) & regs::CSIAR_BUSY == 0
+        });
         self.regs.delay_us(20);
     }
 
@@ -281,12 +296,9 @@ impl<R: Regs> Chip<R> {
             regs::CSIAR,
             reg & regs::CSIAR_ADDR_MASK | regs::CSIAR_BYTE_EN << regs::CSIAR_BYTE_EN_SHIFT,
         );
-        for _ in 0..20_000 {
-            self.regs.delay_us(1);
-            if self.regs.read32(regs::CSIAR) & regs::CSIAR_BUSY != 0 {
-                break;
-            }
-        }
+        self.wait_after(20_000, 1, || {
+            self.regs.read32(regs::CSIAR) & regs::CSIAR_BUSY != 0
+        });
         self.regs.delay_us(20);
         self.regs.read32(regs::CSIDR)
     }
@@ -308,29 +320,18 @@ impl<R: Regs> Chip<R> {
         self.set8(regs::CMD, regs::CMD_STOPREQ);
         self.regs.delay_us(200);
         let empty = regs::MCUCMD_RXFIFO_EMPTY | regs::MCUCMD_TXFIFO_EMPTY;
-        for _ in 0..3000 {
-            self.regs.delay_us(50);
-            if self.regs.read8(regs::MCUCMD) & empty == empty {
-                break;
-            }
-        }
+        self.wait_after(3000, 50, || self.regs.read8(regs::MCUCMD) & empty == empty);
         if self.mac != MacType::R25 {
-            for _ in 0..3000 {
-                self.regs.delay_us(50);
-                if self.regs.read16(regs::IM) & 0x0103 == 0x0103 {
-                    break;
-                }
-            }
+            self.wait_after(3000, 50, || self.regs.read16(regs::IM) & 0x0103 == 0x0103);
         }
         let cmd = self.regs.read8(regs::CMD);
         self.regs
             .write8(regs::CMD, cmd & (regs::CMD_TXENB | regs::CMD_RXENB));
         self.regs.write8(regs::CMD, regs::CMD_RESET);
-        for _ in 0..regs::TIMEOUT {
-            self.regs.delay_us(100);
-            if self.regs.read8(regs::CMD) & regs::CMD_RESET == 0 {
-                return Ok(());
-            }
+        if self.wait_after(regs::TIMEOUT, 100, || {
+            self.regs.read8(regs::CMD) & regs::CMD_RESET == 0
+        }) {
+            return Ok(());
         }
         Err(HwError::ResetTimeout)
     }
@@ -345,12 +346,7 @@ impl<R: Regs> Chip<R> {
         self.clr8(regs::MCUCMD, regs::MCUCMD_IS_OOB);
         self.mac_clr(0xe8de, 0x4000);
         let twi = |this: &Self| {
-            for _ in 0..10 {
-                this.regs.delay_us(100);
-                if this.regs.read16(regs::TWICMD) & 0x0200 != 0 {
-                    break;
-                }
-            }
+            this.wait_after(10, 100, || this.regs.read16(regs::TWICMD) & 0x0200 != 0);
         };
         twi(self);
         self.write_mac_ocp(0xc0aa, 0x07d0);
@@ -358,12 +354,9 @@ impl<R: Regs> Chip<R> {
         self.write_mac_ocp(0xc01e, 0x5555);
         twi(self);
         if self.read_mac_ocp(0xd42c) & 0x0100 != 0 {
-            for _ in 0..regs::TIMEOUT {
-                if self.read_phy_ocp(0xa420) & 0x0007 == 2 {
-                    break;
-                }
-                self.regs.delay_us(1000);
-            }
+            self.wait_before(regs::TIMEOUT, 1000, || {
+                self.read_phy_ocp(0xa420) & 0x0007 == 2
+            });
             self.mac_clr(0xd42c, 0x0100);
             if self.mac != MacType::R25 {
                 self.phy_clr(0xa466, 0x0001);
@@ -378,12 +371,9 @@ impl<R: Regs> Chip<R> {
         if on {
             self.set8(regs::PMCH, 0xc0);
             self.write_mii(mii::BMCR, mii::BMCR_AUTOEN);
-            for _ in 0..regs::TIMEOUT {
-                if self.read_phy_ocp(0xa420) & 0x0007 == 3 {
-                    break;
-                }
-                self.regs.delay_us(1000);
-            }
+            self.wait_before(regs::TIMEOUT, 1000, || {
+                self.read_phy_ocp(0xa420) & 0x0007 == 3
+            });
         } else {
             self.write_mii(mii::BMCR, mii::BMCR_AUTOEN | mii::BMCR_PDOWN);
             self.clr8(regs::PMCH, 0x80);
@@ -631,15 +621,9 @@ impl<R: Regs> Chip<R> {
             mii::BMCR,
             mii::BMCR_RESET | mii::BMCR_AUTOEN | mii::BMCR_STARTNEG,
         );
-        let mut reset = false;
-        for _ in 0..2500 {
-            if self.read_mii(mii::BMCR) & mii::BMCR_RESET == 0 {
-                reset = true;
-                break;
-            }
-            self.regs.delay_us(1000);
-        }
-        if !reset {
+        if !self.wait_before(2500, 1000, || {
+            self.read_mii(mii::BMCR) & mii::BMCR_RESET == 0
+        }) {
             return Err(HwError::PhyResetTimeout);
         }
         // The PHY microcode version it runs.
@@ -681,13 +665,9 @@ impl<R: Regs> Chip<R> {
         } else {
             self.phy_clr(0xb820, 0x0010);
         }
-        for _ in 0..1000 {
-            if (self.read_phy_ocp(0xb800) & 0x0040 != 0) == on {
-                return true;
-            }
-            self.regs.delay_us(100);
-        }
-        false
+        self.wait_before(1000, 100, || {
+            (self.read_phy_ocp(0xb800) & 0x0040 != 0) == on
+        })
     }
 
     /// Loads the PHY microcode unless the PHY runs `version`, and records
