@@ -32,4 +32,5 @@ pub mod gmc;
 pub mod ih;
 pub mod memory;
 mod memory_regs;
+pub mod psp;
 pub mod regs;
