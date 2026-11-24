@@ -457,268 +457,52 @@ fsx, the `devinfo` comparison, and the performance gate moved to P9; the X870E t
 **Goal:** the Orange Pi 6 Plus as dependable as FreeBSD on it, before the second machine comes up:
 no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exit criteria met.
 
-The record of each item (what was built, how it was checked, the numbers) is in git and in the
-documents named; this section keeps what is done and what is open.
-
-**Done:**
-- **Bring-up defects.** `MNT_RELOAD` of the UFS root; `getty` on the serial console (`ttyu2`);
-  `/dev/efi`, so `efibootmgr` sets BootNext from AbyssBSD; the boot's noise (`devmatch`, `usbhid`,
-  `sky1_pinctrl`, the loader's power-off). The silent hangs were untranslated PCIe DMA, ended by
-  the SMMU.
-- **SMMUv3** ([IOMMU.md](IOMMU.md) §18, stages 0 to 5): the board uses all its RAM with DMA
-  translated, and fsx with `fsck_ffs` passes on the NVMe and a USB disk.
-- **The rest of the board:** `gpiobus`/`gpioc` and `iicbus`/`iic` as FreeBSD's tree has them; the
-  `GeneralPurposeIo` and `GenericSerialBus` region handlers; the RX8900 RTC (`rx8803`) and the PD
-  controllers (`rts5453`), in QEMU and on the host.
-- **Driver selection** ([ADR-0021](adr/0021-driver-selection-and-modules.md), MODULES.md §3): one
-  driver table per ISA.
-- **What desktop and development software need** (anything P9 or earlier; each done when FreeBSD
-  15.1's own tool or library runs unmodified against it, in QEMU on both architectures):
-  - device interfaces: `/dev/pci` (on the board every `pciconf -lvbc` line matches FreeBSD's),
-    `ugen` and `/dev/usb`, `hidraw`, `/dev/nvmeN`, CAM's `xpt0` and `pass`, `/dev/geom.ctl` (GPT
-    and MBR, BSD labels read), devstat, `/dev/full`, real `rman` resources (`devinfo -u`);
-  - system calls: the Tier gaps of 2026-11-10 (`getdtablesize` to `abort2`), `ntp_adjtime` and
-    `adjtime` slewing, POSIX AIO;
-  - subsystems: `tun`/`tap`, `if_bridge`, `nullfs`, `fdescfs`, `cd9660`;
-  - fastfetch's fields (SMBIOS kenv, `/dev/mem`, `hw.model`, routes, devstat, `hw.acpi.battery`);
-    `hcons` and `hsctrl`.
-  - Left where they are (compat-deviations where userland sees them): graphics (M-G); sound, the
-    MAC framework, ACPI sleep, buttons, the battery, the AC adapter, `/dev/acpi` (M-D); GELI and
-    `crypto(9)` (M-Z); video codec and NPU (post Day 1). Not planned: `pf`, `ipfw`, `vlan`,
-    `lagg`, IPsec, NFS, `procfs`, `spigen`, kernel dumps, swap (P11). Not in FreeBSD's GENERIC,
-    so not needed: `mqueuefs`, SCTP, `hwpmc`, RACCT.
-- **kyua on the board** (BUILD-AND-TEST.md; the baseline is the board's FreeBSD 16-CURRENT running
-  15.1's tests): the target is met in all four areas (`bin` 98.6%, `lib/libc` 99.2%, `sys/kern`
-  98.5%, `usr.bin` 99.2%), with no hang since `preempt_point` masks interrupts.
-- **The performance harness** on the board (BUILD-AND-TEST.md, `tests/perf/board/`): the userland
-  suites per core class against the board's FreeBSD built without `WITNESS`/`INVARIANTS`, and the
-  in-kernel suite `p2` (`kbench.ko` for arm64; AbyssBSD runs it at boot and resets).
+This section lists only what is open. What was built, how it was checked, and the numbers are in git
+(`git log` on the paths named below), in [IOMMU.md](IOMMU.md) §18, in
+[BUILD-AND-TEST.md](BUILD-AND-TEST.md), and in `tests/perf/board/results/`. Done: the bring-up
+defects, the SMMUv3 (stages 0 to 5), the rest of the board (GPIO, I2C, RTC, PD controllers), driver
+selection ([ADR-0021](adr/0021-driver-selection-and-modules.md)), the desktop and development
+software's device interfaces, system calls, and subsystems, kyua on the board (all four areas met),
+and the board's performance harness. Left where they are, as compat-deviations or later milestones:
+graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the AC adapter,
+`/dev/acpi` (M-D); GELI and `crypto(9)` (M-Z); video codec and NPU (post Day 1). Not planned: `pf`,
+`ipfw`, `vlan`, `lagg`, IPsec, NFS, `procfs`, `spigen`, kernel dumps, swap (P11).
 
 **Open:**
-- **Performance** (the exit's gate: every suite within 2% of FreeBSD on the board, per core
-  class, P7's over `rge`). The first runs (`tests/perf/board/results/`) found arm64 well short;
-  the gaps closed since are in git (`fc2c7d0` to `3e968c5`). Three runs a side of `p4`, `p5`,
-  and `p6` at `c03b69d` (`tests/perf/board/results/2026-11-12-c03b69d.txt`): every component
-  passes in every class (big, mid, little, all), overall 0.64 to 0.72 of FreeBSD's time, the
-  closest `sig` (1.018) and, on the little cores, `syscall` (0.993). Benchmarks behind: `thr.create`
-  (1.10 to 1.12 everywhere), `thr.sem.pingpong` (1.11), the unix socket ping-pongs (1.06 to
-  1.10), contended `thr.mutex` at two and eight threads (1.1 to 1.4), `fs.ufs.fsx` (1.05); on the
-  little cores `io.null.write` (1.68), `kevent.pipe1` (1.6), `unix.rights` (1.49),
-  `tmpfs.open_close` (1.36), where `getpid` is level. In the kernel (`p2`, big cores, one run):
-  `ctxsw.same` (1.27), `ipi.rtt` (1.2), `callout.armcancel` (1.18), `ctxsw.cross` (1.02 to 1.14).
-  To do:
-  - the little cores: short system calls that do more than `getpid` took 1.4 to 1.7 of FreeBSD's
-    time there and 0.75 on the big cores. One cause is fixed: the image past its first 4 MiB was
-    in 4 KiB pages, about 20 first-level data-TLB refills a `write` on an A520 (none on the big
-    cores), which cost most when the core's neighbour ran. Its segments are now 2 MiB-aligned
-    and it is in 2 MiB leaves, as FreeBSD's: a 1-byte `write` to `/dev/null` on cpu2 went from
-    537 ns to about 475 (FreeBSD: 500 to 540) and `getpid` from 294 to 270. The second: once a
-    process had run some 30 pages of code (the A520's first-level instruction TLB), every
-    system call took 2 to 4 instruction-TLB refills of about 230 cycles each, one of them at
-    EL0, until the thread next slept: that `write` at 715 to 800 ns. FreeBSD sets
-    `TCR_EL1.E0PD1` (FEAT_E0PD: an EL0 access to the kernel half faults with no lookup and no
-    walk) and is immune; now AbyssBSD sets it too and the state is gone (475 to 490 ns
-    whatever ran before). Running at EL2 with VHE, CnP, and no PAN were tried and change
-    nothing. Left: a program's own code layout still moves that `write` between 470 and
-    620 ns (one test program built `-O1`, `-O2`, `-O3`), where FreeBSD stays at about 510.
-    The suites rerun with both (`tests/perf/board/results/2026-11-12-6aae600.txt`): on the
-    little cores `io.null.write` 1.68 to 0.95, `syscall` 0.89, every component passing; but
-    `sig` failed on the big and mid cores (`sig.deliver` 1.018 to 1.044), see the next item;
-  - `sig.deliver` with E0PD1: the user copies of a signal's frame cost more with it, and
-    AbyssBSD made nine a round trip to FreeBSD's four, because it wrote and read an SVE
-    context (some 580 bytes each way) for every thread. FreeBSD traps SVE at EL0 until a
-    thread's first SVE instruction and writes the context only after it (`pcb_svesaved`); now
-    AbyssBSD does the same (a new thread, a forked child, and an `execve` start without it),
-    and `sig.deliver` on the big cores is 949 ns to FreeBSD's 973. The rerun, three runs a
-    side (`tests/perf/board/results/2026-11-13-382361c.txt`), passes every component in
-    every class, `sig` at 0.98 on the big and mid cores, overall 0.67 to 0.69. Still behind:
-    `unix.rights` (1.10 mid, 1.55 little, 1.44 with all cores), `thr.create` (1.06 to 1.09),
-    `thr.sem.pingpong` (1.08 to 1.11), contended `thr.mutex` at two and eight threads (1.1
-    to 1.4), `fs.ufs.fsx` (1.06); on the little cores `tmpfs.open_close` (1.21),
-    `kevent.pipe1000` (1.14), `tmpfs.extract` and `thr.cond.pingpong` (1.08); with all cores
-    the unix socket ping-pongs (1.10 to 1.13).
-    Lifting PAN around a copy as FreeBSD does (plain loads and stores in place of
-    `ldtr`/`sttr`) was tried and is slower here (`sig.deliver` 1370 ns, `pipe.pingpong` 8%);
-  - `unix.rights`: a passed descriptor took some thirteen allocations a round trip to
-    FreeBSD's four; with four fewer (the control on the stack, one list of files, one buffer
-    of received messages) the round trip is 6765 instructions for 7776, and the benchmark
-    1347 ns on the big cores (FreeBSD: 1484) and about 7250 on the little (it was 8850;
-    FreeBSD: 5700 to 6300);
-  - the little cores and where the kernel's code lies: an A520 pays 75 to 145 cycles for
-    each first-level instruction-cache miss (a big core next to nothing), and how many a
-    system call takes depends on where the linker put its functions, which every change
-    moves. The same code linked in three orders: `dup` and `close` 840 to 985 ns, a byte
-    written to and read from a UNIX socket 2400 to 3500, a passed descriptor 7800 to 9800
-    (counted with the PMU: 0 to 2.5, 14 to 33, and 80 to 112 misses), the big cores the
-    same throughout. With the functions a profile finds hot placed together
-    (`--symbol-ordering-file`) each is at its best or near it, and at or under FreeBSD's
-    (887, 2760, 8460). This is most of the little cores' "noisy" verdicts and of what a
-    change appears to cost or gain there. Ordering the hot functions in the build was
-    tried and dropped: `p4`, `p5`, and `p6` three times each on three kernels of the same
-    code (FreeBSD's side that of the last report), as linked, with the 454 functions the
-    profiler found hot grouped by the kind of benchmark that runs them, and with them
-    clustered by what calls what (the profiler recording each sample's caller). Overall on
-    the little cores 0.684, 0.674, and 0.691 of FreeBSD's time; on the mid 0.671, 0.677,
-    0.679; on the big 0.676, 0.675, 0.673. Single benchmarks on the little cores moved by
-    20 to 60% either way under both orders (`io.null.write` 0.70 and 0.68 of its time as
-    linked, `sig.deliver` 0.83 and 1.18, `fs.ufs.open_close` 1.10 and 1.62): placing the
-    hot functions together gives another layout, not a better one, so the misses are
-    likely functions meeting in the same cache sets rather than hot code spread too far.
-    The A520s have no second-level cache of their own (the firmware's 4 MB is the eight
-    A720s' 512 KB each), so a miss goes to the shared third level, on FreeBSD too. The
-    report as linked: `tests/perf/board/results/2026-11-13-bc14163.txt`, every component
-    passing on every class. Until something controls it, a small change is compared on
-    the little cores by instructions executed (PMU event `0x08`), not by time;
-  - amd64 in bhyve had slipped since its phases' exits: at `e124112`, ten runs a side, `p6`
-    failed `unix` (1.143) and `event` (1.070), and in `p4` `getpid` took 115 ns to FreeBSD's
-    71 (it was 69 at P5's exit), a byte to `/dev/null` 189 to 108. The causes, fixed in
-    `13afb3d` to `cf4b48c`: without SSE the compiler copied each structure of 64 to 128 bytes
-    with `rep movsq`, some 30 cycles a time (`-max-store-memcpy=16`, x86_64 only); P6.7 and
-    P6.8 had put a lock or a lookup on every call (the thread list's lock to ask whether a
-    process has one thread, a mutex round a device's file offset, the limits' and the wired
-    count's locks, the current thread and address space found through `dyn Any`); the call
-    was decoded twice and found through the slot list. Between two processes a wake-up there
-    is an IPI that costs the sender some 5 µs in the hypervisor: a pipe now wakes its reader
-    before it copies a transfer of a page or more (`pipe.bw` 22.7 µs to 14.9; FreeBSD's
-    19.0), and a socket's waiter spins up to 2 µs for a change, while spinning has lately
-    paid, before it sleeps (`unix.rights` 1405 ns to about 810; FreeBSD's 756 to 842). Three
-    runs a side at `cf4b48c`: every component of `p4` and `p6` passes (`syscall` 0.999, `io`
-    0.964, `pipe` 0.844, `proc` 0.764, `sig` 0.889, `vm` 0.571; `event` 1.008, `unix` 0.978,
-    `thr` 0.882, `exec` 0.888, `pty` 0.846, `boot` 0.522). Behind inside them:
-    `event.kevent.pipe1` and `pipe1000` (1.26, 1.33), `unix.stream.bw4k` (1.17),
-    `thr.mutex.pi` at four and eight threads (about 1.25 and 1.7), `thr.mutex.t2` (1.07),
-    `vm.mmap` (1.03). Still to do there: the ten-run gate, and `p2`, `p3`, `p5`, and `p7`
-    again. The kernel's profiler drops samples taken in user mode (`prof.rs`: `USER` and
-    `OTHER` are the same bit). The same changes on the board, three runs of `p4`, `p5`, and
-    `p6` (`tests/perf/board/results/2026-11-14-cf4b48c.txt`, FreeBSD's side that of the last
-    report): every component passes on every class, overall 0.634, 0.639, 0.632 and 0.630
-    of FreeBSD's time on the big, mid, little, and all cores (0.676, 0.671, 0.684, 0.647
-    before), `syscall` 0.56 from 0.70 on the big cores and 0.70 from 0.93 on the little,
-    `io` 0.24 from 0.34, `unix` 0.51 from 0.72. One thing is slower there: `pipe.bw` on the
-    big and mid cores by 6 and 8% (9431 and 10576 ns; FreeBSD's 9302 and 11160), where a
-    wake-up is cheap and the early one buys nothing;
-  - what followed (`d464a51` to `bbddcc3`). The pipe's early wake-up is now only for a
-    sleeper whose CPU has halted, which gave the board back most of it (`pipe.bw` on the big
-    cores 9166 ns, 8767 with no early wake at all) and left bhyve's 15.0 µs. One write,
-    `kevent`, and read of a pipe took some twelve spin locks, each masking interrupts, to
-    FreeBSD's four or five mutexes: a knote already active and queued is now left alone, the
-    scanners are woken only when one sleeps (`KQ_SLEEP`), a scan takes three locks an event
-    for six, a notification passes over a queued knote whose filter answers from the
-    object's state alone (`Filter::level`: a pipe's), and a pipe takes a wait queue's lock
-    only when the other side has said it will sleep (`PIPE_WANTR`, `PIPE_WANTW`). In bhyve,
-    three runs a side: `kevent.pipe1` 1.017 (it was 1.257), `pipe1000` 1.134 (1.333), the
-    `event` component 0.947. A socket's send and receive set the wait message only when
-    they wait: `unix.stream.bw4k` about 1.12 (1.185; one run). On the
-    board at `bbddcc3`, three runs of `p4`, `p5`, and `p6`
-    (`tests/perf/board/results/2026-11-14-bbddcc3.txt`, FreeBSD's side as before): every
-    component passes on every class, overall 0.629, 0.632, 0.635, and 0.622 on the big,
-    mid, little, and all cores; `event` 0.59 from 0.64 on the big cores (`kevent.pipe1` 586
-    ns from 690, `pipe1000` 821 from 909), `pipe` 0.88 from 0.94 (`pipe.bw` 8952 ns, under
-    FreeBSD's 9302 again), `unix` 0.48 from 0.51 (`unix.stream.bw4k` 643 ns from 785). The
-    little cores' `fs.tmpfs` and `fs.ufs` read 7 and 6% slower (0.637, 0.557), which no
-    change here touches: the code moved (the layout item above).
-  - what closed those gaps (`8502a8e` to `cd34521`): each was a difference of design, found
-    by measuring both systems the same way, not by a profile of ours alone.
-    - `kevent`: a benchmark of 2, 10, and 100 pipes beside those of 1 and 1000 showed the
-      whole gap at two (ours 120 ns over one pipe's, FreeBSD's 38), so it was the path of a
-      knote not yet queued and the scan of the last one gone quiet, not the memory of a
-      thousand pipes. A knote's note is now under its kqueue's lock with its status
-      (`KQ_LOCK`), a notification takes that lock once for the filter and the queue, a scan
-      holds it from one knote to the next, and a knote holds its kqueue outright:
-      `kevent.pipe1000` 1.009 (1.15). FreeBSD's `sys/kqueue` tests: 25 of 25. The lock-free
-      pass over a queued pipe knote (`1bf1ad7`) could lose an event against a scan clearing
-      the knote; it goes by a status bit now, and the scan asks the filter once more behind
-      a fence.
-    - the umtx chain: FreeBSD's `umtxq_busy` spins 200 times for a busy chain before it
-      sleeps, and ours slept at once.
-    - the wake-up: counting each side's sleeps (`ru_nvcsw` an operation) showed both
-      sleeping as often on the contended mutexes, so each sleep and wake cost us more. A CPU
-      whose core has a second thread halted the instant it went idle, and waking a halted
-      CPU is an interrupt (5 µs of the waker's time in bhyve, whose guests have that
-      topology); ULE's idle thread has a moment before it halts, while it looks for a
-      thread to steal. An SMT sibling's idle thread now spins 64 times first when its CPU
-      has been switching often: `unix.stream.pingpong` 1.24 µs (FreeBSD's 17.0),
-      `pipe.pingpong` 2.68 (16.7), `thr.sem.pingpong` 3.06 (16.8), `pty.raw` 7.08 (34.3).
-    - the contended mutexes, which that made slower (`thr.mutex.pi.t8` 274 ns from 227):
-      with a wake-up that takes no interrupt, the waiter ran the instant the owner unlocked,
-      found the mutex retaken, marked it contested and slept, and the owner's every unlock
-      became a system call. FreeBSD runs the same rounds, spaced by its wake-up. A locker
-      woken for a mutex and back to queue for it now passes 4 µs first; and a umtx call no
-      longer takes the process's address-space lock and reference, nor its job lock, on
-      the way. `thr.mutex.pi.t8` 88.6 ns (FreeBSD's 150), `thr.mutex.t4` 42.5 (69.4).
-      Watching the word and taking the mutex the moment it is free was tried and is worse
-      (196 ns: the mutex goes from CPU to CPU). FreeBSD's `lib/libthr` tests: 68 of 68.
-    - `unix.stream.bw4k`: the heap's magazines for 4 KiB buffers held 16, so a buffer the
-      receiver freed came back to the sender while still in the receiver's cache. With 64
-      it is 445 ns, with 256 (1 MiB, now the size for classes of 2 KiB and up) 411, to
-      FreeBSD's 441; UMA grows its buckets under such traffic.
-    Three runs a side at `cd34521`: `unix` 0.310, `pty` 0.371, `thr` 0.542, `event` 0.677,
-    `exec` 0.884, `boot` 0.555; `pipe` 0.338, `vm` 0.559, `proc` 0.746, `sig` 0.856, `io`
-    0.973, `syscall` 0.986. No benchmark of `p6` is slower than FreeBSD's; of `p4` only
-    `vm.mmap` (1.020). On the board at `cd34521`, three runs of `p4`, `p5`, and `p6`
-    (`tests/perf/board/results/2026-11-15-cd34521.txt`, FreeBSD's side as before): every
-    component passes on every class, overall 0.585, 0.577, 0.616, and 0.559 on the big,
-    mid, little, and all cores (0.629, 0.632, 0.635, 0.622 at `bbddcc3`); `thr` 0.61 on
-    every class from 0.81, 0.87, and 0.76 (the hold-off; the board's cores have no second
-    thread, so its idle spin was already the long one). The little cores' `event`, `sig`,
-    and `unix` read 6 to 11% slower (0.645, 0.572, 0.712) with the big and mid cores' level
-    or better: the code moved again (the layout item above).
-    `vm.mmap` after that (`8b48286`): a lookup in a map's entries was two binary searches
-    every time, and now tries where the last one ended first, as FreeBSD's splay tree keeps
-    the last entry found at its root: 310 ns (324; FreeBSD's 317).
-    The ten-run gate in bhyve at `8b48286`, both suites: every component passes and no
-    benchmark is rated slower. `p4` overall 0.657: `io` 0.975, `pipe` 0.339, `proc` 0.752,
-    `sig` 0.863, `syscall` 0.985, `vm` 0.546 (`vm.mmap` 0.978). `p6` overall 0.508: `boot`
-    0.538, `event` 0.676, `exec` 0.879, `pty` 0.374, `thr` 0.535, `unix` 0.308. One
-    benchmark is behind: `unix.rights`, 803 ns to FreeBSD's 762 (1.055, interval 1.024 to
-    1.084, rated noisy).
-    `unix.rights` after that: 709 ns to FreeBSD's 777 (0.913, interval 0.896 to 0.987,
-    three runs a side; `unix` 0.295). Passing the descriptor was the least of it. With the
-    two halves measured apart on both systems, one process sending to itself was 6 to 8%
-    behind and two processes 39% (a one-byte `sendmsg` to `recvmsg`, no descriptor). Three
-    differences: every send and receive told the other socket's waiters, an `mfence` and a
-    write to the peer's lines each, where FreeBSD keeps `SB_WAIT`, `SB_SEL` and
-    `UXST_PEER_SEL` in the receive buffer under its lock and touches the peer only when
-    something waits (now the same); the socket calls took the descriptor table's lock and
-    a reference to the process a call, where `read` and `write` borrow both (now they do
-    too, and a received descriptor's file is moved into the table, its control message
-    built on the stack); and a writer at a full buffer, spinning, was back for every
-    message's room and took the buffer's lock and lines from the reader each time, where
-    FreeBSD's sleeps and its slow wake-up leaves the reader some fifty messages alone
-    (sleeping was worse for us, 1031 ns, our wake-up being quick: it now stays away 2 us,
-    then twice as long each time the buffer is still full, and sleeps after 30).
-    Still to do there: `p2`, `p3`, `p5`, and `p7` again; a locker's
-    hold-off favours the owner as FreeBSD's slow wake-up does, and how the threads share
-    a mutex under it has not been measured;
-  - a release kernel built with the tests (`cargo xtask test --tier boot --release`)
-    overflows a kernel stack in `detach_stress_nvme` on both architectures
-    (`devfs::Registry::insert` under the NVMe driver's start); the boot tier's own (debug)
-    build passes;
-  - the 10-run gating set, `p2` on the mid and little cores, and `p7`;
-  - the arm64 kernel's target makes no unaligned access, so an integer read out of a byte
-    slice is a byte load each (it was 144 ns of every signal): a sweep of the hot paths that
-    parse bytes (packet headers, on-disk structures) for the same;
-  - after `p5` has run in the same boot, `kevent.pipe1000` is 7% slower until a reboot
-    (`poll1000` and `select1000` were a quarter slower and are no longer: ADR-0024's zones, and
-    the pipe's `Notify` in the pipe). Each knote's filter is still its own allocation;
-  - `rw`/`sx` readers at four threads are 1.24 to 1.3 of FreeBSD's (they were 1.8 to 2.0): a
-    reader's first try is the ARMv8.0 compare-and-swap, which fails with others at the word. A
-    kernel built all LSE is level there (65 ns) and 5 ns slower on every uncontended pair
-    (`tests/perf/board/results/2026-11-12-p2-big-lse.txt`); and `page.miss` (1.6);
-  - the contended writer locks (`mtx`, `rw.wr`, `sx.wr` at t2 and t4) read 18 to 23 ns against
-    FreeBSD's 47 to 70, with the same backoff and now the same spin hint: not explained;
-  - `p7` over `rge`; the SMMU's stage 6; then the 10-run gate on every class.
-- **The board does not always come back from a reset** (three times in some forty: after the
-  first kyua run, from FreeBSD, and from AbyssBSD on 2026-11-12): the system shuts down, issues
-  the reset (`PSCI SYSTEM_RESET` on AbyssBSD's console), and no loader starts; a power cycle
-  recovers. Seen from both kernels, so the firmware's reset path is the suspect.
+- **Performance** (the exit's gate: every suite within 2% of FreeBSD on the board, per core class,
+  P7's over `rge`). Last reports: `p4`, `p5`, `p6` at `cd34521`
+  (`2026-11-15-cd34521.txt`), `p7` at `1f04988` with the `rge` transmit slots
+  (`2026-11-22-rgetx-p7.txt`), `p2` at `ae38a29` (`2026-11-24-ae38a29-p2.txt`): every component
+  passes on every class (big, mid, little, all), three runs a side. To do:
+  - the 10-run gate on every class, for `p2` and `p4` to `p7`;
+  - the SMMU's stage 6 (IOMMU.md §10: sync once per unmap, range invalidation, `rge` and `vtnet`
+    transmit bounce, the low-memory check), each after its audit against FreeBSD's design;
+  - benchmarks behind inside passing components: `p7` `tcp.rr.lo.p50` (1.40 on the big cores),
+    `tcp.lo.s4` (1.17), `tcp.connect.lo` (1.04); `p2` `ctxsw.cross` (1.12 big) and `page.miss.t1`
+    (1.06 all cores);
+  - the little cores' code layout: where the linker puts the kernel's functions moves a benchmark
+    20 to 60% either way (ordering the hot functions was measured and dropped). A small change is
+    compared there by instructions executed (PMU event `0x08`), not time, until something controls
+    it;
+  - the arm64 kernel's target makes no unaligned access, so an integer read out of a byte slice
+    is a byte load each (144 ns of every signal): a sweep of the hot paths that parse bytes
+    (packet headers, on-disk structures);
+  - after `p5` has run in the same boot, `kevent.pipe1000` is 7% slower until a reboot. Each
+    knote's filter is still its own allocation;
+  - the kernel's profiler drops samples taken in user mode (`prof.rs`: `USER` and `OTHER` are the
+    same bit).
+- **A release kernel built with the tests** (`cargo xtask test --tier boot --release`) overflows a
+  kernel stack in `detach_stress_nvme` on both architectures (`devfs::Registry::insert` under the
+  NVMe driver's start); the boot tier's own (debug) build passes.
+- **The board does not always come back from a reset** (three times in some forty): the system
+  shuts down, issues the reset (`PSCI SYSTEM_RESET` on AbyssBSD's console), and no loader starts;
+  a power cycle recovers. Seen from both kernels, so the firmware's reset path is the suspect.
 - **Hangs seen once, not reproduced:** a held key on `vt`; `aarch64-el2` (INTx) in
   `tests/user/cam`, once in three runs in QEMU.
 - **To check on the board:** the RX8900 and the PD controllers, `hcons`' media keys, the `devinfo`
   comparison, and FreeBSD's recordings for storage and USB (`tests/corpus/opi6p/freebsd/`).
-- **Small gaps** (compat-deviations): `vgapci` and `ichsmb` names, the old `mount(2)` for cd9660,
-  writing BSD labels, `glabel`'s `label/` names, USB isochronous transfers and alternate
-  settings.
+- **Small gaps** (compat-deviations): `ichsmb` names, the old `mount(2)` for cd9660, writing BSD
+  labels, `glabel`'s `label/` names, USB isochronous transfers and alternate settings.
 
 **Exit:** the P8 exit criteria on the Orange Pi 6 Plus, every known defect above fixed or recorded in
 compat-deviations with a reason, and kyua and the performance suites run on the board without a
