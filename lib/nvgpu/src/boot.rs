@@ -134,7 +134,8 @@ mod tests {
             steps.push(s.to_string());
             if s.starts_with("microcode halted") {
                 let reg = |a: u64| u32::try_from((a >> 12) << 4).unwrap();
-                after_run(&m, reg(FRTS.start), reg(FRTS.end), 0);
+                // The upper register is the base of the last 128 KiB granule.
+                after_run(&m, reg(FRTS.start), reg(FRTS.end - 0x2_0000), 0);
             }
         });
         assert_eq!(r, Ok(()));
@@ -174,7 +175,7 @@ mod tests {
         assert_eq!(
             r,
             Err(BootError::Wpr2Mismatch {
-                found: Some((0x1000, 0x2000))
+                found: Some((0x1000, 0x2000 + 0x2_0000))
             })
         );
         // Not set up at all.

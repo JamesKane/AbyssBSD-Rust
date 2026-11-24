@@ -67,13 +67,18 @@ pub const fn vga_workspace_base(fb_size: u64, display_disabled: bool, register: 
 /// The second write-protected region's bounds, when it is set up: the
 /// inclusive lower and exclusive upper physical addresses. `None` when the
 /// upper register is zero.
+///
+/// The upper register holds the base of the region's last 128 KiB granule
+/// (bits 31:4, as address >> 12), so the exclusive end is that plus 128 KiB.
+/// Measured on the RTX 4070: after FRTS the registers read 0x2ff800000 and
+/// 0x2ff8e0000, and the region ends at the FRTS region's end, 0x2ff900000.
 #[must_use]
 pub const fn wpr2_bounds(lo: u32, hi: u32) -> Option<(u64, u64)> {
-    let high = ((hi >> 4) as u64) << 12;
     if hi >> 4 == 0 {
         return None;
     }
-    Some((((lo >> 4) as u64) << 12, high))
+    let last_granule = ((hi >> 4) as u64) << 12;
+    Some((((lo >> 4) as u64) << 12, last_granule + 0x2_0000))
 }
 
 /// How a chip family sizes the firmware's heap and reserves memory.
@@ -305,12 +310,18 @@ mod tests {
     #[test]
     fn the_protected_region() {
         assert_eq!(wpr2_bounds(0x1234_5670, 0), None);
+        // The upper register is the base of the last 128 KiB granule.
         assert_eq!(
             wpr2_bounds(0x0000_0010, 0x0000_0020),
-            Some((0x1000, 0x2000))
+            Some((0x1000, 0x2000 + 0x2_0000))
         );
         // The low four bits are not part of the field.
-        assert_eq!(wpr2_bounds(0x1f, 0x2f), Some((0x1000, 0x2000)));
+        assert_eq!(wpr2_bounds(0x1f, 0x2f), Some((0x1000, 0x2000 + 0x2_0000)));
+        // The RTX 4070 after FRTS: 0x2ff800000..0x2ff900000.
+        assert_eq!(
+            wpr2_bounds(0x2ff8_0000 >> 8 << 4, 0x2ff8_e000 >> 8 << 4),
+            Some((0x2_ff80_0000, 0x2_ff90_0000))
+        );
     }
 
     #[test]
