@@ -59,6 +59,33 @@ where AbyssBSD differs, and why. A difference not listed here is a bug.
 | `/dev/pci` `PCIOCBARMMAP` memory attributes | Any valid `vm_memattr_t` | amd64: UC, UC-, WC, WB; arm64: Device-nGnRE (`VM_MEMATTR_DEVICE`), non-cacheable, WB. Others (`WRITE_THROUGH`, `WRITE_PROTECTED`, nGnRnE) are `EINVAL`; the mapping is not held to `RLIMIT_VMEM` | The page tables have those three memory types; `pciconf -D` asks for `VM_MEMATTR_DEVICE` |
 | `/dev/pci` list after `devctl delete` of a PCI function | `pci_delete_child` takes it off and bumps the generation | Taken off the list it reports, without bumping the generation | Deleting PCI functions is a forced `devctl delete` only |
 
+### Devices the board's FreeBSD attaches and AbyssBSD's tree does not have
+
+The comparison is `devinfo -rv` on the Orange Pi 6 Plus against `tests/corpus/opi6p/freebsd/devinfo-rv.txt`
+(2026-11-24: 287 named devices there, 252 here). Everything FreeBSD has a driver for that is not in this
+list is in both.
+
+| FreeBSD's devices | AbyssBSD | Why |
+|---|---|---|
+| `gic0`, `its0`, `generic_timer0`, `pmu0`, `psci0`, `smccc0`, `vgic0`, `smbios0`, `ram0` | No device nodes | The kernel owns the interrupt controllers, the timer, the performance monitor, firmware calls, RAM, and the SMBIOS tables itself (the rman row above; DRIVER-MODEL.md §8.1). `kenv`'s `smbios.*` and `/dev/mem` still work. |
+| `acpi_sysresource0` | No device | `PNP0C02` ranges are reserved in `acpi0`'s resource manager, with no node (the resource rows above). |
+| `apei0` | No driver | The ACPI Platform Error Interface (hardware error records) is not implemented. |
+| `acpi_acad0`, `battery0` | No driver | The AC adapter and the battery: M-D (ROADMAP). |
+| `hdac0`, `hdacc0`, `hdaa0`, `pcm0`, `sky1_audss0` | No driver on the board | Sound: M-D. |
+| `drm0` to `drm3`, `drm128`, `fbd0`, `panthor0`, `lkpi_iic0`, `misc0`, `misc1` | None; the display units attach as `komeda`N (below) | Graphics: M-G. FreeBSD's come from its linuxkpi drivers, and AbyssBSD's native stack has no DRM device nodes yet (ADR-0025). |
+| `aipu0`, `amvx0`, `video4linux0` to `video4linux3` | No driver | The NPU and the video codec: post Day 1. |
+| `armv8crypto0`, `cryptosoft0` | No driver | `crypto(9)`: M-Z. |
+| `nvme_sim0`, `nvme_sim1` | No node; the CAM buses exist (`camcontrol devlist`) | The NVMe driver registers its CAM bus directly, with no `nvme_sim` device between. |
+| `zy7_spi0`, `spibus0`, `spigen0`, `spigen1` | No driver | `spigen` is not planned (ROADMAP); the Cadence SPI controller's only child on the board is a TPM that `spigen` serves. |
+| `sky1_gpt0` | No driver | The general purpose timer has no consumer: the Arm generic timer is the clock and event source. |
+
+| What | FreeBSD | AbyssBSD | Why |
+|---|---|---|---|
+| `komeda`N | `komeda0` for display unit 4 only (`DPU4`) | `komeda1` to `komeda4`, one for each display unit the firmware enables | Different driver (native, ADR-0025), and every unit has its own transmitter. |
+| `sky1_dptxN` | `sky1_dptx0` for `DP04` only | `sky1_dptx2` and `sky1_dptx4` | As `komeda`. |
+| `sky1_udphyN` | `sky1_udphy0` for the PHY with `_UID` 3 | `sky1_udphy0` to `sky1_udphy3`, one for each PHY | As `komeda`. Name and description as the board's FreeBSD port has them. |
+| `sky1_syscon`N, `sky1_reset`N, `sky1_pinctrl`N, `scmi_shmem`N | Their own devices where FreeBSD has drivers (`sky1_pinctrl`, `scmi_shmem`) | Also nodes for the shared register windows (`sky1_syscon0` to `3`), the reset controllers (`sky1_reset0`, `1`), and the clock provider | Firmware dependencies the dependency graph must meet (rows above, and "Driver names" at the top). |
+
 ## CAM and the NVMe control devices
 
 | What | FreeBSD | AbyssBSD | Why |

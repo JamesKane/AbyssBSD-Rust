@@ -447,7 +447,13 @@ so the bulk throughput benchmarks are capped by the wire on any side that reache
 `tests/perf/board/perf-board.sh WORKDIR RUNS SUITE...`, on the workstation, runs it `RUNS` times on
 each system, alternating them and which goes first, rebooting between (FreeBSD always leaves
 `nextboot` set, so the next FreeBSD boot is the NODEBUG kernel). Each run's output is
-`WORKDIR/<side>-<run>.log`; rerun to resume. `cargo xtask perf --platform opi6p --dir WORKDIR`
+`WORKDIR/<side>-<run>.log`; rerun to resume. FreeBSD's side is a golden set
+(`tests/perf/board/golden/`, with a `MANIFEST` of its suites, the checksum of the benchmark inputs
+`/mnt/perf/SHA256`, and its kernel): a run whose log is there is copied into `WORKDIR`, so only
+AbyssBSD's side costs board time (about 15 minutes a run of `p4` to `p6`, against 35 with FreeBSD's).
+`perf-board.sh` refuses a set whose inputs changed on the board; `ABYSS_GOLDEN=refresh` runs FreeBSD and
+rewrites the set (do that when its kernel, `ubench`, or the userland they run against changes),
+`ABYSS_GOLDEN=0` ignores it. `cargo xtask perf --platform opi6p --dir WORKDIR`
 writes the report, one table per core class, to `WORKDIR/report.txt`.
 
 `tests/perf/board/p2-board.sh WORKDIR RUNS`, on the workstation with the board's serial adapter

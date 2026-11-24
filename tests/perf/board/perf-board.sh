@@ -9,6 +9,15 @@
 # WORKDIR` makes the report. Rerun with the same WORKDIR to resume: runs
 # with a complete log are kept.
 #
+# FreeBSD's side is a golden set (tests/perf/board/golden/, its MANIFEST
+# says what it was made from): a run whose FreeBSD log is there is copied
+# into WORKDIR, not run again, so only AbyssBSD's side costs board time.
+# The set is stale when the board's FreeBSD kernel, the benchmark inputs
+# (/mnt/perf), or the userland they run against change: perf-board.sh
+# refuses to use it then (ABYSS_GOLDEN=0 ignores the set and runs FreeBSD;
+# `ABYSS_GOLDEN=refresh` runs FreeBSD and writes its logs and MANIFEST
+# into golden/).
+#
 # Usage: perf-board.sh WORKDIR RUNS SUITE...
 # AbyssBSD's host key is kept apart from FreeBSD's, in
 # WORKDIR/abyss_known_hosts.
@@ -28,6 +37,8 @@ B=${ABYSS_BOARD:-192.168.0.19}
 PEER=${ABYSS_PEER:-192.168.0.14}
 SSHOPT="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
 mkdir -p "$S"
+GOLDEN_DIR=$(cd "$(dirname "$0")" && pwd)/golden
+GOLDEN=${ABYSS_GOLDEN:-1}
 fb() { timeout "${T:-120}" ssh $SSHOPT jkane@$B "su root -c '$*' < /dev/null" 2>/dev/null; }
 ab() { timeout "${T:-120}" ssh $SSHOPT -o UserKnownHostsFile=$S/abyss_known_hosts root@$B "$*" 2>/dev/null; }
 # freebsd (the NODEBUG kernel), freebsd-debug (the default kernel),
@@ -70,6 +81,18 @@ boot_to() {
 	done
 }
 
+# Mounts the benchmark inputs (kyuawork) on `side`: the disk's label can
+# come after sshd answers, so it tries for a minute.
+mount_inputs() {
+	local side=$1 i
+	for i in $(seq 12); do
+		on $side 'df /mnt | grep -q kyuawork || { fsck_ffs -p /dev/gpt/kyuawork; mount /dev/gpt/kyuawork /mnt; }; df /mnt | grep -q kyuawork' > /dev/null && return 0
+		sleep 5
+	done
+	log "kyuawork would not mount on $side"
+	exit 1
+}
+
 on() {
 	if [ "$1" = abyss ]; then shift; ab "$@"; else shift; fb "$@"; fi
 }
@@ -101,6 +124,30 @@ peer_start() {
 trap peer_stop EXIT
 
 last=${SUITES##* }
+
+# The golden set: usable when it has this run's suites and its inputs are
+# the ones on the board now.
+inputs_hash() {
+	local os=$(which_os)
+	[ "$os" = down ] && { boot_to abyss; os=abyss; }
+	case $os in abyss) mount_inputs abyss; ab 'md5 -q /mnt/perf/SHA256' ;; *) mount_inputs freebsd; fb 'md5 -q /mnt/perf/SHA256' ;; esac
+}
+golden_ok=
+if [ "$GOLDEN" = 1 ] && [ -f "$GOLDEN_DIR/MANIFEST" ]; then
+	have=$(sed -n 's/^suites //p' "$GOLDEN_DIR/MANIFEST")
+	want=$(sed -n 's/^inputs //p' "$GOLDEN_DIR/MANIFEST")
+	if [ "$have" != "$SUITES" ]; then
+		log "golden set is of '$have', not '$SUITES': running FreeBSD"
+	else
+		now=$(inputs_hash)
+		if [ "$now" = "$want" ]; then
+			golden_ok=1
+		else
+			log "golden set is stale: the benchmark inputs on the board are $now, it was made with $want (ABYSS_GOLDEN=refresh makes a new one, ABYSS_GOLDEN=0 ignores it)"
+			exit 1
+		fi
+	fi
+fi
 for run in $(seq 0 $((RUNS - 1))); do
 	if [ $((run % 2)) -eq 0 ]; then order="freebsd abyss"; else order="abyss freebsd"; fi
 	for side in $order; do
@@ -108,8 +155,15 @@ for run in $(seq 0 $((RUNS - 1))); do
 		if [ -f "$out" ] && grep -q "^kbench end $last\$" "$out" && [ "$(grep -c '^kbench end' "$out")" -eq $((4 * $#)) ]; then
 			continue
 		fi
+		[ "$GOLDEN" = refresh ] && [ "$side" = abyss ] && continue
+		g=$(printf '%s/freebsd-%02d.log' "$GOLDEN_DIR" "$run")
+		if [ "$side" = freebsd ] && [ -n "$golden_ok" ] && [ -f "$g" ]; then
+			log "run $((run + 1))/$RUNS: freebsd from the golden set"
+			cp "$g" "$out"
+			continue
+		fi
 		boot_to $side
-		on $side 'df /mnt | grep -q kyuawork || { fsck_ffs -p /dev/gpt/kyuawork; mount /dev/gpt/kyuawork /mnt; }'
+		mount_inputs $side
 		log "run $((run + 1))/$RUNS: $side ($SUITES)"
 		start=$(date +%s)
 		peer_start
@@ -123,6 +177,17 @@ for run in $(seq 0 $((RUNS - 1))); do
 			exit 1
 		fi
 		mv "$out.tmp" "$out"
+		if [ "$GOLDEN" = refresh ] && [ "$side" = freebsd ]; then
+			mkdir -p "$GOLDEN_DIR"
+			cp "$out" "$GOLDEN_DIR/freebsd-$(printf %02d $run).log"
+			{
+				echo "suites $SUITES"
+				echo "inputs $(inputs_hash)"
+				echo "kernel $(sed -n 's/^kbench env side=freebsd ident=//p' "$out" | head -1)"
+				echo "date $(date +%F)"
+				echo "runs $((run + 1))"
+			} > "$GOLDEN_DIR/MANIFEST"
+		fi
 		log "run $((run + 1)) on $side done in $(( $(date +%s) - start )) s"
 	done
 done

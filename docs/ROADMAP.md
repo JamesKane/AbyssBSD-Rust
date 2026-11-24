@@ -470,15 +470,15 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
 
 **Open:**
 - **Performance** (the exit's gate: every suite within 2% of FreeBSD on the board, per core class,
-  P7's over `rge`). Last reports: `p4`, `p5`, `p6` at `cd34521`
-  (`2026-11-15-cd34521.txt`), `p7` at `1f04988` with the `rge` transmit slots
+  P7's over `rge`). Last reports: `p4`, `p5`, `p6` at `8c3a7ae`
+  (`2026-11-24-8c3a7ae.txt`, against the golden FreeBSD set in `tests/perf/board/golden/`), `p7` at `1f04988` with the `rge` transmit slots
   (`2026-11-22-rgetx-p7.txt`), `p2` at `ae38a29` (`2026-11-24-ae38a29-p2.txt`): every component
   passes on every class (big, mid, little, all), three runs a side. To do:
   - the 10-run gate on every class, for `p2` and `p4` to `p7`;
   - the SMMU's stage 6 (IOMMU.md §10: sync once per unmap, range invalidation, `rge` and `vtnet`
     transmit bounce, the low-memory check), each after its audit against FreeBSD's design;
   - benchmarks behind inside passing components: `p7` `tcp.rr.lo.p50` (1.40 on the big cores),
-    `tcp.lo.s4` (1.17), `tcp.connect.lo` (1.04); `p2` `ctxsw.cross` (1.12 big) and `page.miss.t1`
+    `tcp.lo.s4` (1.17), `tcp.connect.lo` (1.04); `p6` `pty.raw` (1.04 on the big cores); `p2` `ctxsw.cross` (1.12 big) and `page.miss.t1`
     (1.06 all cores);
   - the little cores' code layout: where the linker puts the kernel's functions moves a benchmark
     20 to 60% either way (ordering the hot functions was measured and dropped). A small change is
@@ -493,8 +493,10 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
   a power cycle recovers. Seen from both kernels, so the firmware's reset path is the suspect.
 - **Hangs seen once, not reproduced:** a held key on `vt`; `aarch64-el2` (INTx) in
   `tests/user/cam`, once in three runs in QEMU.
-- **To check on the board:** the RX8900 and the PD controllers, `hcons`' media keys, the `devinfo`
-  comparison, and FreeBSD's recordings for storage and USB (`tests/corpus/opi6p/freebsd/`).
+- **`devinfo` against the board's FreeBSD** (tests/corpus/opi6p/freebsd/devinfo-rv.txt): the RX8900,
+  the PD controllers, `hcons` and `hsctrl` attach on the board with FreeBSD's names. What FreeBSD
+  has that AbyssBSD's tree does not is in compat-deviations (Device tree). Still to decide: `apei`,
+  `sky1_gpt`, and whether the media keys deliver events (only the attach was seen).
 - **Small gaps** (compat-deviations): `ichsmb` names, the old `mount(2)` for cd9660, writing BSD
   labels, `glabel`'s `label/` names, USB isochronous transfers and alternate settings.
 
