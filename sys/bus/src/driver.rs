@@ -470,15 +470,20 @@ impl<'a> AttachCx<'a> {
         index: usize,
         min: usize,
         firmware_ok: bool,
+        adopt_console: bool,
     ) -> Result<(usize, u64, u64, Sharing), ResourceError> {
         if self.injected() {
             return Err(ResourceError::MapFailed);
         }
-        let (base, len) = self
+        let (base, len, prefetchable) = self
             .resources
             .iter()
             .filter_map(|r| match r {
-                Resource::Memory { base, len, .. } => Some((*base, *len)),
+                Resource::Memory {
+                    base,
+                    len,
+                    prefetchable,
+                } => Some((*base, *len, *prefetchable)),
                 _ => None,
             })
             .nth(index)
@@ -486,7 +491,16 @@ impl<'a> AttachCx<'a> {
         if len < min as u64 {
             return Err(ResourceError::TooSmall);
         }
-        if self.mgr.platform().sensitive(base, len) {
+        let platform = self.mgr.platform();
+        if platform.sensitive(base, len)
+            && !(adopt_console
+                && console_adoption_allowed(
+                    (base, len),
+                    prefetchable,
+                    platform.console_framebuffer(),
+                    platform.sensitive_beyond_console(base, len),
+                ))
+        {
             return Err(ResourceError::Sensitive);
         }
         let range = Range {
@@ -495,7 +509,15 @@ impl<'a> AttachCx<'a> {
             len,
         };
         let sharing = self.mgr.claim(range, firmware_ok)?;
-        let Some(va) = self.mgr.platform().map_device(base, len) else {
+        // An adopted console's pages are mapped write-combining by the
+        // kernel already; a second mapping of another type would be a
+        // conflict, so the adopter's is write-combining too.
+        let mapped = if adopt_console {
+            self.mgr.platform().map_device_wc(base, len)
+        } else {
+            self.mgr.platform().map_device(base, len)
+        };
+        let Some(va) = mapped else {
             self.mgr.release_claim(range);
             return Err(ResourceError::MapFailed);
         };
@@ -508,7 +530,7 @@ impl<'a> AttachCx<'a> {
         index: usize,
         firmware_ok: bool,
     ) -> Result<MmioGrant<B>, ResourceError> {
-        let (va, pa, len, sharing) = self.map_memory(index, B::SIZE, firmware_ok)?;
+        let (va, pa, len, sharing) = self.map_memory(index, B::SIZE, firmware_ok, false)?;
         Ok(MmioGrant {
             // SAFETY: the platform mapped `len >= B::SIZE` bytes of this
             // device's registers for us (the claim: alone, or shared as
@@ -527,8 +549,9 @@ impl<'a> AttachCx<'a> {
         &mut self,
         index: usize,
         firmware_ok: bool,
+        adopt_console: bool,
     ) -> Result<MmioGrant<Bytes>, ResourceError> {
-        let (va, pa, len, sharing) = self.map_memory(index, 1, firmware_ok)?;
+        let (va, pa, len, sharing) = self.map_memory(index, 1, firmware_ok, adopt_console)?;
         let bytes = usize::try_from(len).map_err(|_| ResourceError::MapFailed)?;
         Ok(MmioGrant {
             // SAFETY: as in `mmio_grant`, for all `len` bytes.
@@ -554,7 +577,7 @@ impl<'a> AttachCx<'a> {
     /// at offsets the device itself reports (capability structures).
     /// Shared ranges as in [`AttachCx::mmio`].
     pub fn mmio_bytes(&mut self, index: usize) -> Result<MmioGrant<Bytes>, ResourceError> {
-        self.mmio_bytes_grant(index, false)
+        self.mmio_bytes_grant(index, false, false)
     }
 
     /// [`AttachCx::mmio`], also granting a range AML reads or writes
@@ -571,7 +594,19 @@ impl<'a> AttachCx<'a> {
     /// [`AttachCx::mmio_bytes`], also granting a firmware-shared range, as
     /// [`AttachCx::mmio_shared`].
     pub fn mmio_bytes_shared(&mut self, index: usize) -> Result<MmioGrant<Bytes>, ResourceError> {
-        self.mmio_bytes_grant(index, true)
+        self.mmio_bytes_grant(index, true, false)
+    }
+
+    /// [`AttachCx::mmio_bytes`] for the driver of the display the kernel's
+    /// boot console draws on: maps the `index`th memory resource
+    /// write-combining even though the loader's framebuffer, which the
+    /// console uses, lies inside it. Granted only if that framebuffer is
+    /// wholly inside this resource, the resource is prefetchable, and no
+    /// other sensitive range overlaps it ([`console_adoption_allowed`]).
+    /// The console keeps drawing on its own mapping of the same pages until
+    /// the driver's display takes over (GRAPHICS.md §7.5, §16).
+    pub fn mmio_bytes_console(&mut self, index: usize) -> Result<MmioGrant<Bytes>, ResourceError> {
+        self.mmio_bytes_grant(index, false, true)
     }
 
     fn io_grant(&mut self, index: usize, firmware_ok: bool) -> Result<IoGrant, ResourceError> {
@@ -1491,5 +1526,81 @@ impl<D: Driver> Drop for Binding<D> {
         // failed start that was not torn down) would leak it rather than
         // free memory handlers may still use.
         debug_assert!(self.driver.is_none() || self.sources.is_empty());
+    }
+}
+
+/// Whether a driver may adopt the boot console's framebuffer by mapping the
+/// resource `(base, len)` it lies in: the console's framebuffer is wholly
+/// inside the resource, the resource is prefetchable, and nothing else
+/// sensitive (an interrupt controller, a transport) overlaps it.
+#[must_use]
+pub fn console_adoption_allowed(
+    resource: (u64, u64),
+    prefetchable: bool,
+    console: Option<(u64, u64)>,
+    other_sensitive: bool,
+) -> bool {
+    let (base, len) = resource;
+    let Some((cb, cl)) = console else {
+        return false;
+    };
+    let (Some(end), Some(cend)) = (base.checked_add(len), cb.checked_add(cl)) else {
+        return false;
+    };
+    prefetchable && !other_sensitive && cl > 0 && base <= cb && cend <= end
+}
+
+#[cfg(test)]
+mod adoption_tests {
+    use super::console_adoption_allowed as ok;
+
+    const BAR: (u64, u64) = (0xfc_1000_0000, 0x1000_0000);
+
+    #[test]
+    fn the_console_inside_a_prefetchable_resource_may_be_adopted() {
+        // The Raphael iGPU: the framebuffer is the first 8 MiB of BAR0.
+        assert!(ok(BAR, true, Some((0xfc_1000_0000, 0x7e_9000)), false));
+        // Anywhere inside, to the last byte.
+        assert!(ok(
+            BAR,
+            true,
+            Some((0xfc_1000_0000 + 0x1000_0000 - 4096, 4096)),
+            false
+        ));
+    }
+
+    #[test]
+    fn every_other_case_is_refused() {
+        let fb = Some((0xfc_1000_0000, 0x7e_9000));
+        // No console framebuffer at all.
+        assert!(!ok(BAR, true, None, false));
+        // A resource that is not prefetchable (registers, not memory).
+        assert!(!ok(BAR, false, fb, false));
+        // Something else sensitive overlaps the resource.
+        assert!(!ok(BAR, true, fb, true));
+        // The console is not inside it: before, past, partly in, or elsewhere.
+        assert!(!ok(BAR, true, Some((0xfc_0fff_ff00, 0x1000)), false));
+        assert!(!ok(BAR, true, Some((0xfc_2000_0000, 0x1000)), false));
+        assert!(!ok(
+            BAR,
+            true,
+            Some((0xfc_1000_0000 - 0x1000, 0x2000)),
+            false
+        ));
+        assert!(!ok(
+            BAR,
+            true,
+            Some((0xfc_1000_0000 + 0x1000_0000 - 4096, 8192)),
+            false
+        ));
+        // An empty console range, and ranges that wrap.
+        assert!(!ok(BAR, true, Some((0xfc_1000_0000, 0)), false));
+        assert!(!ok(
+            (u64::MAX - 10, 100),
+            true,
+            Some((u64::MAX - 10, 50)),
+            false
+        ));
+        assert!(!ok(BAR, true, Some((u64::MAX - 10, 100)), false));
     }
 }
