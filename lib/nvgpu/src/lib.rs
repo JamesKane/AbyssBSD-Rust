@@ -26,7 +26,9 @@ extern crate alloc;
 extern crate std;
 
 pub mod chip;
+pub mod falcon;
 pub mod fuse;
+pub mod fwsec;
 pub mod mem;
 pub mod nvfw;
 pub mod stock;
