@@ -68,6 +68,8 @@ pub(crate) struct Amd {
     /// The page the hubs send faults and aperture misses to, while the
     /// hubs are set up.
     dummy: SpinLock<Option<vm::dma::DmaCoherent<u8>>>,
+    /// The security processor's ring, once made.
+    psp: SpinLock<Option<crate::psp::Brought>>,
 }
 
 /// Where the GART's page table is in video memory (BAR0 offset): past the
@@ -109,6 +111,7 @@ impl Amd {
             gpu,
             kms: SpinLock::new(None),
             dummy: SpinLock::new(None),
+            psp: SpinLock::new(None),
         }
     }
 
@@ -627,6 +630,58 @@ impl Amd {
         done.map_err(|_| Errno::EIO)
     }
 
+    /// Brings the security processor up as far as the trusted memory zone
+    /// (stages R3.1 and R3.2), on the calling kernel thread, which reads the
+    /// firmware file. The translation hubs are set up first if they are not
+    /// (the specification: the PSP's addresses go through them).
+    pub(crate) fn psp_bring_up(&self, s: &sched::Sleepable) {
+        use amdgpu::flip;
+        use amdgpu::gmc::Hub;
+        let Ok(gpu) = self.gpu() else {
+            return;
+        };
+        if self.psp.lock().is_some() {
+            self.log(format_args!("PSP: already up"));
+            return;
+        }
+        let Some(fw) = crate::firmware() else {
+            self.log(format_args!("PSP: no firmware reader"));
+            return;
+        };
+        let toc = match fw.read(s, crate::psp::TOC_PATH) {
+            Ok(t) => t,
+            Err(e) => {
+                self.log(format_args!(
+                    "PSP: {} not read: {e:?}",
+                    crate::psp::TOC_PATH
+                ));
+                return;
+            }
+        };
+        if self.dummy.lock().is_none() {
+            let _ = self.gmc(Hub::Gfx);
+            let _ = self.gmc(Hub::Mm);
+        }
+        // The flush registers are set up for the table's write.
+        if !self
+            .hdp_ready
+            .swap(true, core::sync::atomic::Ordering::AcqRel)
+        {
+            flip::hdp_init(&Bar5(&gpu));
+        }
+        let log = |args: core::fmt::Arguments<'_>| self.log(args);
+        match crate::psp::bring_up(&gpu, &toc, &log) {
+            Ok(b) => {
+                self.log(format_args!(
+                    "PSP: up; trusted memory zone {:#x} bytes",
+                    b.tmr_size
+                ));
+                *self.psp.lock() = Some(b);
+            }
+            Err(e) => self.log(format_args!("PSP: stopped: {e:?}")),
+        }
+    }
+
     /// A one-line summary of the cached table, for a sysctl.
     pub(crate) fn summary(&self) -> String {
         match &*self.table.lock() {
@@ -719,6 +774,21 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         "gmc_mm",
         "Write 1 to set the memory hub up (the display's and the interrupt handler's): as `gmc`",
         move || r.gmc(amdgpu::gmc::Hub::Mm),
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "psp",
+        "Write 1 to bring the security processor up: the ring, the table of contents, the trusted memory zone (on a kernel thread; see the log)",
+        move || {
+            let r = Arc::clone(&r);
+            sched::spawn("amd-psp", sched::Priority::KERNEL, move |s| {
+                r.psp_bring_up(s)
+            })
+            .map(|_| ())
+            .map_err(|_| abi::errno::Errno::EAGAIN)
+        },
     );
     let r = Arc::clone(a);
     crate::control::trigger(

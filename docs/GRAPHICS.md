@@ -1029,3 +1029,31 @@ the zone, and then the display microcontroller's load as one experiment. The fil
 20261019, checked against 02 section 11) are: `psp_13_0_5_toc.bin`, `psp_13_0_5_ta.bin`, `sdma_5_2_6.bin`,
 `gc_10_3_6_{ce,pfp,me,mec,mec2,rlc}.bin`, `dcn_3_1_5_dmcub.bin`.
 
+### 16.11 R3.1 and R3.2: the security processor's ring, table of contents and trusted memory zone (2026-11-24)
+
+- **Code.** `lib/amdgpu/src/psp.rs` has the mailbox registers (MP0 segment 0: `C2PMSG_64` ring control `0x58200`,
+  `_67` the write pointer `0x5820c`, `_69` to `_71` the ring's address and size, `_81` the secure OS's sign of life
+  `0x58244`), the 64-byte ring frame, the 1 KiB command buffer with its response block at `+0x360`, the load-TOC
+  (`0x20`), set-up-TMR (`0x05`) and load-firmware (`0x06`) commands, and the ring creation and submit sequences of 03
+  sections 4.2 and 4.4; ten host tests against a model of the PSP (a frame in the ring, its fence, its response, the write pointer
+  wrapping after 64 frames, a PSP that never answers, one that refuses the ring, a secure OS that is not running).
+  `drivers/drmn/src/psp.rs` runs it on the X870E, every buffer in video memory: the ring, command buffer and
+  fence at BAR0 offset 160 MiB, the 1 MiB-aligned staging buffer at 161 MiB, the zone at video memory `0x1e000000`
+  (outside the top 2 MiB, away from the interrupt ring and the GART table). The firmware file is read by
+  `kernel/src/firmware_files.rs` (a whole file by path from the root, handed to `drmn` with `set_firmware`; the
+  files are the operator's, in `/lib/firmware/amdgpu/`, decompressed from linux-firmware 20261019 and checked against
+  02 section 11) on the bring-up's own kernel thread (`sched::spawn`), because a sysctl writer has no `Sleepable`.
+- **On the X870E, `dev.drmn.1.psp=1`:** the translation hubs set up first (the specification says the PSP's
+  addresses go through them), the secure OS running (`C2PMSG_81` `0x1dde5d`, boot firmware initialised, version
+  register `0x420016`), the ring created, the table of contents (`psp_13_0_5_toc.bin`, its 1,536-byte payload
+  from offset `0x100`) loaded with status 0 and **a trusted memory zone of `0xa00000` bytes, the size the
+  specification measured**, the zone set up at GPU address `0xf41e000000` (physical `0x185e000000`) with status 0.
+  The display and the interrupts ran through it (3,168 frame starts, no overflow).
+- **Next (R3.3):** the display microcontroller. 08 section 3.2: reset it, give the PSP its image (type 51; the PSP
+  places it and writes its first two windows itself), program the others (windows 2 to 6, region 5) and the
+  inbox and outbox from the driver's layout (bases `0x6000_0000` and up, which differ from the platform's `0x0n00_0000`),
+  release the reset and wait for `SCRATCH0` bits 0 and 1. The platform's firmware is running now: the picture is
+  scanned out by the timing generator and the plane, not by the microcontroller, so a reset should not blank it,
+  but the platform's windows are overwritten and its state is lost. Untested: the reference loads the image with
+  the other engines' and never alone.
+

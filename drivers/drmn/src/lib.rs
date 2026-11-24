@@ -29,6 +29,7 @@ mod amd;
 mod control;
 mod interrupt;
 mod kms;
+mod psp;
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -119,6 +120,34 @@ fn report_vbios(aperture: &Aperture, log: &dyn Fn(core::fmt::Arguments<'_>)) {
         }
         Err(e) => log(format_args!("video BIOS not read: {e:?}")),
     }
+}
+
+/// Reads firmware files: the kernel's reader of plain files under
+/// `/lib/firmware`, put in place by the operator (the images are the GPU
+/// vendor's, not ours to ship). Read from a driver's own kernel thread.
+pub trait Firmware: Sync {
+    /// The whole file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// The error number of whatever failed (`ENOENT`, `EIO`, `EFBIG`).
+    fn read(
+        &self,
+        s: &sched::Sleepable,
+        path: &str,
+    ) -> Result<alloc::vec::Vec<u8>, abi::errno::Errno>;
+}
+
+static FIRMWARE: sync::Once<&'static dyn Firmware> = sync::Once::new();
+
+/// Gives the driver the kernel's firmware reader, once, before drivers
+/// start.
+pub fn set_firmware(f: &'static dyn Firmware) {
+    let _ = FIRMWARE.set(f);
+}
+
+pub(crate) fn firmware() -> Option<&'static dyn Firmware> {
+    FIRMWARE.get().copied()
 }
 
 /// Whether a Radeon's display becomes a graphics card (`hw.drmn.kms`, on
