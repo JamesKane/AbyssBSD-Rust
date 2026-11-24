@@ -180,25 +180,7 @@ fn newfs_soft(img: &Path) -> Result<()> {
     util::run(&mut remote::ssh(&format!(
         "rm -f {remote_img} && truncate -s 64m {remote_img} && newfs -U {remote_img} > /dev/null"
     )))?;
-    fetch(remote_img, img)
-}
-
-fn fetch(remote_path: &str, local: &Path) -> Result<()> {
-    util::run(
-        Command::new("scp")
-            .arg("-q")
-            .arg(format!("{}:{remote_path}", remote::host()))
-            .arg(local),
-    )
-}
-
-fn send(local: &Path, remote_path: &str) -> Result<()> {
-    util::run(
-        Command::new("scp")
-            .arg("-q")
-            .arg(local)
-            .arg(format!("{}:{remote_path}", remote::host())),
-    )
+    remote::scp_from(remote_img, img)
 }
 
 /// Runs `script` (with the image's memory disk as `$dev`) where FreeBSD's
@@ -229,7 +211,7 @@ fn on_freebsd(img: &Path, script: &str) -> Result<(bool, String)> {
 fn preen(img: &Path) -> std::result::Result<Vec<String>, String> {
     let remote_img = "abyss/crash-check.img";
     if !cfg!(target_os = "freebsd") {
-        send(img, remote_img).map_err(|e| e.to_string())?;
+        remote::scp_to(img, remote_img).map_err(|e| e.to_string())?;
     }
     let mut kinds = std::collections::BTreeSet::new();
     let mut log = String::new();
@@ -248,7 +230,7 @@ fn preen(img: &Path) -> std::result::Result<Vec<String>, String> {
             .any(|l| l.ends_with("? no") && !l.starts_with("CONTINUE"))
         {
             if !cfg!(target_os = "freebsd") {
-                fetch(remote_img, img).map_err(|e| e.to_string())?;
+                remote::scp_from(remote_img, img).map_err(|e| e.to_string())?;
             }
             return Ok(kinds.into_iter().collect());
         }

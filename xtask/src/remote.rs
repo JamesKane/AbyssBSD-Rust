@@ -4,6 +4,7 @@
 //! The working tree (not just commits) is mirrored with rsync, so remote runs
 //! test exactly what is on disk locally.
 
+use std::path::Path;
 use std::process::Command;
 
 use crate::util::{self, Result};
@@ -34,6 +35,26 @@ pub(crate) fn ssh(script: &str) -> Command {
     let mut c = Command::new("ssh");
     c.args(["-o", "BatchMode=yes", &host(), script]);
     c
+}
+
+/// Copies `remote_path` on the build server to `local`.
+pub(crate) fn scp_from(remote_path: &str, local: &Path) -> Result<()> {
+    util::run(
+        Command::new("scp")
+            .arg("-q")
+            .arg(format!("{}:{remote_path}", host()))
+            .arg(local),
+    )
+}
+
+/// Copies `local` to `remote_path` on the build server.
+pub(crate) fn scp_to(local: &Path, remote_path: &str) -> Result<()> {
+    util::run(
+        Command::new("scp")
+            .arg("-q")
+            .arg(local)
+            .arg(format!("{}:{remote_path}", host())),
+    )
 }
 
 /// Mirrors the working tree to the build server.

@@ -22,6 +22,7 @@ use std::process::Command;
 
 use crate::arch::Arch;
 use crate::cli::Args;
+use crate::remote;
 use crate::util::{self, Result};
 
 pub(crate) const RELEASE: &str = "15.1-RELEASE";
@@ -85,12 +86,8 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
         for arch in arches {
             let local = local_rescue_image(arch);
             fs::create_dir_all(local.parent().ok_or("no parent")?)?;
-            let remote = format!(
-                "{}:abyss/dist/{RELEASE}/{}/rescue.tar",
-                crate::remote::host(),
-                arch.freebsd_name()
-            );
-            util::run(Command::new("scp").arg("-q").arg(&remote).arg(&local))
+            let remote = format!("abyss/dist/{RELEASE}/{}/rescue.tar", arch.freebsd_name());
+            remote::scp_from(&remote, &local)
                 .map_err(|e| format!("{e} (run `cargo xtask --remote fetch-base` first)"))?;
             let sysroot = local_sysroot(arch);
             let tmp = sysroot.with_extension("tmp");
@@ -115,46 +112,25 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
         // The UFS2 test disk and FreeBSD's listings of it.
         let local = local_dir(Arch::X86_64);
         fs::create_dir_all(&local)?;
-        for name in UFS_TEST {
+        // And the FAT one, the empty soft-updates one, and the ISO 9660 test
+        // volume, with FreeBSD's views of it.
+        let names: Vec<String> = UFS_TEST
+            .iter()
+            .map(|n| (*n).to_string())
+            .chain(
+                crate::fattest::FAT_TEST
+                    .iter()
+                    .chain([&SOFT_TEST])
+                    .map(|n| (*n).to_string()),
+            )
+            .chain(crate::isotest::files())
+            .collect();
+        for name in &names {
             let remote = format!(
-                "{}:abyss/dist/{RELEASE}/{}/{name}",
-                crate::remote::host(),
+                "abyss/dist/{RELEASE}/{}/{name}",
                 Arch::X86_64.freebsd_name()
             );
-            util::run(
-                Command::new("scp")
-                    .arg("-q")
-                    .arg(&remote)
-                    .arg(local.join(name)),
-            )?;
-        }
-        // And the FAT one, and the empty soft-updates one.
-        for name in crate::fattest::FAT_TEST.iter().chain([&SOFT_TEST]) {
-            let remote = format!(
-                "{}:abyss/dist/{RELEASE}/{}/{name}",
-                crate::remote::host(),
-                Arch::X86_64.freebsd_name()
-            );
-            util::run(
-                Command::new("scp")
-                    .arg("-q")
-                    .arg(&remote)
-                    .arg(local.join(name)),
-            )?;
-        }
-        // And the ISO 9660 test volume, with FreeBSD's views of it.
-        for name in crate::isotest::files() {
-            let remote = format!(
-                "{}:abyss/dist/{RELEASE}/{}/{name}",
-                crate::remote::host(),
-                Arch::X86_64.freebsd_name()
-            );
-            util::run(
-                Command::new("scp")
-                    .arg("-q")
-                    .arg(&remote)
-                    .arg(local.join(&name)),
-            )?;
+            remote::scp_from(&remote, &local.join(name))?;
         }
         println!(
             "fetch-base: the UFS2, FAT, and ISO 9660 test disks in {}",
