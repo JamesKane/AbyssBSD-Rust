@@ -1145,3 +1145,27 @@ the zone, and then the display microcontroller's load as one experiment. The fil
 - **Not measured:** the speed (the prescale scaling with the time base is not established; 500 worked on this monitor, and
   a 100 kHz clock was not seen on a bus analyser), the engine with the display firmware running, and SCDC writes.
 
+### 16.16 R3.4 modes, step 1: 1080p50 at the firmware's pixel clock (2026-11-24)
+
+- **Code.** `lib/amdgpu/src/timing.rs`: the timing generator's eight registers for a progressive mode from 08 section
+  2.2 (it reproduces the GOP's 1080p60 registers exactly; 1080p50 differs from it in `OTG_H_TOTAL` alone).
+  `lib/amdgpu/src/modeset.rs`: `preflight` (the live registers must be as 08 section 3.7 says, nothing written),
+  `plan` (the register writes for a mode at the running pixel clock and size, with each old value), `stop` (plane
+  blanked, output data source off, memory configuration cleared, generator and timing generator off, wait for idle),
+  `apply`, `start` (data source back, timing generator then generator on, wait for busy, plane unblanked); seven host
+  tests against a model of the firmware's registers. `hdmi::avi_for` builds the AVI info frame for a code (checksums
+  checked against the specification's table for nine codes); `edid::mode_for_vic` is the shared CTA timing lookup.
+  `dev.drmn.1.mode=<code>` runs it on the X870E: the preflight, the plan logged, then the change.
+- **On the X870E (`mode=31`):** the plan was three writes: `OTG_H_TOTAL` `0x897` -> `0xa4f`, `OTG_VUPDATE_PARAM`
+  `0x01400226` -> `0x01400294` (offset 660), `HUBPREQ_DST_DIMENSIONS` `0x1e641` -> `0x24781` (the GOP's value scaled
+  by 2640/2200, the specification's choice). The generator stopped, restarted, the AVI frame for code 31 was written
+  with no packet-memory conflict, the refresh measured **50.332 Hz** (151 frames in 3 s), and the frame-start interrupts
+  ran on at 50 a second with no overflow after `rearm_frame_start`. **The user saw a normal picture.**
+- **Process note.** This ran earlier than intended: the command that was meant to run only the harmless
+  `mode=16` check also carried `mode=31`. The user had asked that the display be checked with them first. It was
+  disclosed at once and the user confirmed the picture was normal.
+- **Not done:** modes with a different pixel clock (the clock change goes through the display firmware's
+  set-pixel-clock command with the transmitter off and on, 08 section 3.7.5), a different active size (the viewport,
+  scaler, output buffer and ODM width registers, which have not been read), and the KMS card still offering only the
+  firmware's mode.
+
