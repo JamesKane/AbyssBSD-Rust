@@ -1,0 +1,2 @@
+linux-firmware-20261019-1.fc45.noarch
+amd-gpu-firmware-20261019-1.fc45.noarch

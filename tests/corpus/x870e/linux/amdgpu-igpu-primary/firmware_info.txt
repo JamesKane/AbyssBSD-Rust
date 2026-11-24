@@ -1,0 +1,33 @@
+VCE feature version: 0, firmware version: 0x00000000
+UVD feature version: 0, firmware version: 0x00000000
+MC feature version: 0, firmware version: 0x00000000
+ME feature version: 38, firmware version: 0x0000000e
+PFP feature version: 38, firmware version: 0x00000012
+CE feature version: 38, firmware version: 0x00000003
+RLC feature version: 1, firmware version: 0x0000001f
+RLC SRLC feature version: 1, firmware version: 0x00000001
+RLC SRLG feature version: 1, firmware version: 0x00000001
+RLC SRLS feature version: 1, firmware version: 0x00000001
+RLCP feature version: 0, firmware version: 0x00000000
+RLCV feature version: 0, firmware version: 0x00000000
+MEC feature version: 38, firmware version: 0x0000001c
+MEC2 feature version: 38, firmware version: 0x0000001c
+IMU feature version: 0, firmware version: 0x00000000
+SOS feature version: 0, firmware version: 0x00000000
+ASD feature version: 553648409, firmware version: 0x21000119
+TA XGMI feature version: 0x00000000, firmware version: 0x00000000
+TA RAS feature version: 0x00000000, firmware version: 0x00000000
+TA HDCP feature version: 0x00000000, firmware version: 0x17000053
+TA DTM feature version: 0x00000000, firmware version: 0x1200001f
+TA RAP feature version: 0x00000000, firmware version: 0x00000000
+TA SECUREDISPLAY feature version: 0x00000000, firmware version: 0x00000000
+SMC feature version: 0, program: 0, firmware version: 0x00544fe1 (84.79.225)
+SDMA0 feature version: 52, firmware version: 0x00000009
+VCN feature version: 0, firmware version: 0x04121022
+DMCU feature version: 0, firmware version: 0x00000000
+DMCUB feature version: 0, firmware version: 0x05003700
+TOC feature version: 0, firmware version: 0x00000007
+MES_KIQ feature version: 0, firmware version: 0x00000000
+MES feature version: 0, firmware version: 0x00000000
+VPE feature version: 0, firmware version: 0x00000000
+VBIOS version: 102-RAPHAEL-008

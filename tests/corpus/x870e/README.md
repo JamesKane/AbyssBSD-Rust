@@ -39,3 +39,11 @@ debugfs `amdgpu_discovery` table, the firmware versions Linux reports, the gca c
 SHA-256 sums of the firmware files. The video BIOS (`vbios.bin`, and the `VFCT` ACPI table that carries it) is
 **not** in the repository (AMD's image is not ours to redistribute); a copy is kept outside it, in
 `../AbyssBSD-Rust-notes/amdgpu-capture-2026-11-24/`, for the specification's author.
+
+## `linux/amdgpu-igpu-primary/` (2026-11-24)
+
+The same capture as `linux/amdgpu/`, with the monitor on the motherboard's HDMI port and the firmware setup's
+*Initial Display Output* set to the integrated graphics (and *Integrated Graphics* forced on), so the Radeon 610M
+is the boot VGA device (`boot_vga` 1; the RTX 4070 has none). It adds `amdgpu_dm_dtn_log` (the display core's
+state with the firmware's mode still on screen: 1920x1080 on one HUBP) and the display capability files.
+The video BIOS is the same as in the first capture and is not in the repository.

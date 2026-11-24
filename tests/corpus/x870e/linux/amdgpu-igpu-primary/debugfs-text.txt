@@ -1,0 +1,658 @@
+== amdgpu_pm_info
+GFX Clocks and Power:
+	3300 MHz (MCLK)
+	600 MHz (SCLK)
+	0 MHz (PSTATE_SCLK)
+	0 MHz (PSTATE_MCLK)
+	1365 mV (VDDGFX)
+	1290 mV (VDDNB)
+	19.67 W (current SoC including CPU)
+
+GPU Temperature: 44 C
+GPU Load: 0 %
+VCN Load: 0 %
+
+SMC Feature Mask: 0x0002ff33b15fefff
+VCN: Powered down
+
+Clock Gating Flags Mask: 0xb8390f0d
+	Graphics Fine Grain Clock Gating: On
+	Graphics Medium Grain Clock Gating: On
+	Graphics Medium Grain memory Light Sleep: Off
+	Graphics Coarse Grain Clock Gating: On
+	Graphics Coarse Grain memory Light Sleep: On
+	Graphics Coarse Grain Tree Shader Clock Gating: Off
+	Graphics Coarse Grain Tree Shader Light Sleep: Off
+	Graphics Command Processor Light Sleep: Off
+	Graphics Run List Controller Light Sleep: Off
+	Graphics 3D Coarse Grain Clock Gating: On
+	Graphics 3D Coarse Grain memory Light Sleep: On
+	Memory Controller Light Sleep: On
+	Memory Controller Medium Grain Clock Gating: On
+	System Direct Memory Access Light Sleep: On
+	System Direct Memory Access Medium Grain Clock Gating: On
+	Bus Interface Medium Grain Clock Gating: On
+	Bus Interface Light Sleep: Off
+	Unified Video Decoder Medium Grain Clock Gating: Off
+	Video Compression Engine Medium Grain Clock Gating: Off
+	Host Data Path Light Sleep: Off
+	Host Data Path Medium Grain Clock Gating: On
+	Digital Right Management Medium Grain Clock Gating: Off
+	Digital Right Management Light Sleep: Off
+	Rom Medium Grain Clock Gating: Off
+	Data Fabric Medium Grain Clock Gating: Off
+	VCN Medium Grain Clock Gating: Off
+	Host Data Path Deep Sleep: Off
+	Host Data Path Shutdown: Off
+	Interrupt Handler Clock Gating: On
+	JPEG Medium Grain Clock Gating: Off
+	Repeater Fine Grain Clock Gating: Off
+	Perfmon Clock Gating: Off
+	Address Translation Hub Medium Grain Clock Gating: On
+	Address Translation Hub Light Sleep: On
+
+== amdgpu_vm_info
+pid:0	Process: ----------
+	Kernel PT/PDs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+		0x00000000:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000001:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000002:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000003:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000004:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+	Per VM BOs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+	Individual BOs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+		0x00000000:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED
+		0x00000001:      2097152 byte VRAM VISIBLE CPU_GTT_USWC VRAM_CLEARED
+		0x00000002:      2097152 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED
+		0x00000003:         4096 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED
+		0x00000004:      2097152 byte GTT pin count 1 CPU_ACCESS_REQUIRED VRAM_CONTIGUOUS
+pid:0	Process: ----------
+	Kernel PT/PDs:
+	Evicted BOs:
+	Moved BOs:
+		0x00000000:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000001:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+	Idle BOs:
+		0x00000000:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+	Per VM BOs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+	Individual BOs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+		0x00000000:      2097152 byte GTT pin count 1 CPU_ACCESS_REQUIRED VRAM_CONTIGUOUS
+pid:0	Process: ----------
+	Kernel PT/PDs:
+	Evicted BOs:
+	Moved BOs:
+		0x00000000:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000001:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+	Idle BOs:
+		0x00000000:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+	Per VM BOs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+	Individual BOs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+		0x00000000:      2097152 byte GTT pin count 1 CPU_ACCESS_REQUIRED VRAM_CONTIGUOUS
+pid:6116	Process:Xwayland ----------
+	Kernel PT/PDs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+		0x00000000:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000001:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000002:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000003:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000004:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000005:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000006:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+	Per VM BOs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+	Individual BOs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+		0x00000000:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:397:3   signalled
+
+		0x00000001:        69632 byte VRAM VISIBLE exported as ino:159 NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:397:3   signalled
+
+		0x00000002:      2097152 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED	write fence:397:3   signalled
+
+		0x00000003:      2097152 byte GTT CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:397:3   signalled
+
+		0x00000004:      2097152 byte GTT CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:397:3   signalled
+
+		0x00000005:      2097152 byte VRAM VISIBLE CPU_GTT_USWC VRAM_CLEARED	write fence:397:3   signalled
+
+		0x00000006:      2097152 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED	write fence:397:3   signalled
+
+		0x00000007:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:397:3   signalled
+
+		0x00000008:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:400:2   signalled
+
+		0x00000009:        69632 byte VRAM VISIBLE exported as ino:158 NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:397:2   signalled
+
+		0x0000000a:         4096 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED
+		0x0000000b:         4096 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED	write fence:400:2   signalled
+
+		0x0000000c:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:397:1   signalled
+
+		0x0000000d:         4096 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED	write fence:397:3   signalled
+
+		0x0000000e:      2097152 byte GTT pin count 1 CPU_ACCESS_REQUIRED VRAM_CONTIGUOUS
+pid:0	Process: ----------
+	Kernel PT/PDs:
+	Evicted BOs:
+	Moved BOs:
+		0x00000000:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000001:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+	Idle BOs:
+		0x00000000:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+	Per VM BOs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+	Individual BOs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+		0x00000000:      2097152 byte GTT pin count 1 CPU_ACCESS_REQUIRED VRAM_CONTIGUOUS
+pid:4837	Process:gnome-shell ----------
+	Kernel PT/PDs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+		0x00000000:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000001:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000002:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000003:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000004:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000005:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000006:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000007:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000008:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000009:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x0000000a:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x0000000b:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x0000000c:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x0000000d:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x0000000e:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x0000000f:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000010:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000011:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000012:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000013:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000014:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000015:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000016:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000017:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+	Per VM BOs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+	Individual BOs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+		0x00000000:      2097152 byte GTT CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+	write fence:381:461   signalled
+
+		0x00000001:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x00000002:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x00000003:      1052672 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x00000004:     11632640 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x00000005:      1605632 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x00000006:      8847360 byte VRAM VISIBLE pin count 1 exported as ino:82 NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED VRAM_CONTIGUOUS	write fence:381:559   signalled
+	kernel fence:161:24   signalled
+
+		0x00000007:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+	write fence:381:67   signalled
+
+		0x00000008:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x00000009:     12730368 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+	write fence:341:24   signalled
+
+		0x0000000a:      2310144 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x0000000b:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x0000000c:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x0000000d:      2097152 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED	write fence:381:559   signalled
+
+		0x0000000e:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x0000000f:      2097152 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED	write fence:381:559   signalled
+
+		0x00000010:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x00000011:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x00000012:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x00000013:      2097152 byte GTT CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x00000014:      2097152 byte VRAM VISIBLE CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+	write fence:381:461   signalled
+
+		0x00000015:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x00000016:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:559   signalled
+
+		0x00000017:      2097152 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED	write fence:381:559   signalled
+	write fence:381:461   signalled
+
+		0x00000018:      8847360 byte VRAM VISIBLE exported as ino:84 NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED VRAM_CONTIGUOUS	write fence:381:558   signalled
+
+		0x00000019:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:557   signalled
+
+		0x0000001a:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:549   signalled
+
+		0x0000001b:      2097152 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED	write fence:381:548   signalled
+
+		0x0000001c:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:547   signalled
+	write fence:381:461   signalled
+
+		0x0000001d:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:547   signalled
+
+		0x0000001e:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:547   signalled
+
+		0x0000001f:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:534   signalled
+
+		0x00000020:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:534   signalled
+
+		0x00000021:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:534   signalled
+
+		0x00000022:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:534   signalled
+	write fence:381:461   signalled
+
+		0x00000023:      2097152 byte GTT CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:534   signalled
+
+		0x00000024:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:534   signalled
+
+		0x00000025:       262144 byte VRAM VISIBLE pin count 1 CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED VRAM_CONTIGUOUS
+		0x00000026:      2097152 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED	write fence:381:528   signalled
+
+		0x00000027:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:475   signalled
+
+		0x00000028:      1064960 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:475   signalled
+
+		0x00000029:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:475   signalled
+	write fence:381:392   signalled
+
+		0x0000002a:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:475   signalled
+
+		0x0000002b:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:474   signalled
+	write fence:341:33   signalled
+
+		0x0000002c:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:474   signalled
+
+		0x0000002d:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:474   signalled
+
+		0x0000002e:      8847360 byte VRAM VISIBLE exported as ino:83 NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED VRAM_CONTIGUOUS	write fence:381:473   signalled
+
+		0x0000002f:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:392   signalled
+
+		0x00000030:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:103   signalled
+	write fence:341:53   signalled
+	write fence:381:65   signalled
+
+		0x00000031:      1064960 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:102   signalled
+
+		0x00000032:      2097152 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:102   signalled
+
+		0x00000033:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:102   signalled
+
+		0x00000034:      4194304 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED	write fence:381:92   signalled
+
+		0x00000035:      2097152 byte VRAM VISIBLE CPU_ACCESS_REQUIRED CPU_GTT_USWC VRAM_CLEARED	write fence:381:92   signalled
+
+		0x00000036:      4194304 byte GTT CPU_GTT_USWC VRAM_CLEARED
+		0x00000037:      8896512 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:7   signalled
+	write fence:341:21   signalled
+
+		0x00000038:     89882624 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:7   signalled
+	write fence:341:23   signalled
+
+		0x00000039:     11632640 byte VRAM VISIBLE NO_CPU_ACCESS CPU_GTT_USWC VRAM_CLEARED	write fence:381:7   signalled
+	write fence:341:22   signalled
+
+		0x0000003a:         4096 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED	write fence:341:198   signalled
+
+		0x0000003b:         4096 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED
+		0x0000003c:         4096 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED	write fence:381:559   signalled
+
+		0x0000003d:         4096 byte GTT CPU_ACCESS_REQUIRED VRAM_CLEARED
+		0x0000003e:      2097152 byte GTT pin count 1 CPU_ACCESS_REQUIRED VRAM_CONTIGUOUS
+== amdgpu_vram_mm
+  use_type: 1
+  use_tt: 0
+  size: 536870912
+  usage: 279916544
+  vis usage:279916544
+default_page_size: 4KiB
+chunk_size: 4KiB, total: 512MiB, free: 245MiB, clear_free: 150MiB
+order-17 free:        0 MiB, used:        0 MiB, free_blocks: 0, used_blocks: 0
+order-16 free:        0 MiB, used:        0 MiB, free_blocks: 0, used_blocks: 0
+order-15 free:        0 MiB, used:        0 MiB, free_blocks: 0, used_blocks: 0
+order-14 free:      128 MiB, used:       64 MiB, free_blocks: 2, used_blocks: 1
+order-13 free:        0 MiB, used:        0 MiB, free_blocks: 0, used_blocks: 0
+order-12 free:        0 MiB, used:       16 MiB, free_blocks: 0, used_blocks: 1
+order-11 free:       32 MiB, used:       64 MiB, free_blocks: 4, used_blocks: 8
+order-10 free:       16 MiB, used:       12 MiB, free_blocks: 4, used_blocks: 3
+order- 9 free:       22 MiB, used:       96 MiB, free_blocks: 11, used_blocks: 48
+order- 8 free:       22 MiB, used:        9 MiB, free_blocks: 22, used_blocks: 9
+order- 7 free:    13312 KiB, used:     2048 KiB, free_blocks: 26, used_blocks: 4
+order- 6 free:     5888 KiB, used:     1536 KiB, free_blocks: 23, used_blocks: 6
+order- 5 free:     3200 KiB, used:     1152 KiB, free_blocks: 25, used_blocks: 9
+order- 4 free:     1856 KiB, used:      704 KiB, free_blocks: 29, used_blocks: 11
+order- 3 free:      960 KiB, used:      224 KiB, free_blocks: 30, used_blocks: 7
+order- 2 free:      272 KiB, used:      112 KiB, free_blocks: 17, used_blocks: 7
+order- 1 free:      104 KiB, used:        8 KiB, free_blocks: 13, used_blocks: 1
+order- 0 free:       60 KiB, used:      308 KiB, free_blocks: 15, used_blocks: 77
+reserved:
+== amdgpu_gtt_mm
+  use_type: 1
+  use_tt: 1
+  size: 50143424512
+  usage: 48386048
+0x0000000000000000-0x0000000000000001: 1: used
+0x0000000000000001-0x0000000000000009: 8: used
+0x0000000000000009-0x0000000000000209: 512: used
+0x0000000000000209-0x0000000000000249: 64: used
+0x0000000000000249-0x000000000000024d: 4: used
+0x000000000000024d-0x000000000000024f: 2: used
+0x000000000000024f-0x0000000000000251: 2: used
+0x0000000000000251-0x0000000000000253: 2: used
+0x0000000000000253-0x0000000000000255: 2: used
+0x0000000000000255-0x0000000000000257: 2: used
+0x0000000000000257-0x0000000000000259: 2: used
+0x0000000000000259-0x000000000000025b: 2: used
+0x000000000000025b-0x000000000000025d: 2: used
+0x000000000000025d-0x000000000000025f: 2: used
+0x000000000000025f-0x0000000000000261: 2: used
+0x0000000000000261-0x0000000000000262: 1: used
+0x0000000000000262-0x0000000000000264: 2: used
+0x0000000000000264-0x0000000000000265: 1: used
+0x0000000000000265-0x0000000000000266: 1: used
+0x0000000000000266-0x0000000000000267: 1: used
+0x0000000000000267-0x0000000000000268: 1: used
+0x0000000000000268-0x0000000000000288: 32: used
+0x0000000000000288-0x0000000000000289: 1: used
+0x0000000000000289-0x000000000000028d: 4: free
+0x000000000000028d-0x000000000000028e: 1: used
+0x000000000000028e-0x000000000000028f: 1: used
+0x000000000000028f-0x0000000000000290: 1: used
+0x0000000000000290-0x0000000000000291: 1: used
+0x0000000000000291-0x0000000000000300: 111: free
+0x0000000000000300-0x0000000000000400: 256: used
+0x0000000000000400-0x0000000000000500: 256: used
+0x0000000000000500-0x0000000000000600: 256: used
+0x0000000000000600-0x0000000000000680: 128: used
+0x0000000000000680-0x00000000000008ca: 586: used
+0x00000000000008ca-0x0000000000000cca: 1024: used
+0x0000000000000cca-0x00000000000014ca: 2048: used
+0x00000000000014ca-0x0000000000001894: 970: used
+0x0000000000001894-0x0000000000040000: 255852: free
+total: 262144, used 6177 free 255967
+== amdgpu_fence_info
+--- ring 0 (gfx_0.0.0) ---
+Last signaled fence          0x00000100
+Last emitted                 0x00000100
+Last signaled trailing fence 0x00000000
+Last emitted                 0x00000000
+Last preempted               0x00000000
+Last reset                   0x00000000
+Last both                    0x00000000
+--- ring 1 (gfx_0.1.0) ---
+Last signaled fence          0x000002d0
+Last emitted                 0x000002d0
+Last signaled trailing fence 0x00000000
+Last emitted                 0x00000000
+Last preempted               0x00000000
+Last reset                   0x00000000
+Last both                    0x00000000
+--- ring 2 (comp_1.0.0) ---
+Last signaled fence          0x00000001
+Last emitted                 0x00000001
+--- ring 3 (comp_1.1.0) ---
+Last signaled fence          0x000000b8
+Last emitted                 0x000000b8
+--- ring 4 (comp_1.2.0) ---
+Last signaled fence          0x0000006a
+Last emitted                 0x0000006a
+--- ring 5 (comp_1.3.0) ---
+Last signaled fence          0x00000006
+Last emitted                 0x00000006
+--- ring 6 (comp_1.0.1) ---
+Last signaled fence          0x0000001d
+Last emitted                 0x0000001d
+--- ring 7 (comp_1.1.1) ---
+Last signaled fence          0x0000001a
+Last emitted                 0x0000001a
+--- ring 8 (comp_1.2.1) ---
+Last signaled fence          0x00000017
+Last emitted                 0x00000017
+--- ring 9 (comp_1.3.1) ---
+Last signaled fence          0x00000001
+Last emitted                 0x00000001
+--- ring 10 (kiq_0.2.1.0) ---
+Last signaled fence          0x00000050
+Last emitted                 0x00000050
+--- ring 11 (sdma0) ---
+Last signaled fence          0x000006e9
+Last emitted                 0x000006e9
+Last signaled trailing fence 0x00000000
+Last emitted                 0x00000000
+--- ring 12 (vcn_dec_0) ---
+Last signaled fence          0x00000004
+Last emitted                 0x00000004
+--- ring 13 (vcn_enc_0.0) ---
+Last signaled fence          0x00000002
+Last emitted                 0x00000002
+--- ring 14 (vcn_enc_0.1) ---
+Last signaled fence          0x00000002
+Last emitted                 0x00000002
+--- ring 15 (jpeg_dec) ---
+Last signaled fence          0x00000001
+Last emitted                 0x00000001
+== amdgpu_dm_dtn_log
+[dtn begin]
+HUBBUB WM:      data_urgent  pte_meta_urgent         sr_enter          sr_exit  dram_clk_change
+WM_Set[0]:            4.791            0.000           16.208           13.208          133.791
+WM_Set[1]:            4.791            0.000           16.208           13.208          133.791
+WM_Set[2]:            4.791            0.000           16.208           13.208          133.791
+WM_Set[3]:            4.791            0.000           16.208           13.208          133.791
+
+HUBP:  format  addr_hi  width  height  rot  mir  sw_mode  dcc_en  blank_en  clock_en  ttu_dis  underflow   min_ttu_vblank       qos_low_wm      qos_high_wm
+[ 0]:      ah      f4h   1920    1080   0h   0h      1bh       0         0         1        0         0h          506.416            0.000           59.250
+[ 1]:      0h       0h      0       0   0h   0h       0h       0         0         0        0         0h            0.000            0.000            0.000
+[ 2]:      0h       0h      0       0   0h   0h       0h       0         0         0        0         0h            0.000            0.000            0.000
+[ 3]:      0h       0h      0       0   0h   0h       0h       0         0         0        0         0h            0.000            0.000            0.000
+
+=======HUBP FL======
+inst 	        0h
+Enabled  	        0h
+Done  	        0h
+adr_mode  	        0h
+width  	        0h
+mpc_width  	        0h
+tmz 	        0h
+xbar_sel_R 	        0h
+xbar_sel_G 	        0h
+xbar_sel_B 	        0h
+adr_hi  	        0h
+adr_low 	        0h
+REFCYC 	        0h
+Bias 	        0h
+Scale 	        0h
+Mode 	        0h
+Format 	        0h
+prefetch 	       25h
+inst 	        1h
+Enabled  	        0h
+Done  	        0h
+adr_mode  	        0h
+width  	        0h
+mpc_width  	        0h
+tmz 	        0h
+xbar_sel_R 	        0h
+xbar_sel_G 	        0h
+xbar_sel_B 	        0h
+adr_hi  	        0h
+adr_low 	        0h
+REFCYC 	        0h
+Bias 	        0h
+Scale 	        0h
+Mode 	        0h
+Format 	        0h
+prefetch 	        0h
+inst 	        2h
+Enabled  	        0h
+Done  	        0h
+adr_mode  	        0h
+width  	        0h
+mpc_width  	        0h
+tmz 	        0h
+xbar_sel_R 	        0h
+xbar_sel_G 	        0h
+xbar_sel_B 	        0h
+adr_hi  	        0h
+adr_low 	        0h
+REFCYC 	        0h
+Bias 	        0h
+Scale 	        0h
+Mode 	        0h
+Format 	        0h
+prefetch 	        0h
+inst 	        3h
+Enabled  	        0h
+Done  	        0h
+adr_mode  	        0h
+width  	        0h
+mpc_width  	        0h
+tmz 	        0h
+xbar_sel_R 	        0h
+xbar_sel_G 	        0h
+xbar_sel_B 	        0h
+adr_hi  	        0h
+adr_low 	        0h
+REFCYC 	        0h
+Bias 	        0h
+Scale 	        0h
+Mode 	        0h
+Format 	        0h
+prefetch 	        0h
+
+=========RQ========
+HUBP:  drq_exp_m  prq_exp_m  mrq_exp_m  crq_exp_m  plane1_ba  L:chunk_s  min_chu_s  meta_ch_s  min_m_c_s  dpte_gr_s  mpte_gr_s  swath_hei  pte_row_h  C:chunk_s  min_chu_s  meta_ch_s  min_m_c_s  dpte_gr_s  mpte_gr_s  swath_hei  pte_row_h
+[ 0]:         2h         1h         1h         1h         0h         3h         3h         1h         3h         3h         0h         3h         4h         0h         0h         0h         0h         0h         0h         0h         0h
+[ 1]:         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h
+[ 2]:         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h
+[ 3]:         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h
+========DLG========
+HUBP:  rc_hbe     dlg_vbe    min_d_y_n  rc_per_ht  rc_x_a_s   dst_y_a_s  dst_y_pf   dst_y_vvb  dst_y_rvb  dst_y_vfl  dst_y_rfl  rf_pix_fq  vratio_pf  vrat_pf_c  rc_pg_vbl  rc_pg_vbc  rc_mc_vbl  rc_mc_vbc  rc_pg_fll  rc_pg_flc  rc_mc_fll  rc_mc_flc  pr_nom_l   pr_nom_c   rc_pg_nl   rc_pg_nc   mr_nom_l   mr_nom_c   rc_mc_nl   rc_mc_nc   rc_ld_pl   rc_ld_pc   rc_ld_l    rc_ld_c    cha_cur0   ofst_cur1  cha_cur1   vr_af_vc0  ddrq_limt  x_rt_dlay  x_rp_dlay  x_rr_sfl  rc_td_grp
+[ 0]:        1fh        29h      1184h     1638eh        21h         0h        25h         3h         9h         0h         0h     14afdh    1e0000h     80000h        c8h         0h       190h       190h         0h         0h         0h         0h       200h         0h      2c71h         0h       100h         0h      2c71h         0h        9ah         0h       136h         0h         0h         0h         0h         0h         0h         0h         0h         0h 0h
+[ 1]:         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h 0h
+[ 2]:         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h 0h
+[ 3]:         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h 0h
+========TTU========
+HUBP:  qos_ll_wm  qos_lh_wm  mn_ttu_vb  qos_l_flp  rc_rd_p_l  rc_rd_l    rc_rd_p_c  rc_rd_c    rc_rd_c0   rc_rd_pc0  rc_rd_c1   rc_rd_pc1  qos_lf_l   qos_rds_l  qos_lf_c   qos_rds_c  qos_lf_c0  qos_rds_c0 qos_lf_c1  qos_rds_c1
+[ 0]:         0h       58eh      2f7ah         eh       291h       52bh         0h         0h         0h         0h         0h         0h         8h         0h         8h         0h         0h         0h         0h         0h
+[ 1]:         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h
+[ 2]:         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h
+[ 3]:         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h         0h
+
+DPP:  DGAM ROM  DGAM ROM type  DGAM LUT  SHAPER mode  3DLUT mode  3DLUT bit depth  3DLUT size  RGAM mode  GAMUT adjust  C11        C12        C13        C14        C21        C22        C23        C24        C31        C32        C33        C34        
+[ 0]:        0           sRGB    Bypass       Bypass      Bypass           12-bit       9x9x9     Bypass        Bypass  0000000000 0000000000 0000000000 0000000000 0000000000 0000000000 0000000000 0000000000 0000000000 0000000000 0000000000 0000000000
+
+DPP Color Caps: input_lut_shared:0  icsc:1  dgam_ram:0  dgam_rom: srgb:1,bt2020:1,gamma2_2:1,pq:1,hlg:1  post_csc:1  gamcor:1  dgam_rom_for_yuv:0  3d_lut:1  upsp_pre_scaler:0  blnd_lut:1  oscs:0
+
+MPCC:  OPP  DPP  MPCCBOT  MODE  ALPHA_MODE  PREMULT  OVERLAP_ONLY  IDLE  SHAPER mode  3DLUT mode  3DLUT bit-depth  3DLUT size  OGAM mode  OGAM LUT  GAMUT adjust  C11        C12        C13        C14        C21        C22        C23        C24        C31        C32        C33        C34        
+[ 0]:   0h   0h       fh     2           2        0             0     0       Bypass      Bypass           10-bit       9x9x9     Bypass         A  Bypass        0000000000 0000000000 0000000000 0000000000 0000000000 0000000000 0000000000 0000000000 0000000000 0000000000 0000000000 0000000000
+
+MPC Color Caps: gamut_remap:1, 3dlut:2, ogam_ram:1, ocsc:1
+
+OTG:  v_bs  v_be  v_ss  v_se  vpol  vmax  vmin  vmax_sel  vmin_sel  h_bs  h_be  h_ss  h_se  hpol  htot  vtot  underflow blank_en
+[0]:  1121    41     0     5     0     0     0         0         0  2112   192     0    44     0  2199  1124          0        0
+
+DSC: CLOCK_EN  SLICE_WIDTH  Bytes_pp
+[0]: 0         0            0         
+
+[1]: 0         0            0         
+
+[2]: 0         0            0         
+
+
+S_ENC: DSC_MODE  SEC_GSP7_LINE_NUM  VBID6_LINE_REFERENCE  VBID6_LINE_NUM  SEC_GSP7_ENABLE  SEC_STREAM_ENABLE
+[0  ]: 0         0                  0                     0               0                0                
+
+[1  ]: 0         0                  0                     0               0                0                
+
+[2  ]: 0         0                  0                     0               0                0                
+
+[3  ]: 0         0                  0                     0               0                0                
+
+[4  ]: 0         0                  0                     0               0                0                
+
+
+L_ENC: DPHY_FEC_EN  DPHY_FEC_READY_SHADOW  DPHY_FEC_ACTIVE_STATUS  DP_LINK_TRAINING_COMPLETE
+[0  ]: 0            0                      0                      0                        
+
+[1  ]: 0            0                      0                      0                        
+
+[2  ]: 0            0                      0                      0                        
+
+[3  ]: 0            0                      0                      0                        
+
+
+
+CALCULATED Clocks: dcfclk_khz:1000000  dcfclk_deep_sleep_khz:10673  dispclk_khz:152380
+dppclk_khz:149411  max_supported_dppclk_khz:1200000  fclk_khz:2000000  socclk_khz:1200000
+
+MPC_CRC_RESULT_GB:0 MPC_CRC_RESULT_C:0 MPC_CRC_RESULT_AR:0
+DPP_TOP0_DPP_CRC_VAL_B_A:0 DPP_TOP0_DPP_CRC_VAL_R_G:0
+
+DP HPO S_ENC:  Enabled  OTG   Format   Depth   Vid   SDP   Compressed  Link
+[0]:                 0    0    4:4:4       6     0     0            0     0
+[1]:                 0    0    4:4:4       6     0     0            0     0
+[2]:                 0    0    4:4:4       6     0     0            0     0
+[3]:                 0    0    4:4:4       6     0     0            0     0
+
+DP HPO L_ENC:  Enabled  Mode   Lanes   Stream  Slots   VC Rate X    VC Rate Y
+[0]:                 0    TPS1     0        0      0     0     0
+
+[1]:                 0    TPS1     0        0      0     0     0
+
+
+[dtn end]
+== amdgpu_dm_capabilities
+mall supported: no, enabled: no
+sub-viewport supported: no, enabled: no
+== amdgpu_dm_dmub_fw_state
+cat: /sys/kernel/debug/dri/1/amdgpu_dm_dmub_fw_state: Operation not permitted
+== amdgpu_sensors
+cat: /sys/kernel/debug/dri/1/amdgpu_sensors: Invalid argument
