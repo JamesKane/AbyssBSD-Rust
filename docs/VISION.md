@@ -23,8 +23,13 @@ system to rule out whole classes of kernel bugs.
 1. **Binary compatibility** with unmodified FreeBSD 64-bit native userland (see
    [COMPATIBILITY.md](COMPATIBILITY.md)) on AMD64 and ARM64.
 2. **Boot on UEFI + ACPI only**, with our own Rust UEFI loader.
-3. **Modern hardware baseline**: PCIe (ECAM), MSI/MSI-X, NVMe, AHCI, virtio (modern), xHCI,
-   x2APIC/IOAPIC, GICv3/ITS, generic timers, UEFI GOP framebuffer.
+3. **Modern hardware baseline and support horizon**: PCIe (ECAM), MSI/MSI-X, NVMe, AHCI, virtio
+   (modern), xHCI, x2APIC/IOAPIC, GICv3/ITS, generic timers, UEFI GOP framebuffer. AbyssBSD targets
+   UEFI + ACPI hardware purchasable new within the last 10 years (e.g., the Mac Pro 2013, sold new
+   until 2019) and plans to keep hardware maintained for **10–15 years** from when it lands as
+   Supported on the hardware list—potentially longer depending on how long the underlying components
+   remain actively in the market—assuming maintainers have access to that hardware
+   ([HARDWARE.md](HARDWARE.md), [ADR-0023](adr/0023-hardware-scope-consumer-decade.md)).
 4. **File systems**: UFS2 (read/write, then soft updates + journaling), FAT32 (ESP and removable
    media), tmpfs, devfs.
 5. **Networking** good enough to run `sshd`, `dhclient`, and `pkg` over IPv4 and IPv6.

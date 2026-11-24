@@ -15,8 +15,14 @@ AbyssBSD supports machines that provide:
 Machines that provide only a device tree (most hobby ARM SBCs without SystemReady firmware) are
 out of scope for Day 1.
 
-The scope is the machines mainstream consumers could buy in the last decade that boot UEFI with
-ACPI, wherever we have one to test on ([ADR-0023](adr/0023-hardware-scope-consumer-decade.md)).
+**Scope and support lifecycle.** AbyssBSD targets UEFI + ACPI machines that were purchasable new
+within the last 10 years—even if the model launched earlier (e.g., the Mac Pro 2013, sold new
+through 2019)—assuming maintainers have access to that hardware
+([ADR-0023](adr/0023-hardware-scope-consumer-decade.md)). Once hardware lands as **Supported** here,
+AbyssBSD plans to keep it maintained for **10–15 years** from that point—potentially longer
+depending on how long the underlying components remain actively in the market—again assuming
+maintainers have access to that hardware.
+
 The AMD64 floor is what the loader and kernel use: EFI 1.10's boot and runtime services, GOP, and
 an ACPI 2.0 RSDP. Anything newer (the RNG protocol, SMBIOS 3) is optional and has a fallback. Out of
 scope until we have such a machine: 32-bit EFI on 64-bit CPUs, and T2 Macs.

@@ -29,7 +29,7 @@ Status values: **Proposed** (awaiting owner confirmation) · **Accepted** · **S
 | [0020](0020-platform-crates.md) | Platform knowledge in per-SoC crates behind one interface; the ACPI bus names no vendor | Accepted; refined by 0021 |
 | [0021](0021-driver-selection-and-modules.md) | Drivers selected per ISA at build time; large drivers as same-build loadable modules that import no kernel symbols | Accepted |
 | [0022](0022-smmuv3-in-p9.md) | The SMMUv3 in Phase 9, in FreeBSD's split: `smmu` units under `acpi0`, a framework and a third DMA backend, a domain per requester with strict invalidation, and a settle edge | Accepted |
-| [0023](0023-hardware-scope-consumer-decade.md) | Hardware scope is what consumers could buy in the last decade, where we have a machine; the AMD64 firmware floor is 64-bit EFI 1.10 | Proposed |
+| [0023](0023-hardware-scope-consumer-decade.md) | Hardware scope is what consumers could buy in the last decade, where we have a machine; the AMD64 firmware floor is 64-bit EFI 1.10 | Accepted |
 | [0024](0024-zones-as-exact-layout-classes.md) | Zones are exact-layout classes of the one heap, declared at build time; `Zone<T>` and `ZBox<T>` are not built | Accepted |
 | [0025](0025-graphics-abi-and-native-drivers.md) | Graphics: the Direct Rendering Manager interface as FreeBSD's ports see it, implemented natively, with no LinuxKPI | Accepted |
 | [0026](0026-desktop-scoria.md) | The desktop is Scoria, a Rust tiling Wayland desktop built in this workspace; ADR-0002 amended for C libraries in `desk/` | Accepted; amended 2026-11-23 |

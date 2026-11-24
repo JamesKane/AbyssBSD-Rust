@@ -1,7 +1,7 @@
 # ADR-0023: Hardware scope is what consumers could buy in the last decade, where we have a machine; the AMD64 firmware floor is 64-bit EFI 1.10
 
-- Status: Proposed
-- Date: 2026-11-10
+- Status: Accepted
+- Date: 2026-11-10 (accepted 2026-11-24)
 
 ## Context
 
@@ -36,11 +36,15 @@ on it decide what is powered and visible, including Thunderbolt. Its loader keep
 
 ## Decision
 
-1. **Scope.** AbyssBSD targets the machines mainstream consumers could buy in the ten years before
-   the current date, that boot UEFI with ACPI (ADR-0006 stands). A machine joins when we have one:
-   it gets a board profile in HARDWARE.md and is booted at milestone exits. Machines we do not have
-   stay Tier 2, best effort. A machine bought new within the decade counts even if its model came
-   out earlier (the Mac Pro 2013 was on sale until 2019).
+1. **Scope and maintenance.** AbyssBSD targets the machines mainstream consumers could buy new in
+   the ten years before the current date, that boot UEFI with ACPI (ADR-0006 stands). A machine
+   joins when a maintainer has access to one: it gets a board profile in HARDWARE.md and is booted
+   at milestone exits. Machines we do not have stay Tier 2, best effort. A machine bought new within
+   the decade counts even if its model came out earlier (the Mac Pro 2013 was on sale until 2019).
+   Once hardware lands as **Supported** in HARDWARE.md, AbyssBSD plans to keep it maintained for
+   **10–15 years** from that point, assuming maintainers still have access to that hardware; this
+   window may adjust upward depending on how long the underlying components remain actively in the
+   market.
 
 2. **AMD64 firmware floor: 64-bit EFI 1.10.** The loader and kernel require only what EFI 1.10
    provides, plus GOP for the console and an ACPI 2.0+ RSDP with an XSDT. Every newer service is
