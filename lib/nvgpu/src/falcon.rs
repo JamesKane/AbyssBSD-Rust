@@ -313,4 +313,4 @@ pub fn pad_to_block(mut bytes: Vec<u8>) -> Vec<u8> {
 
 #[cfg(test)]
 #[path = "falcon_tests.rs"]
-mod tests;
+pub(crate) mod tests;

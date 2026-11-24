@@ -25,6 +25,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod boot;
 pub mod chip;
 pub mod falcon;
 pub mod fuse;

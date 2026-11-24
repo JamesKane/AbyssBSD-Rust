@@ -237,6 +237,18 @@ pub fn layout(
     })
 }
 
+/// The firmware runtime security region for a VGA workspace at `vga_base`:
+/// 1 MiB ending at `vga_base` rounded down to 128 KiB. `None` if it would
+/// start below zero.
+#[must_use]
+pub const fn frts_region(vga_base: u64) -> Option<Region> {
+    let end = align_down(vga_base, 128 * KIB);
+    match end.checked_sub(MIB) {
+        Some(start) => Some(Region { start, end }),
+        None => None,
+    }
+}
+
 /// The system memory flush page's two register values on Ampere and Ada:
 /// `(high, low)`, written high first. `None` if `pa` does not fit the
 /// 47-bit DMA mask or is not 4 KiB aligned.
@@ -349,6 +361,17 @@ mod tests {
         assert_eq!(layout(0, 0, 0, 0, 0), Err(LayoutError));
         assert_eq!(layout(fb, fb, u64::MAX, 0, 0), Err(LayoutError));
         assert_eq!(layout(fb, fb, 0, u64::MAX, 0), Err(LayoutError));
+    }
+
+    #[test]
+    fn the_runtime_security_region() {
+        // The 4070's: workspace in the top megabyte of 12282 MiB.
+        let vga = 12282 * MIB - MIB;
+        let r = frts_region(vga).unwrap();
+        assert_eq!((r.start, r.end), (vga - MIB, vga));
+        assert_eq!(frts_region(vga + 0x1_0000).unwrap().end, vga);
+        assert_eq!(frts_region(MIB - 1), None);
+        assert_eq!(frts_region(0), None);
     }
 
     #[test]

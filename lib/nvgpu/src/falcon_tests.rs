@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Ev {
+pub(crate) enum Ev {
     Read(usize),
     Write(usize, u32),
     Delay(u32),
@@ -19,17 +19,17 @@ enum Ev {
 /// A GSP Falcon, as far as the sequences ask: it needs a few polls to
 /// scrub, shows idle DMA at once, and halts when started.
 #[derive(Default)]
-struct Model {
-    regs: RefCell<BTreeMap<usize, u32>>,
-    log: RefCell<Vec<Ev>>,
-    scrub_polls: RefCell<u32>,
-    started: RefCell<bool>,
+pub(crate) struct Model {
+    pub(crate) regs: RefCell<BTreeMap<usize, u32>>,
+    pub(crate) log: RefCell<Vec<Ev>>,
+    pub(crate) scrub_polls: RefCell<u32>,
+    pub(crate) started: RefCell<bool>,
     /// What `MAILBOX0` reads back after the halt.
-    status: u32,
+    pub(crate) status: u32,
     /// The core starts as the RISC-V one.
-    riscv_core: bool,
-    never_scrubs: bool,
-    never_halts: bool,
+    pub(crate) riscv_core: bool,
+    pub(crate) never_scrubs: bool,
+    pub(crate) never_halts: bool,
 }
 
 impl Registers for Model {
@@ -84,7 +84,7 @@ impl Registers for Model {
 }
 
 impl Model {
-    fn writes(&self) -> Vec<(usize, u32)> {
+    pub(crate) fn writes(&self) -> Vec<(usize, u32)> {
         self.log
             .borrow()
             .iter()
