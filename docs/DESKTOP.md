@@ -173,6 +173,8 @@ desk/
   ui/           scoria-ui: the satellites' toolkit (signed-distance-field primitives, text,
                 the widget host)
   bar/ launch/ notify/ lock/      the satellites
+  greetd/ greet/                  login: the root PAM daemon and the greeter (INSTALLER.md §6)
+  install/ installd/              the installer and its root service (INSTALLER.md §5)
   obs/          scoria-obs: OBS control over its WebSocket protocol
   ffi/<lib>/    one crate per C library, and inventory.txt
   shaders/      GLSL sources and their SPIR-V
@@ -246,6 +248,9 @@ Each satellite is an ordinary Wayland client with its own `VkDevice`. Satellites
 | Satellites | User | None yet; capability mode once `scoria-ui` loads nothing by path after start | Restarted with backoff, compositor state kept |
 | `scoria-lock` | User; PAM through a setuid helper | — | The session **stays locked** (§4.2 item 6) |
 | `xwayland-satellite`, providers | User | Limits from their profile | Restarted under the same policy |
+| `scoria-greetd` | root, from `rc(8)` | None (small: PAM, sessions, one socket) | `rc` restarts it; running sessions continue |
+| `scoria-greet`, greeter `scoriad` | `_scoriagreet` | Restricted session: no bus, no `exec` | `scoria-greetd` restarts them |
+| `scoria-installd` | root, live media only | None (small; validates every plan) | The install stops at the failed step and reports it |
 
 1. **`scoria-sup`** supervises `scoriad`, the satellites, `xwayland-satellite`, and widget data
    providers (§9.2), with `pdfork(2)` and a restart policy that keeps compositor state. It runs
@@ -299,6 +304,13 @@ Each satellite is an ordinary Wayland client with its own `VkDevice`. Satellites
 8. **`scoria-dbus-bridge`** (opt-in, M-D.6) serves `org.freedesktop.Notifications`, the tray
    (StatusNotifierItem), portals, global shortcuts, and accessibility (AT-SPI) for GTK and Qt
    programs.
+9. **`scoria-greetd`** and **`scoria-greet`** are the login path: a root daemon that runs PAM
+   (with `pam_xdg`), opens sessions, and logs the owner in automatically after the loader unlocked
+   an encrypted disk, and an unprivileged greeter in a restricted `scoriad`. They also keep the
+   owner's password and the disk passphrase one ([INSTALLER.md](INSTALLER.md) §6, §7).
+10. **`scoria-install`** and **`scoria-installd`** install AbyssBSD from the live medium: an
+    unprivileged `scoria-ui` interface that builds a plan, and a root service that validates and
+    runs it ([INSTALLER.md](INSTALLER.md) §5).
 
 ## 5. Configuration
 
@@ -879,10 +891,9 @@ Where FreeBSD has no driver (`panthor`), results are recorded and do not gate, u
    AbyssBSD's media also carry it as a distribution set, and does M-U change that?
 6. **A ten-foot mode.** Out of scope, since it conflicts with §8.2 rule 12. Revisit as a separate
    session type?
-7. **Login and the installer.** Scoria has no greeter: a console `login` (with `pam_xdg`) starts
-   `scoria-sup`. INSTALLER.md's installer and login window came from the monorepo desktop. Does
-   Scoria need a greeter, and does the monorepo's installer GUI run under it as an ordinary
-   Wayland client, or does INSTALLER.md need its own revision?
+7. ~~Login and the installer~~: decided 2026-11-23. Scoria has its own greeter (`scoria-greetd`,
+   `scoria-greet`) and installer (`scoria-install`, `scoria-installd`), and the medium is built by
+   `cargo xtask live-image` ([INSTALLER.md](INSTALLER.md) §4–§6, §9).
 8. **Edge hits for other layer-shell clients.** Clamped events at a client's own edge go beyond the
    protocol's stated meaning. Keep it opt-in per rule, or propose a layer-shell extension upstream?
 9. **OBS.** OBS's plugin interface is GPL-2.0, so no plugin is written here (§4.2 item 7). For
@@ -926,7 +937,7 @@ The headless foundation needs only P6 and starts before M-G finishes.
 | **M-D.2** | First light: the mode-setting backend on `gop-kms` (software path), libseat, libinput, `vt` switching, the cursor plane, the input-routing floors (§8.2 rules 1–5), the game-input and frame-timing protocols, layer shell, the `xwayland-satellite` spike | M-G.1, P8, `mac_priority` | A tiled session used with a real keyboard and mouse in QEMU and on the X870E and Orange Pi 6 Plus framebuffers |
 | **M-D.3** | Accelerated in QEMU, and the session: dma-buf import, explicit synchronization, direct scanout; `scoria-sup`, the bus, `scoriactl`, the worker and configuration reload, rules and profiles, `try`; `xwayland-satellite`; `scoria-ui`, the bar, launcher and palette, notifier, locker; the overview; capture (`ext-image-copy-capture`, the two passes, the privacy layer, the `stream` profile) | M-G.2, M-G.3, P7, AUDIO A1 | A complete session on Venus with explicit sync: `foot`, Firefox, and an X11 program through `xwayland-satellite`, configured live, with the floors' tests passing; a capture client records a desktop with one window redacted and one display-only |
 | **M-D.4** | Metal: direct scanout and planes on real hardware, variable refresh, tearing, Game Focus, the frame-timing display, the action wheel, controllers, the latency rig | M-G.4–M-G.6, AUDIO A2/A4, controller drivers, asynchronous flips and variable refresh (§11.3), P11 for sleep | `desk` (metal) within 2% of FreeBSD 15.1 with `drm-kmod` on the X870E and the Z690-A; §8.3's budget holds on the rig; on the Orange Pi 6 Plus with `panthor`, the session runs accelerated and its `desk` results are recorded without gating (§12.2) |
-| **M-D.5** | Installed: the package on AbyssBSD's medium, the login path (§14 question 7), installs to UFS, then ZFS | INSTALLER.md I.1–I.3; M-Z for ZFS | An installed disk boots to a Scoria session in QEMU and from the X870E's second NVMe |
+| **M-D.5** | Installed: the live medium, the greeter, and the installer ([INSTALLER.md](INSTALLER.md) I.3, I.4): installs to UFS, then ZFS, then encrypted ZFS | INSTALLER.md I.1, I.2; M-Z for ZFS; `geom_eli` | An installed disk boots to a Scoria session in QEMU and from the X870E's second NVMe |
 | **M-D.6** | Streaming and expression: OBS integration or `scoria-cast` (§14 question 9), stages, stream audio; wallpaper palettes, templates, user shaders, bundles, showcase; input methods, color management, clipboard history, tablets, accessibility, session restore, `scoria-dbus-bridge` | `cuse` or taps (§14 question 4) | A 1080p60 stream of a stage with capture-only overlays and per-program audio |
 
 ## References

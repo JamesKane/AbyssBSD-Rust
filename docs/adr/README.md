@@ -32,7 +32,7 @@ Status values: **Proposed** (awaiting owner confirmation) · **Accepted** · **S
 | [0023](0023-hardware-scope-consumer-decade.md) | Hardware scope is what consumers could buy in the last decade, where we have a machine; the AMD64 firmware floor is 64-bit EFI 1.10 | Proposed |
 | [0024](0024-zones-as-exact-layout-classes.md) | Zones are exact-layout classes of the one heap, declared at build time; `Zone<T>` and `ZBox<T>` are not built | Accepted |
 | [0025](0025-graphics-abi-and-native-drivers.md) | Graphics: the Direct Rendering Manager interface as FreeBSD's ports see it, implemented natively, with no LinuxKPI | Accepted |
-| [0026](0026-desktop-scoria.md) | The desktop is Scoria, a Rust tiling Wayland desktop built in this workspace; ADR-0002 amended for C libraries in `desk/` | Accepted |
+| [0026](0026-desktop-scoria.md) | The desktop is Scoria, a Rust tiling Wayland desktop built in this workspace; ADR-0002 amended for C libraries in `desk/` | Accepted; amended 2026-11-23 |
 
 Template:
 

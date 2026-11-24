@@ -836,7 +836,7 @@ supersedes [ADR-0018](adr/0018-desktop-architecture.md).
 - The headless steps need no graphics, so **M-D.1 can start once P6 exits**, before M-G, and does
   not gate Day 1. First light follows M-G.1, acceleration M-G.3, and metal M-G.6.
 - Prerequisites by step: P6 (headless), M-G (display), P7 (the network collector, Firefox), audio, P11 power
-  management (sleep), M-Z (ZFS install), INSTALLER.md (the boot loader for installed systems).
+  management (sleep), M-Z (ZFS install), INSTALLER.md (the boot loader, greeter, installer, and live medium).
 
 ### M-Z: OpenZFS
 

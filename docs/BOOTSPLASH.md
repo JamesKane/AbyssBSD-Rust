@@ -8,7 +8,7 @@
   work that makes that sequence short: timeline instrumentation from power-on, budgets per stage,
   and the known places where boots wait. Shutdown gets the same treatment in reverse (§5.6)
 - Inputs: [GRAPHICS.md](GRAPHICS.md) §7.5 and §7.6 (firmware handover, the kernel console),
-  [DESKTOP.md](DESKTOP.md) (the login path, §14 question 7), [DRIVER-MODEL.md](DRIVER-MODEL.md) §6.4 (parallel
+  [INSTALLER.md](INSTALLER.md) §6 (the greeter), [DRIVER-MODEL.md](DRIVER-MODEL.md) §6.4 (parallel
   attach), [MULTIUSER.md](MULTIUSER.md) §16 and [PERFORMANCE.md](PERFORMANCE.md) (the `boot`
   component), [ADR-0015](adr/0015-usb-input-vt.md) (the early console and `vt`)
 

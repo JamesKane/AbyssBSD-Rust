@@ -3,6 +3,8 @@
 - Status: Accepted
 - Date: 2026-11-23
 - Supersedes: [ADR-0018](0018-desktop-architecture.md)
+- Amended: 2026-11-23. The installer, the greeter, and the live medium are Scoria's, in this
+  workspace ([INSTALLER.md](../INSTALLER.md); Consequences).
 
 ## Context
 
@@ -54,18 +56,19 @@ on 2026-11-23, to be written in Rust in this workspace.
     [WINDOWS-GAMES.md](../WINDOWS-GAMES.md) stage W5 and VFS.md's follow-ups, no longer M-D.1;
   - the monorepo harness as a conformance suite (`run.sh --live`, `--full`): replaced by Scoria's
     own suites, run on both systems;
-  - the monorepo's desktop asks (arm64 packages, a FreeBSD form of its GPU lanes, a harness mode
-    without ssh, the Vulkan renderer for `undertow`): withdrawn. The installer-side asks (a 15.1
-    package build, a UFS install layout, the medium recipe's inputs) stay until INSTALLER.md is
-    revised;
+  - the monorepo's asks (arm64 packages, a FreeBSD form of its GPU lanes, a harness mode without
+    ssh, the Vulkan renderer for `undertow`, and, since the 2026-11-23 amendment, its installer
+    and medium recipe): withdrawn;
   - `snd_dummy` for the harness's sound lanes: AUDIO.md A1 keeps it, with its own exit.
 - **Kernel work Scoria adds** (DESKTOP.md §11.3): syncobj timelines with `SYNCOBJ_EVENTFD`, atomic
   asynchronous flips, variable refresh and damage clips, game-controller drivers, and `cuse`
   (or AUDIO.md's taps) for stream audio. The MAC framework with `mac_priority`, `sound(4)`, and
   ACPI sleep, buttons, battery, and AC adapter stay.
-- **The installer and login** came with the monorepo desktop. [INSTALLER.md](../INSTALLER.md)
-  keeps its plan until revised; how it and a login screen fit Scoria is DESKTOP.md §14 question 7.
-  GELI and ZFS (M-Z) stay with the installer.
+- **The installer and login** came with the monorepo desktop. Amended 2026-11-23: they are
+  Scoria components in `desk/` (`scoria-install` and `scoria-installd`; `scoria-greetd` and
+  `scoria-greet`), and `cargo xtask live-image` builds the medium ([INSTALLER.md](../INSTALLER.md)).
+  The monorepo's installer-side asks are withdrawn with the rest. GELI and ZFS (M-Z) stay with
+  the installer.
 - The window model is tiling, with scrollable tiling by default and floating and monocle as
   first-class modes. There is no Aqua look, global menu bar, or Finder.
 - No OBS plugin comes from this project, since OBS's plugin interface is GPL. Scoria offers the
