@@ -337,3 +337,44 @@ fn an_audio_block_running_off_the_extension_stops_the_walk() {
     x[127] = 0u8.wrapping_sub(sum);
     assert_eq!(cta::audio(&x).unwrap().descriptors[1], [0; 3]);
 }
+
+/// The EDID of the X870E's HDMI monitor (a DELL ST2421L), read off the
+/// connector by the Radeon driver (tests/corpus/x870e/abyssbsd/edid-hdmi-a-1.txt).
+const DELL_ST2421L: [&str; 8] = [
+    "00ffffffffffff0010ac70a0554646312f15010380351e78ea9265a655559f28",
+    "0d5054a54b00714f8180d1c001010101010101010101023a801871382d40582c",
+    "4500132b2100001e000000ff005450445450314245314646550a000000fc0044",
+    "454c4c205354323432314c0a000000fd00384c1e5311000a2020202020200140",
+    "02031ff14c9005040302071601141f12132309070765030c0010008301000002",
+    "3a801871382d40582c4500132b2100001e011d8018711c1620582c2500132b21",
+    "00009e011d007251d01e206e285500132b2100001e8c0ad08a20e02d10103e96",
+    "00132b210000180000000000000000000000000000000000000000000000001b",
+];
+
+fn dell() -> Vec<u8> {
+    let hex: String = DELL_ST2421L.concat();
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn a_real_monitors_edid_gives_its_name_modes_and_audio() {
+    let d = parse(&dell()).unwrap();
+    assert_eq!(d.name.as_deref(), Some("DELL ST2421L"));
+    assert_eq!(d.manufacturer, 0xac10);
+    assert_eq!(d.product, 0xa070);
+    assert_eq!(d.extensions, 1);
+    assert!(
+        d.modes
+            .iter()
+            .any(|m| m.hdisplay == 1920 && m.vdisplay == 1080)
+    );
+    // Stereo linear PCM at 32, 44.1 and 48 kHz, 16, 20 and 24 bits; no
+    // other format; front left and right speakers; basic audio.
+    assert_eq!(d.audio.descriptors[1], [0x09, 0x07, 0x07]);
+    assert!(d.audio.descriptors[2..].iter().all(|x| *x == [0; 3]));
+    assert_eq!(d.audio.speakers, 1);
+    assert!(d.audio.basic);
+}

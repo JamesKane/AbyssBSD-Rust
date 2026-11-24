@@ -23,6 +23,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod ddc;
 pub mod discovery;
 pub mod display;
 mod display_regs;

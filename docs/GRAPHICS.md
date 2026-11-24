@@ -1123,3 +1123,25 @@ the zone, and then the display microcontroller's load as one experiment. The fil
   sink name is empty; the 60958 channel numbers for channels 2 to 7; modes other than 1080p60 (the audio clock is
   fixed at 148.5 MHz).
 
+### 16.15 R3.4: the monitor's EDID over DDC, and the audio endpoint from it (2026-11-24)
+
+- **Shared type.** The EDID parser is `lib/edid` (from the Sky1 display work), not a copy in the Radeon library: it now
+  also reads the CTA-861 short audio descriptors (by format code), the speaker allocation and the basic-audio flag, and
+  the manufacturer and product codes, for any display driver's audio endpoint.
+- **Code.** `lib/amdgpu/src/ddc.rs`: the display core's hardware I2C engine (08 section 4.7): the arbitration (request,
+  owner status, done), the pin hand-over (the DDC group's mask cleared, the pad in I2C mode, all put back after), up to
+  four transactions in one run (segment pointer for blocks 2 and above, the offset write, the read), the buffer's
+  readback from the saved index; eight host tests against a model engine with a monitor behind it (the specification's
+  worked example for block 0 exactly, the segment pointer, a NACKing monitor, the display firmware holding the engine,
+  the pins restored on every path). `dev.drmn.1.ddc_probe` logs the engine's and pins' registers (reads only);
+  `dev.drmn.1.edid` reads the EDID, logs it, parses it and writes the endpoint (`hdmi::endpoint_configure_for`).
+- **On the X870E:** `MICROSECOND_TIME_BASE_DIV` reads `0x00120218`, not the `0x00120264` the specification's prescale of 500
+  is for (the platform left a prescale of 240 and `DDC1_SETUP` `0x30000040`). The driver tries 500 and then the platform's
+  value; **the first, 500, read both blocks**: a DELL ST2421L, manufacturer `0xac10`, product `0xa070`, one extension, eight
+  modes including 1920x1080, **audio: linear PCM, two channels, 32/44.1/48 kHz, 16/20/24 bits (descriptor `09 07 07`),
+  no other format, speakers front left and right, basic audio**. The endpoint was written from it, the picture and the
+  interrupts ran through (1,441 frame starts, no overflow). Its bytes are the real test vector in `lib/edid` and
+  `tests/corpus/x870e/abyssbsd/edid-hdmi-a-1.txt` (the monitor's serial number is in it).
+- **Not measured:** the speed (the prescale scaling with the time base is not established; 500 worked on this monitor, and
+  a 100 kHz clock was not seen on a bus analyser), the engine with the display firmware running, and SCDC writes.
+

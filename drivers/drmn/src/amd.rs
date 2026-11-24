@@ -802,6 +802,106 @@ impl Amd {
         Ok(())
     }
 
+    /// Reads the DDC engine's and pins' registers, writing nothing (stage
+    /// R3.4: the EDID over the HDMI connector's DDC line).
+    pub(crate) fn ddc_probe(&self) -> Result<(), abi::errno::Errno> {
+        use amdgpu::ddc;
+        use amdgpu::regs::Window;
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        let g = ddc::gpio(0);
+        for (name, at) in [
+            ("MICROSECOND_TIME_BASE_DIV", ddc::TIME_BASE_DIV),
+            ("DC_I2C_CONTROL", ddc::CONTROL),
+            ("DC_I2C_ARBITRATION", ddc::ARBITRATION),
+            ("DC_I2C_SW_STATUS", ddc::SW_STATUS),
+            ("DDC1_HW_STATUS", ddc::HW_STATUS),
+            ("DDC1_SPEED", ddc::SPEED),
+            ("DDC1_SETUP", ddc::SETUP),
+            ("DC_GPIO_DDC1_MASK", g),
+            ("DC_GPIO_DDC1_A", g + 4),
+            ("DC_GPIO_DDC1_EN", g + 8),
+            ("DC_GPIO_DDC1_Y", g + 12),
+            ("DDC_PAD1_I2CMODE", ddc::PAD_I2C_MODE),
+            ("AUX1_PAD_RXSEL", ddc::PAD_RXSEL),
+            ("memory light sleep 0", ddc::LIGHT_SLEEP[0]),
+            ("memory light sleep 1", ddc::LIGHT_SLEEP[1]),
+        ] {
+            self.log(format_args!(
+                "DDC: {name} @{at:#07x} = {:#010x}",
+                w.read32(at)
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reads the HDMI monitor's EDID over DDC line 0 with the hardware I2C
+    /// engine, logs it and what it says, and gives the audio endpoint its
+    /// audio capabilities.
+    pub(crate) fn edid_read(&self) -> Result<(), abi::errno::Errno> {
+        use amdgpu::regs::Window;
+        use amdgpu::{ddc, hdmi};
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        let pause = |us: u32| bus::manager().delay_us(u64::from(us));
+        // The spec's prescale for 100 kHz first, then the platform's own
+        // (the time base differs from the one the spec's prescale is for).
+        let platform = w.read32(ddc::SPEED) >> 16;
+        self.log(format_args!(
+            "EDID: time base {:#x}, platform prescale {platform}",
+            w.read32(ddc::TIME_BASE_DIV)
+        ));
+        let mut result = Err(ddc::Error::Busy);
+        for prescale in [ddc::PRESCALE, platform] {
+            result = ddc::read_edid(&w, 0, 4, prescale, &pause);
+            match &result {
+                Ok(_) => {
+                    self.log(format_args!("EDID: read with prescale {prescale}"));
+                    break;
+                }
+                Err(e) => self.log(format_args!("EDID: prescale {prescale}: {e:?}")),
+            }
+        }
+        let Ok(raw) = result else {
+            return Err(abi::errno::Errno::EIO);
+        };
+        self.log(format_args!("EDID: {} bytes:", raw.len()));
+        for (i, line) in raw.chunks(32).enumerate() {
+            let mut text = alloc::string::String::new();
+            for b in line {
+                use core::fmt::Write as _;
+                let _ = write!(text, "{b:02x}");
+            }
+            self.log(format_args!("EDID: {:03x}: {text}", i * 32));
+        }
+        match edid::parse(&raw) {
+            Ok(e) => {
+                self.log(format_args!(
+                    "EDID: name {:?}, manufacturer {:#x}, product {:#x}, {} extension block(s), {} mode(s), speakers {:#x}, basic audio {}",
+                    e.name,
+                    e.manufacturer,
+                    e.product,
+                    e.extensions,
+                    e.modes.len(),
+                    e.audio.speakers,
+                    e.audio.basic
+                ));
+                for (format, d) in e.audio.descriptors.iter().enumerate().skip(1) {
+                    if *d != [0; 3] {
+                        self.log(format_args!("EDID: audio format {format}: {d:02x?}"));
+                    }
+                }
+                hdmi::endpoint_configure_for(&w, &e);
+                self.log(format_args!("EDID: endpoint 0 configured from it"));
+                Ok(())
+            }
+            Err(e) => {
+                self.log(format_args!("EDID: not valid: {e:?}"));
+                Err(abi::errno::Errno::EINVAL)
+            }
+        }
+    }
+
     /// The reverse of the audio enable: mute, then clear the endpoint.
     pub(crate) fn hdmi_off(&self) -> Result<(), abi::errno::Errno> {
         let gpu = self.gpu()?;
@@ -928,6 +1028,16 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             "hdmi",
             "Write 1 to switch the encoder to HDMI mode with the AVI info frame and enable audio; disturbs the picture briefly",
             Amd::hdmi_enable,
+        ),
+        (
+            "ddc_probe",
+            "Write 1 to log the DDC engine's and pins' registers (reads only)",
+            Amd::ddc_probe,
+        ),
+        (
+            "edid",
+            "Write 1 to read the HDMI monitor's EDID over DDC and give the audio endpoint its capabilities",
+            Amd::edid_read,
         ),
         (
             "hdmi_off",
