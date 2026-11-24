@@ -16,6 +16,7 @@
 //! 6. [`release`]: let the unit run.
 //! 7. [`wait_running`]: until the display firmware says it is up.
 
+use crate::psp::Memory;
 use crate::regs::Window;
 
 /// The security processor's image type for the display microcontroller
@@ -257,6 +258,105 @@ pub fn release<W: Window + ?Sized>(w: &W, psp_version: u32) {
     w.write32(CNTL2, w.read32(CNTL2) & !1);
 }
 
+/// Asks the running firmware its version through the general-purpose
+/// interrupt register (command 1; the answer is in `SCRATCH7`). `None` if
+/// the request is not taken within `polls` tries of `pause_us`.
+pub fn version<W: Window + ?Sized>(
+    w: &W,
+    polls: u32,
+    pause_us: u32,
+    pause: &dyn Fn(u32),
+) -> Option<u32> {
+    w.write32(GPINT_DATAIN1, (1 << 28) | (1 << 16));
+    for _ in 0..polls {
+        if w.read32(GPINT_DATAIN1) >> 28 == 0 {
+            return Some(w.read32(SCRATCH7));
+        }
+        pause(pause_us);
+    }
+    None
+}
+
+/// One command in inbox 1 is 64 bytes; the ring is 8 KiB (08 section 3.3).
+pub const COMMAND_BYTES: u32 = 64;
+
+/// Command type: no operation.
+pub const CMD_NOP: u8 = 0;
+
+/// The first four bytes of a command (08 section 3.3): the type, the
+/// subtype, whether a reply is wanted, and the payload size.
+#[must_use]
+pub fn header(kind: u8, subtype: u8, reply: bool, payload_bytes: u8) -> u32 {
+    u32::from(kind)
+        | u32::from(subtype) << 8
+        | u32::from(reply) << 16
+        | (u32::from(payload_bytes) & 0x3f) << 24
+}
+
+/// Why a command did not get through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// The ring is full.
+    Full,
+    /// The firmware did not take the command in time (the read pointer).
+    Timeout(u32),
+}
+
+/// Inbox 1: the host's end of the command ring.
+#[derive(Debug, Clone, Copy)]
+pub struct Inbox {
+    /// The ring's GPU address (window 4's memory).
+    ring: u64,
+}
+
+impl Inbox {
+    /// The inbox in the mailbox window at GPU address `mailboxes`.
+    #[must_use]
+    pub const fn new(mailboxes: u64) -> Self {
+        Self { ring: mailboxes }
+    }
+
+    /// Writes `command` (a header and payload, at most 64 bytes) at the
+    /// write pointer, flushes it, moves the pointer on, and waits for the
+    /// firmware's read pointer to reach it (08 section 3.3).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Full`] or [`Error::Timeout`] (with the last read pointer).
+    pub fn submit<W: Window + ?Sized, M: Memory + ?Sized>(
+        &self,
+        w: &W,
+        m: &M,
+        command: &[u8],
+        polls: u32,
+        pause_us: u32,
+        pause: &dyn Fn(u32),
+    ) -> Result<(), Error> {
+        let size = w.read32(INBOX1 + 4);
+        let wptr = w.read32(INBOX1 + 8);
+        let rptr = w.read32(INBOX1 + 12);
+        let next = (wptr + COMMAND_BYTES) % size.max(COMMAND_BYTES);
+        if next == rptr {
+            return Err(Error::Full);
+        }
+        let mut slot = [0u8; COMMAND_BYTES as usize];
+        let n = command.len().min(slot.len());
+        slot[..n].copy_from_slice(&command[..n]);
+        m.write(self.ring + u64::from(wptr), &slot);
+        m.flush();
+        w.write32(INBOX1 + 8, next);
+        let mut last = rptr;
+        for _ in 0..polls {
+            last = w.read32(INBOX1 + 12);
+            if last == next {
+                return Ok(());
+            }
+            pause(pause_us);
+        }
+        Err(Error::Timeout(last))
+    }
+}
+
 /// Waits for the display firmware (`SCRATCH0` bits 0 and 1): `polls` tries
 /// of `pause_us`. Returns the last `SCRATCH0`.
 pub fn wait_running<W: Window + ?Sized>(
@@ -455,6 +555,100 @@ mod tests {
         assert_eq!(r.get(CNTL2) & 1, 0);
         assert_eq!(wait_running(&r, 3, 10, &|_| {}), Ok(3));
         assert!(running(&r));
+    }
+
+    /// Memory for the inbox tests: remembers writes.
+    struct Mem(RefCell<Vec<(u64, Vec<u8>)>>);
+
+    impl Memory for Mem {
+        fn write(&self, gpu: u64, data: &[u8]) {
+            self.0.borrow_mut().push((gpu, data.to_vec()));
+        }
+        fn read32(&self, _: u64) -> u32 {
+            0
+        }
+        fn flush(&self) {}
+        fn invalidate(&self) {}
+    }
+
+    #[test]
+    fn the_header_packs_as_the_specification_says() {
+        assert_eq!(header(0, 0, false, 0), 0);
+        assert_eq!(header(128, 2, true, 16), 128 | 2 << 8 | 1 << 16 | 16 << 24);
+        // The payload size is 6 bits.
+        assert_eq!(header(0, 0, false, 0xff), 0x3f << 24);
+    }
+
+    #[test]
+    fn a_command_goes_in_the_slot_at_the_write_pointer() {
+        let r = Regs::new();
+        r.regs.borrow_mut().insert(INBOX1 + 4, 0x2000);
+        let m = Mem(RefCell::new(Vec::new()));
+        let inbox = Inbox::new(0xf4_0a30_0000);
+        // The firmware takes it: the read pointer follows the write pointer.
+        struct Follows<'a>(&'a Regs);
+        impl Window for Follows<'_> {
+            fn read32(&self, o: usize) -> u32 {
+                if o == INBOX1 + 12 {
+                    return self.0.get(INBOX1 + 8);
+                }
+                self.0.read32(o)
+            }
+            fn write32(&self, o: usize, v: u32) {
+                self.0.write32(o, v);
+            }
+        }
+        let cmd = header(CMD_NOP, 0, false, 0).to_le_bytes();
+        assert_eq!(inbox.submit(&Follows(&r), &m, &cmd, 3, 1, &|_| {}), Ok(()));
+        assert_eq!(r.get(INBOX1 + 8), 64);
+        let w = m.0.borrow();
+        assert_eq!(w[0].0, 0xf4_0a30_0000);
+        assert_eq!(w[0].1.len(), 64);
+        // A second one lands in the next slot.
+        drop(w);
+        assert_eq!(inbox.submit(&Follows(&r), &m, &cmd, 3, 1, &|_| {}), Ok(()));
+        assert_eq!(m.0.borrow()[1].0, 0xf4_0a30_0040);
+    }
+
+    #[test]
+    fn a_firmware_that_does_not_read_times_out_and_the_ring_fills() {
+        let r = Regs::new();
+        r.regs.borrow_mut().insert(INBOX1 + 4, 0x2000);
+        let m = Mem(RefCell::new(Vec::new()));
+        let inbox = Inbox::new(0x1000);
+        assert_eq!(
+            inbox.submit(&r, &m, &[0; 4], 2, 1, &|_| {}),
+            Err(Error::Timeout(0))
+        );
+        // Wrap: the write pointer one slot behind the read pointer is full.
+        r.regs.borrow_mut().insert(INBOX1 + 8, 0x1fc0);
+        r.regs.borrow_mut().insert(INBOX1 + 12, 0);
+        assert_eq!(inbox.submit(&r, &m, &[0; 4], 2, 1, &|_| {}), Err(Error::Full));
+    }
+
+    #[test]
+    fn the_version_request_returns_scratch7() {
+        let r = Regs::new();
+        r.regs.borrow_mut().insert(SCRATCH7, 0x0500_3700);
+        // The model never clears the status nibble itself: write-through
+        // leaves it set, so the request times out...
+        assert_eq!(version(&r, 2, 1, &|_| {}), None);
+        assert_eq!(r.wrote(GPINT_DATAIN1), vec![(1 << 28) | (1 << 16)]);
+        // ...and a firmware that takes it clears the nibble.
+        r.regs.borrow_mut().insert(GPINT_DATAIN1, 0);
+        struct Takes<'a>(&'a Regs);
+        impl Window for Takes<'_> {
+            fn read32(&self, o: usize) -> u32 {
+                if o == GPINT_DATAIN1 {
+                    return 0;
+                }
+                self.0.read32(o)
+            }
+            fn write32(&self, o: usize, v: u32) {
+                self.0.write32(o, v);
+            }
+        }
+        assert_eq!(version(&Takes(&r), 2, 1, &|_| {}), Some(0x0500_3700));
     }
 
     #[test]

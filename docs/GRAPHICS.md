@@ -1082,3 +1082,16 @@ the zone, and then the display microcontroller's load as one experiment. The fil
   off, the boot options are 0. The next step is the first command through inbox 1 (a mailbox round trip), then the
   clocks and the mode (R3.4).
 
+### 16.13 R3.4 (first part): conversations with the display firmware (2026-11-24)
+
+- **Code.** `lib/amdgpu/src/dmcub.rs` gains the command header (type, subtype, reply flag, payload size), `version`
+  (the general-purpose interrupt register, command 1, answer in `SCRATCH7`) and `Inbox` (a 64-byte slot at the write
+  pointer, flushed, the write pointer moved, the read pointer waited for; a full ring and a firmware that does not read
+  are errors), with four more host tests. The driver runs both right after the firmware comes up.
+- **On the X870E:** the firmware reports version `0x5003700`, the image's own; a no-operation command through inbox 1
+  was taken (read pointer `0x40`, one slot). The mailbox ring works both ways of reaching the firmware.
+- **Next.** Mode setting is where the specification itself says the largest unknown is (08 section 3.6: the
+  bandwidth model's request and watermark values for a mode other than the firmware's 1080p60 are not derived), so the
+  next steps are: the firmware commands that matter without a new mode (query of the connectors' hot-plug state,
+  enabling outbox 1), then HDMI mode and audio on the firmware's own mode, and only then a different timing.
+

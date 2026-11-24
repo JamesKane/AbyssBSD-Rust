@@ -180,11 +180,38 @@ pub(crate) fn load(
             log(format_args!(
                 "DMCUB: the display firmware is up: scratch0 {v:#x}"
             ));
+            round_trips(gpu, &w, base, log);
             Ok(())
         }
         Err(v) => {
             state("stalled");
             Err(Stopped::NoBoot(v))
         }
+    }
+}
+
+/// The first conversations with the running firmware: its version by the
+/// general-purpose interrupt register, then a no-operation command through
+/// inbox 1.
+fn round_trips(
+    gpu: &Arc<Aperture>,
+    w: &Bar5<'_>,
+    base: u64,
+    log: &dyn Fn(core::fmt::Arguments<'_>),
+) {
+    let pause = |us: u32| bus::manager().delay_us(u64::from(us));
+    match dmcub::version(w, 100, 1000, &pause) {
+        Some(v) => log(format_args!("DMCUB: the firmware says its version is {v:#x}")),
+        None => log(format_args!("DMCUB: the version request was not taken")),
+    }
+    let inbox = dmcub::Inbox::new(base + MAILBOXES_AT as u64);
+    let mem = crate::psp::vram_memory(gpu, base);
+    let nop = dmcub::header(dmcub::CMD_NOP, 0, false, 0).to_le_bytes();
+    match inbox.submit(w, &mem, &nop, 100, 1000, &pause) {
+        Ok(()) => log(format_args!(
+            "DMCUB: a no-operation command through inbox 1 was taken (read pointer {:#x})",
+            w.read32(dmcub::INBOX1 + 12)
+        )),
+        Err(e) => log(format_args!("DMCUB: inbox 1: {e:?}")),
     }
 }
