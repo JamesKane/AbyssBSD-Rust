@@ -896,3 +896,136 @@ presents (`simpledrm`-like). Spec 09 lists what RADV expects; none of it is in R
   clients' buffers in place (R2's page tables) instead of copying them.
 - **Not yet read or done:** the decoding of the platform display firmware's window registers is in the
   specification's 08 section 9.0.1; stage R3 overwrites those windows, so R1 stays out of the top 2 MiB.
+
+### 16.6 R2 and R3 in steps (2026-11-24)
+
+The owner's order is R2 (memory and interrupts), then R3 (the security processor, the display microcontroller,
+mode setting, HDMI audio). Reading specifications 03, 05 and 08 for it shows how little the two depend on
+each other: **the PSP's ring, fence, command and staging buffers, the trusted memory zone and the
+display microcontroller's windows all fit in video memory, which the display and the PSP already reach through
+the system aperture (no page tables)**. R3 therefore does not wait for R2's page tables; R2 is first because it
+brings the vertical blanking interrupt, which R3's mode setting wants, and the memory the engines (R4) need.
+
+The display shares the memory hub (MMHUB) with the multimedia engines, so **R2's hub writes are the first
+that can disturb the picture**. Each is made one hub at a time, the graphics hub (GFXHUB, which the display does
+not use) before the MMHUB, and each is checked by the frame counter still counting and a flip still working.
+
+| Step | Work | Depends on | Exit (seen on the X870E) |
+|---|---|---|---|
+| R2.0 | Read-only capture of the registers R2 will write (both hubs' apertures, L1 TLB and L2 control, fault control, the interrupt handler's ring registers, the host data path, the doorbell aperture and its ranges), as the firmware and the GOP left them; compared with the specification's reference values and Linux's | Done with R1 | The capture is in the corpus; every register the specification names reads as it says or the difference is recorded |
+| R2.1 | Interrupts: one MSI vector through `vgapci`; the interrupt handler's ring in video memory (no GART), its read pointer by register; the display's frame-start interrupt (client 4, source `0x3c`, `OTG0_OTG_GLOBAL_SYNC_STATUS` bit 0); the card's `vblank_interrupt()` true and `Kms::vblank` from the handler, the timer retired | R2.0; interrupt delivery for a `vgapci` child | The interrupt count over three seconds equals the frame count (180 at 60 Hz) and `kmsflip`'s events arrive from it; the ring never overflows over ten minutes of Sway |
+| R2.2 | The graphics hub: GART aperture, system aperture, fault defaults, L1 TLB, L2, context 0 and the user contexts, the invalidation engines, the host data path flush; the GART table in video memory | R2.0; spec 05 §4–5 | Registers read back as written; an invalidation request on engine 17 is acknowledged; the display's frame counter never stops and a flip works throughout |
+| R2.3 | The memory hub (MMHUB), the same, with the display's aperture settings kept as the firmware set them | R2.2 | The same exit, and `kmsflip` and Sway run unchanged; if the picture blinks, the first register that differs is found by writing one at a time |
+| R2.4 | Doorbells: BAR2 mapped, the aperture enabled, the interrupt handler's and the engines' ranges (the Raphael ranges are behind the NBIF index/data pair) | R2.1 | The interrupt handler's read pointer, written through its doorbell, shows in `IH_RB_RPTR` |
+| R3.1 | The firmware files on the board, and the PSP ring: the secure OS is already running (`C2PMSG_81` nonzero); ring, command, fence and staging buffers in video memory; the ring created | The files; spec 03 §1–4 | A harmless command (the security processor's version query, or TOC load) returns success in the response block |
+| R3.2 | The TOC, the trusted memory zone (10 MiB, outside the top 2 MiB the platform's display microcontroller holds), and the display microcontroller's image loaded by type 51; its reset, its windows (CW2–CW6, region 5) and inbox/outbox programmed from the driver layout; its release | R3.1; spec 08 §3.2, §9.0.1 | `SCRATCH0` bits 0 and 1 set (the driver's firmware runs); the picture never blanks until the platform's windows are replaced, and a flip still works after |
+| R3.3 | Mode setting through the display microcontroller and the register path: a second mode, the old mode again; clocks (the SMU, spec 04 §4: Raphael needs messages 4 steps), watermarks from a table, not the GOP's | R3.2; spec 04, 08 §3–6 | 1280x720 and back on the panel, the timing generator's totals as set |
+| R3.4 | HDMI mode with audio: the encoder's HDMI configuration, the audio infoframe and the audio clock; the HD Audio controller on the Radeon's function 1 (the HDA driver is there) | R3.3 | A tone through the monitor's speakers |
+
+**What is on the board for R3.** Firmware files (`dcn_3_1_5_dmcub.bin`, the PSP TOC and trusted applications
+for 13.0.5; 02 §9) are on the Fedora machine under `/lib/firmware/amdgpu` as `.xz`; the board's FreeBSD has none.
+They are loaded with the DMCUB firmware's own 256-byte header and footer intact (spec 02 §6). Getting them onto
+the board is a copy of the files (decompressed on this machine) into the AbyssBSD root; the loader of firmware
+in the kernel is what the NVIDIA half already uses.
+
+### 16.7 R2.0: what the firmware left (2026-11-24)
+
+`dev.drmn.1.memory` (`lib/amdgpu/src/memory.rs`, 120 plain reads; the invalidation engines' semaphore registers
+are left out, as reading one takes the semaphore) on the X870E at the GOP's state; the capture is
+`tests/corpus/x870e/abyssbsd/raphael-drmn1-memory.txt`.
+
+- **As the specification says the reference leaves them.** Both hubs: video memory at `0xf400` to `0xf41f`
+  (16 MiB units), frame buffer offset `0x1840`, system aperture `0x3d0000` to `0x3d07ff` (the whole of video
+  memory, 256 KiB units), default page address 0. Both L2 caches have `CNTL3`, `CNTL4` and `CNTL5` at their reset
+  values (`0x80100007`, `0xc1`, `0x3fe0`); fault control is `0x3ffffffc` (every default-enable bit set, both
+  crash bits clear).
+- **No page tables anywhere.** Context 0 and context 1 of both hubs read `0x007ffe80` (`ENABLE_CONTEXT` clear),
+  with the page-table base, start and end zero. The display, the security processor and the interrupt handler
+  reach video memory by the system aperture alone, which is what R2.1 and R3.1 rely on.
+- **Differences from what Linux writes** (to be settled by the specification's author): the L1 TLB control reads
+  `0x501` on both hubs (Linux's step writes enable, access mode 3, advanced driver model and type 3); fault control
+  2 reads `0x20000` (graphics hub) and `0xa0000` (memory hub); the AGP aperture reads 0 for bottom, top and
+  base (Linux disables it with a bottom of `0xFFFFFF`).
+- **The interrupt handler is off and unmade.** The ring control reads `0x40610000` (enable clear, `MC_SPACE` 4,
+  the reset value), base, pointers and write-back address zero, its doorbell off, the doorbell aperture
+  (`DOORBELL_APER_EN`) 0, the bus interface's interrupt control `0x10000` and its dummy page 0. The host data path's
+  flush-invalidate bit is already set (`HDP_MISC_CNTL` `0x2d600be1`), with the flush remap registers at their
+  defaults `0x385c` and `0x3858`.
+- **Questions sent to the specification's author** about the L1 TLB bits, fault control 2, the AGP window, the
+  interrupt control's bit 16, and whether the interrupt ring and its write-back slot may be in video memory with
+  no page tables. R2.1 builds on that answer.
+
+### 16.8 R2.1: interrupts (2026-11-24)
+
+- **The vector.** `vgapci` enables one MSI message for an AMD function it is wanted for (`hw.vgapci.msi`, on by default; the specification's reference asks for one vector of any type), turns bus mastering
+  on, and installs the interrupt filter, which calls the sink the GPU driver registers once
+  (`vgapci::InterruptSink`).
+- **The ring is in video memory, with no page tables.** 64 KiB (2,048 entries) at BAR0 offset 128 MiB with its
+  write-back slot after it, addressed by the video memory's GPU address (`0xF4_0800_0000`), not snooped
+  (`MC_SNOOP` clear), the processor reading it through BAR0. The specification's author expected this to work
+  (the reference puts the ring in GART-mapped system memory and never does this on bare metal; `05` marks it
+  open): **it works**, with both hubs' contexts off and the L2 caches off, as the firmware left them. The bus
+  interface's dummy page is not written (the dummy read is off, and bit 16 skips it for MSI).
+  `lib/amdgpu/src/ih.rs` has the bring-up sequence and the entry decoder and ring drain, tested on the host
+  (wraps, overflow restarts at the oldest entry the ring holds, hostile pointers handle nothing).
+- **The display's frame-start event is the vertical blanking interrupt.** `OTG0_OTG_GLOBAL_SYNC_STATUS` bit 0
+  enables it, writing bit 4 clears it (08 section 2.5); no interrupt-routing registers needed programming
+  (the open question there). The entry is client 4, source `0x3c`.
+- **On the X870E:** 181 interrupts in three seconds and 361 in six: 60 a second, every entry a frame start, no
+  others, no overflow. With the card on it (`CrtcHw::vblank_interrupt` true, while the interrupts run, and the
+  handler calls `Kms::vblank`), `kmsflip` flips at 3.2 ms and Sway with glmark2's jellyfish runs at about 504 to
+  533 frames a second, the interrupt count matching the frame count.
+- **The soak passed:** ten minutes of Sway with glmark2's jellyfish, 42,048 frame starts, no overflow, no error in
+  the Sway log. `hw.vgapci.msi` is on by default (the owner agreed 2026-11-24; `=0` turns it off). The read pointer is written by
+  register; the doorbell is R2.4.
+
+### 16.9 R2.2 and R2.3: the translation hubs (2026-11-24)
+
+- **Code.** `lib/amdgpu/src/gmc.rs` has both hubs' register maps (arrays on the graphics hub, eight-dword
+  interleaved blocks on the memory hub) and the specification's setup order (05 section 5.1): the GART's flat
+  table, AGP off (bottom above top), a dummy page for faults and aperture misses, the L1 translation buffer and
+  the L2 read-modify-write so the firmware's ECO bits and reset values survive, context 0 on with depth 0 and no
+  retry, the identity aperture off (graphics hub), the fifteen user contexts, the invalidation engines'
+  ranges; plus the invalidation through engine 17 (the memory hub's semaphore taken around it). Tested on the host
+  against a model of each hub, including the order (the context is enabled only after the table, the buffers and
+  the L2 are set), the register strides, and that the semaphore is released.
+- **In the driver.** `dev.drmn.1.gmc` (graphics hub) and `dev.drmn.1.gmc_mm` (memory hub), each a trigger, share one
+  GART table: 2 MiB at BAR0 offset 144 MiB (video memory physical `0x1849000000`), every entry invalid, covering
+  GPU addresses 0 to 1 GiB, and one dummy system page from a new DMA tag on the AMD function (44 address bits).
+- **On the X870E, graphics hub then memory hub:** each reads back context 0 `0x007ffe01` (enabled, flat, no
+  retry), the L2 `0x00080e01` (on, default page out to system memory), the L1 `0x00001d59` (the firmware's ECO bits
+  kept, access mode 3, advanced driver model, uncached type), and its VMID 0 invalidation is acknowledged. The
+  display and the interrupt handler, which use the memory hub, did not notice: the interrupts kept coming at 60 a
+  second through both, `kmsflip` flipped at 3.2 ms, and Sway with glmark2's jellyfish ran at about 497 to 537
+  frames a second with no overflow and no error (`tests/graphics/accept-x86_64-amd-display-irq.png`).
+- **Not automatic yet.** Nothing uses the GART until the engines (R4), so the hubs are set up on request. The
+  memory hub's identity-aperture registers are not in the specification's table and are left alone; context 1
+  is not used.
+
+### 16.10 R2.4: doorbells, and R2 done (2026-11-24)
+
+- **Doorbells work.** `vgapci` maps BAR2 (the 2 MiB doorbell aperture); `lib/amdgpu/src/doorbell.rs` enables the
+  aperture (`RCC_DOORBELL_APER_EN`), programs the bus interface's interrupt handler range (dword `0x2f0`, two
+  dwords) behind the NBIF index/data pair (`RSMU_INDEX` `0x50`, `RSMU_DATA` `0x54`, byte `0x1403bc8`, the index put
+  back as found), and sets `IH_DOORBELL_RPTR`. `dev.drmn.1.doorbells` then makes the interrupt handler publish its
+  read pointer by doorbell (BAR2 byte `0xbc0`) instead of the register. On the X870E, with the interrupts at 60 a
+  second, `IH_RB_RPTR` reads back the driver's pointer (`0x26e0`, and `0x3d60` on a second run: they agree), and
+  `kmsflip` flips as before.
+- **R2 is done:** MSI vector and interrupt ring in video memory (R2.1), both translation hubs (R2.2, R2.3),
+  doorbells (R2.4), and the display's vertical blanking from the interrupt. The hubs and doorbells are set up
+  on request (`gmc`, `gmc_mm`, `doorbells`); they become automatic when the engines need them (R4).
+
+**R3 as the specification's author lays it out (05, 03; 2026-11-24).** Everything in R3's PSP part fits video
+memory addresses (the ring, command and fence buffers, the 1 MiB-aligned staging buffer, the image area, the trusted
+memory zone, each by its `0xF4_...` GPU address; the zone's separate physical address field is `0x18_4000_0000`
+plus the offset), so the GART is not needed. The secure OS is already running (`C2PMSG_81` nonzero): create the
+ring, load the TOC (`psp_13_0_5_toc.bin` from offset `0x100`, 1,536 bytes; command `0x20`; the response's size
+field is the zone's, `0xa00000`), set the zone up (`0x05`, flags `0x2`), then the images. **Loading the display
+microcontroller's image (type 51) is held back to the display's second stage:** the platform's firmware is
+driving the display, and the reference never loads it alone after the other images (untested). The engine images
+(SDMA0, CE, PFP, ME, MEC, the RLC lists and RLC_G, then "start RLC autoload", the ASD from the trusted
+applications file) are R4's graphics bring-up, not the display's; R3 for the display needs the ring, the TOC,
+the zone, and then the display microcontroller's load as one experiment. The files (decompressed from linux-firmware
+20261019, checked against 02 section 11) are: `psp_13_0_5_toc.bin`, `psp_13_0_5_ta.bin`, `sdma_5_2_6.bin`,
+`gc_10_3_6_{ce,pfp,me,mec,mec2,rlc}.bin`, `dcn_3_1_5_dmcub.bin`.
+

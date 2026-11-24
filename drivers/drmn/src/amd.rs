@@ -63,7 +63,18 @@ pub(crate) struct Amd {
     hdp_ready: core::sync::atomic::AtomicBool,
     /// The graphics card, once registered.
     kms: SpinLock<Option<(Arc<amd_kms::AmdKms>, Arc<drm::Card>)>>,
+    /// The interrupts.
+    irq: Arc<crate::interrupt::Irq>,
+    /// The page the hubs send faults and aperture misses to, while the
+    /// hubs are set up.
+    dummy: SpinLock<Option<vm::dma::DmaCoherent<u8>>>,
 }
+
+/// Where the GART's page table is in video memory (BAR0 offset): past the
+/// interrupt handler's ring, well below the top 2 MiB.
+pub(crate) const GART_AT: usize = 144 << 20;
+/// The table's size: 8 bytes for each 4 KiB page of a 1 GiB GART.
+pub(crate) const GART_BYTES: usize = (1 << 30) / 4096 * 8;
 
 impl core::fmt::Debug for Amd {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -92,10 +103,12 @@ impl Amd {
     pub(crate) fn new(name: String, gpu: Weak<Aperture>) -> Self {
         Self {
             name,
-            gpu,
             table: SpinLock::new(None),
             hdp_ready: core::sync::atomic::AtomicBool::new(false),
+            irq: Arc::new(crate::interrupt::Irq::new(gpu.clone())),
+            gpu,
             kms: SpinLock::new(None),
+            dummy: SpinLock::new(None),
         }
     }
 
@@ -196,6 +209,42 @@ impl Amd {
             }
             Err(skip) => {
                 self.log(format_args!("display registers not read: {skip:?}"));
+                Err(Errno::ENOTSUP)
+            }
+        }
+    }
+
+    /// Reads the memory, interrupt and doorbell registers the firmware left
+    /// (stage R2.0, docs/GRAPHICS.md §16.6) and logs them: plain reads.
+    pub(crate) fn memory(&self) -> Result<(), abi::errno::Errno> {
+        use abi::errno::Errno;
+        let gpu = self.gpu()?;
+        let d = {
+            let cache = self.table.lock();
+            cache.clone()
+        };
+        let Some(d) = d else {
+            self.log(format_args!(
+                "memory registers: read the discovery table first (dev.drmn sysctl `discover`)"
+            ));
+            return Err(Errno::EINVAL);
+        };
+        match amdgpu::memory::read_all(&Bar5(&gpu), &d) {
+            Ok(readings) => {
+                self.log(format_args!(
+                    "memory registers as the firmware left them ({} reads):",
+                    readings.len()
+                ));
+                for r in &readings {
+                    self.log(format_args!(
+                        "  {} @{:#07x} = {:#010x}",
+                        r.name, r.offset, r.value
+                    ));
+                }
+                Ok(())
+            }
+            Err(skip) => {
+                self.log(format_args!("memory registers not read: {skip:?}"));
                 Err(Errno::ENOTSUP)
             }
         }
@@ -384,7 +433,7 @@ impl Amd {
                 return;
             }
         }
-        let card = match crate::kms::card(&gpu) {
+        let card = match crate::kms::card(&gpu, Arc::clone(&self.irq)) {
             Ok(c) => c,
             Err(e) => {
                 self.log(format_args!("no graphics card: {e:?}"));
@@ -405,6 +454,20 @@ impl Amd {
         let gone = drm::retire_firmware_cards(s);
         if gone > 0 {
             self.log(format_args!("took over from the firmware framebuffer card"));
+        }
+        // Frames come from the display's interrupt when the function has a
+        // vector; without one the core times them.
+        let frames = Arc::clone(&card);
+        self.irq.set_on_frame(alloc::boxed::Box::new(move |now| {
+            use drm::DrmDriver;
+            if let Some(kms) = frames.kms() {
+                kms.vblank(0, now);
+            }
+        }));
+        if self.irq.start().is_ok() {
+            self.log(format_args!(
+                "vertical blanking from the display's interrupt"
+            ));
         }
         *self.kms.lock() = Some((card, node));
     }
@@ -448,6 +511,120 @@ impl Amd {
             None => self.log(format_args!("refresh: no time passed")),
         }
         Ok(())
+    }
+
+    /// Makes the interrupt handler's ring and turns the frame-start interrupt
+    /// on (stage R2.1).
+    pub(crate) fn start_interrupts(&self) -> Result<(), abi::errno::Errno> {
+        let r = self.irq.start();
+        match &r {
+            Ok(()) => self.log(format_args!("interrupts on")),
+            Err(e) => self.log(format_args!("interrupts not started: {e:?}")),
+        }
+        r
+    }
+
+    /// Moves the interrupt handler's read pointer to the doorbell and checks
+    /// the register shows what was written (stage R2.4).
+    pub(crate) fn doorbells(&self) -> Result<(), abi::errno::Errno> {
+        match self.irq.use_doorbell() {
+            Ok((held, shown)) => {
+                self.log(format_args!(
+                    "doorbells: the interrupt handler's read pointer {held:#x}, its register {shown:#x} ({})",
+                    if held == shown { "agree" } else { "DIFFER" }
+                ));
+                Ok(())
+            }
+            Err(e) => {
+                self.log(format_args!("doorbells not started: {e:?}"));
+                Err(e)
+            }
+        }
+    }
+
+    /// Turns the interrupts off.
+    pub(crate) fn stop_interrupts(&self) {
+        self.irq.stop();
+    }
+
+    /// Sets a translation hub up (stages R2.2 and R2.3, docs/GRAPHICS.md
+    /// §16.6): the GART's flat page table in video memory (every entry
+    /// invalid; the two hubs share it), a dummy system page for faults, the
+    /// hub's registers in the specification's order, and an invalidation of
+    /// VMID 0 on the processor's engine. The graphics hub serves the
+    /// engines and is idle; the memory hub serves the display and the
+    /// interrupt handler, so the frame counter is read before and after, to
+    /// show the display kept running.
+    pub(crate) fn gmc(&self, hub: amdgpu::gmc::Hub) -> Result<(), abi::errno::Errno> {
+        use abi::errno::Errno;
+        use amdgpu::flip;
+        use amdgpu::gmc::{self, Hub, Reg};
+        use amdgpu::regs::Window;
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        let (len, tag) = (gpu.vram_len(), gpu.dma_tag());
+        let (Some(len), Some(tag)) = (len, tag) else {
+            self.log(format_args!(
+                "translation hub: no video memory window or no DMA tag"
+            ));
+            return Err(Errno::ENXIO);
+        };
+        if len < GART_AT + GART_BYTES {
+            return Err(Errno::ENXIO);
+        }
+        // The first hub makes the table and the page; the second shares them.
+        let existing = self
+            .dummy
+            .lock()
+            .as_ref()
+            .map(vm::dma::DmaCoherent::bus_addr);
+        let (dummy_page, fresh) = if let Some(addr) = existing {
+            (addr, None)
+        } else {
+            for at in (0..GART_BYTES).step_by(4) {
+                gpu.vram_write32(GART_AT + at, 0);
+            }
+            let page = tag.coherent::<u8>(4096).map_err(|_| Errno::ENOMEM)?;
+            (page.bus_addr(), Some(page))
+        };
+        let setup = gmc::Setup {
+            gart_table: (u64::from(w.read32(hub.reg(Reg::FbOffset))) << 24) + GART_AT as u64,
+            gart_start: 0,
+            gart_end: (1 << 30) - 1,
+            dummy_page,
+            retry_interrupt: hub == Hub::Gfx,
+        };
+        let before = flip::frame_count(&w);
+        // The table is in video memory: make the writes visible first.
+        let _ = gpu.vram_read32(GART_AT);
+        if !self
+            .hdp_ready
+            .swap(true, core::sync::atomic::Ordering::AcqRel)
+        {
+            flip::hdp_init(&w);
+        }
+        flip::hdp_flush(&w);
+        if let Err(e) = gmc::init(&w, hub, &setup) {
+            self.log(format_args!("{hub:?} hub: not set up: {e:?}"));
+            return Err(Errno::EINVAL);
+        }
+        if let Some(page) = fresh {
+            *self.dummy.lock() = Some(page);
+        }
+        flip::hdp_flush(&w);
+        let done = gmc::invalidate(&w, hub, 0, 1000, &|| bus::manager().delay_us(10));
+        let after = flip::frame_count(&w);
+        self.log(format_args!(
+            "{hub:?} hub: GART {:#x}..{:#x} (table at {:#x}), context 0 {:#010x}, L2 {:#010x}, L1 {:#010x}; \
+             invalidation {done:?}; display frames {before} to {after}",
+            setup.gart_start,
+            setup.gart_end,
+            setup.gart_table,
+            w.read32(hub.context_cntl(0)),
+            w.read32(hub.reg(Reg::L2Cntl)),
+            w.read32(hub.reg(Reg::L1Tlb)),
+        ));
+        done.map_err(|_| Errno::EIO)
     }
 
     /// A one-line summary of the cached table, for a sysctl.
@@ -526,6 +703,54 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         "flip",
         "Write 1 to show a test pattern from video memory for three seconds, then restore the firmware's picture",
         move || r.flip_test(),
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "gmc",
+        "Write 1 to set the graphics hub up: the GART's table in video memory, the apertures, context 0, an invalidation",
+        move || r.gmc(amdgpu::gmc::Hub::Gfx),
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "gmc_mm",
+        "Write 1 to set the memory hub up (the display's and the interrupt handler's): as `gmc`",
+        move || r.gmc(amdgpu::gmc::Hub::Mm),
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "doorbells",
+        "Write 1 to enable the doorbell aperture and publish the interrupt handler's read pointer through its doorbell",
+        move || r.doorbells(),
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "interrupts",
+        "Write 1 to make the interrupt handler's ring and turn the frame-start interrupt on",
+        move || r.start_interrupts(),
+    );
+    let r = Arc::clone(a);
+    let _ = t.add_value(
+        node,
+        sysctl::Number::Auto,
+        "irq",
+        "What the interrupts have done",
+        sysctl::Value::Str(Box::new(move |out| out.push_str(&r.irq.summary()))),
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "memory",
+        "Write 1 to read the memory, interrupt and doorbell registers and log them (read-only)",
+        move || r.memory(),
     );
     let r = Arc::clone(a);
     crate::control::trigger(

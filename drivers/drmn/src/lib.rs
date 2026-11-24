@@ -27,6 +27,7 @@ extern crate alloc;
 
 mod amd;
 mod control;
+mod interrupt;
 mod kms;
 
 use alloc::string::String;
@@ -259,6 +260,7 @@ impl Driver for Drmn {
 
     fn stop(&self, cx: &mut StopCx<'_>, why: StopReason) {
         if let Backend::Amd(a) = &self.backend {
+            a.stop_interrupts();
             a.unregister_kms(
                 cx.sleepable(),
                 !matches!(why, StopReason::Shutdown | StopReason::Reset),

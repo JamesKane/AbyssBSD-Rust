@@ -24,6 +24,8 @@ struct Scanout {
     /// The GPU address of the first byte of video memory.
     base: u64,
     hdp_ready: SpinLock<bool>,
+    /// The interrupts: while they run, frames come from them.
+    irq: Arc<crate::interrupt::Irq>,
 }
 
 impl Display for Scanout {
@@ -70,6 +72,10 @@ impl Display for Scanout {
         bus::manager().delay_us(u64::from(us));
     }
 
+    fn vblank_interrupt(&self) -> bool {
+        self.irq.active()
+    }
+
     fn usable(&self) -> usize {
         self.gpu.upgrade().and_then(|g| g.vram_len()).unwrap_or(0)
     }
@@ -91,7 +97,10 @@ pub(crate) enum Refused {
 }
 
 /// The card for `gpu`'s display, if it is the one the console shows.
-pub(crate) fn card(gpu: &Arc<Aperture>) -> Result<Arc<AmdKms>, Refused> {
+pub(crate) fn card(
+    gpu: &Arc<Aperture>,
+    irq: Arc<crate::interrupt::Irq>,
+) -> Result<Arc<AmdKms>, Refused> {
     let phys = gpu.vram_phys().ok_or(Refused::NoAperture)?;
     let w = Bar5(gpu);
     let adopted = flip::adopt(&w).map_err(Refused::NotAdoptable)?;
@@ -112,6 +121,7 @@ pub(crate) fn card(gpu: &Arc<Aperture>) -> Result<Arc<AmdKms>, Refused> {
         gpu: Arc::downgrade(gpu),
         base: adopted.vram_base,
         hdp_ready: SpinLock::new(false),
+        irq,
     });
     amd_kms::create(Geometry { width, height }, display).map_err(|_| Refused::Size)
 }
