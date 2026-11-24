@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: MIT
-// Copyright Advanced Micro Devices, Inc.
+// Copyright 2018 Advanced Micro Devices, Inc.
+// Copyright 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2018  Advanced Micro Devices, Inc.
+// Copyright 2008 Advanced Micro Devices, Inc.
+// Copyright 2008 Red Hat Inc.
+// Copyright 2009 Jerome Glisse.
+// Copyright 2025 Advanced Micro Devices, Inc.
+// Copyright (C) 2020  Advanced Micro Devices, Inc.
 // Copyright (c) 2026 The AbyssBSD Project
 //! The registers read before discovery has run, and the way VRAM is read
 //! through them (specification 01, sections 3 and 4.1).

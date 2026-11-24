@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Copyright Advanced Micro Devices, Inc.
+// Copyright 2018 Advanced Micro Devices, Inc.
+// Copyright 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2018  Advanced Micro Devices, Inc.
 // Copyright (c) 2026 The AbyssBSD Project
 //! Tests for the discovery table: the two real Raphael captures (the
 //! specification's section 9.1 vectors) and hostile variants.

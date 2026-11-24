@@ -65,6 +65,8 @@ const AMD_BAR5_MIN: u64 = 0x8_0000;
 pub struct Aperture {
     mmio: MmioGrant<Bytes>,
     len: usize,
+    /// An AMD GPU's VRAM aperture (BAR0), when it could be mapped.
+    vram: Option<(MmioGrant<Bytes>, usize)>,
     pci: Arc<PciChild>,
     tag: Option<DmaTag>,
 }
@@ -84,6 +86,24 @@ impl Aperture {
         }
         self.mmio.write32(offset, value);
         true
+    }
+
+    /// The 32-bit word at byte `offset` of the VRAM aperture (BAR0 on an
+    /// AMD GPU), or `None` if there is no aperture or the offset is outside
+    /// or not aligned.
+    #[must_use]
+    pub fn vram_read32(&self, offset: usize) -> Option<u32> {
+        let (map, len) = self.vram.as_ref()?;
+        if !offset.is_multiple_of(4) || offset.checked_add(4)? > *len {
+            return None;
+        }
+        Some(map.read32(offset))
+    }
+
+    /// The size of the VRAM aperture, if there is one.
+    #[must_use]
+    pub fn vram_len(&self) -> Option<usize> {
+        self.vram.as_ref().map(|(_, l)| *l)
     }
 
     /// The PCI function.
@@ -146,10 +166,31 @@ fn amd_aperture(cx: &mut AttachCx<'_>, child: &Arc<PciChild>) -> Option<Arc<Aper
         ));
         return None;
     }
+    // The VRAM aperture is BAR0, the first memory resource; a failure to
+    // map it leaves the register window usable.
+    let vram = child
+        .function
+        .bars
+        .iter()
+        .filter(|b| b.kind != BarKind::Io)
+        .position(|b| b.index == 0)
+        .and_then(|i| {
+            let size = child.function.bars.iter().find(|b| b.index == 0)?.size;
+            match cx.mmio_bytes(i) {
+                Ok(m) => Some((m, usize::try_from(size).ok()?)),
+                Err(e) => {
+                    log(&alloc::format!(
+                        "the VRAM aperture (BAR0) was refused: {e:?}"
+                    ));
+                    None
+                }
+            }
+        });
     match cx.mmio_bytes(index) {
         Ok(mmio) => Some(Arc::new(Aperture {
             mmio,
             len: usize::try_from(len).unwrap_or(0),
+            vram,
             pci: Arc::clone(child),
             tag: None,
         })),
@@ -200,6 +241,7 @@ impl Driver for VgaPci {
                 aperture = Some(Arc::new(Aperture {
                     mmio,
                     len: usize::try_from(NVIDIA_BAR0_LEN).unwrap_or(0),
+                    vram: None,
                     pci: Arc::clone(&child),
                     tag: Some(tag),
                 }));

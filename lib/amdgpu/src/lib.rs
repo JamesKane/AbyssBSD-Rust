@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Copyright Advanced Micro Devices, Inc.
+// Copyright 2018 Advanced Micro Devices, Inc.
+// Copyright 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2018  Advanced Micro Devices, Inc.
 // Copyright (c) 2026 The AbyssBSD Project
 //! AMD GPUs of the RDNA2 generation, without hardware: how a chip names
 //! itself in its IP discovery table, the segment bases of its blocks, and

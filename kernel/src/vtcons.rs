@@ -199,6 +199,7 @@ pub(crate) fn start() {
         vm::object::MemAttr::WriteCombining,
     ));
     kprintln!("VT(efifb): resolution {width}x{height}");
+    kprintln!("efifb: framebuffer at {phys:#x}, {size:#x} bytes");
     let ttys: Vec<_> = (0..vt::WINDOWS)
         .map(|i| {
             let t = tty::create(
