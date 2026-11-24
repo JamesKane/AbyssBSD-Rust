@@ -285,12 +285,17 @@ fn soak_verdict(log: &str) -> Result<String> {
     Ok(seen)
 }
 
-/// The soak: boots `disk` with the bench disk on the test bridge, runs
-/// [`SOAK`] for `secs` seconds, and judges the two looks.
-/// A probe (`net-soak --probe`): boots as [`soak`] does and runs the bench
-/// disk's script, which powers the guest off; returns its `probe` lines and
-/// the profiler's `prof` ones.
-pub(super) fn probe(disk: &Path, bench_disk: &Path, log: &Path, secs: u64) -> Result<String> {
+/// Boots `disk` (the installed root, on NVMe) with the bench disk and a tap
+/// on the test bridge, logs in as root, and runs the bench disk's script
+/// with `args` after the peer's address; waits up to `wait` for the guest
+/// to power off. Returns the console log and whether it did.
+fn boot_and_run(
+    disk: &Path,
+    bench_disk: &Path,
+    log: &Path,
+    args: &str,
+    wait: Duration,
+) -> Result<(String, bool)> {
     let vm = Vm {
         smp: SMP,
         mem: "2G".into(),
@@ -304,12 +309,25 @@ pub(super) fn probe(disk: &Path, bench_disk: &Path, log: &Path, secs: u64) -> Re
     let started = (|| -> Result<()> {
         crate::net::login(&mut session, Duration::from_secs(600), &["panic:"])?;
         session.send(&format!(
-            "mount -o ro /dev/vtbd0 /mnt && sh /mnt/run.sh {PEER} {secs}\n"
+            "mount -o ro /dev/vtbd0 /mnt && sh /mnt/run.sh {PEER}{args}\n"
         ))
     })();
-    let exited = session.finish(Duration::from_secs(secs + 1200))?;
+    let exited = session.finish(wait)?;
     started?;
-    let text = fs::read_to_string(log)?;
+    Ok((fs::read_to_string(log)?, exited))
+}
+
+/// A probe (`net-soak --probe`): boots as [`soak`] does and runs the bench
+/// disk's script, which powers the guest off; returns its `probe` lines and
+/// the profiler's `prof` ones.
+pub(super) fn probe(disk: &Path, bench_disk: &Path, log: &Path, secs: u64) -> Result<String> {
+    let (text, exited) = boot_and_run(
+        disk,
+        bench_disk,
+        log,
+        &format!(" {secs}"),
+        Duration::from_secs(secs + 1200),
+    )?;
     let mut seen = String::new();
     let mut last = "";
     for l in text.lines().map(|l| l.trim_end_matches('\r')) {
@@ -326,26 +344,16 @@ pub(super) fn probe(disk: &Path, bench_disk: &Path, log: &Path, secs: u64) -> Re
     Ok(seen)
 }
 
+/// The soak: boots `disk` with the bench disk on the test bridge, runs
+/// [`SOAK`] for `secs` seconds, and judges the two looks.
 pub(super) fn soak(disk: &Path, bench_disk: &Path, log: &Path, secs: u64) -> Result<String> {
-    let vm = Vm {
-        smp: SMP,
-        mem: "2G".into(),
-        nvme: true,
-        extra_disk: Some(bench_disk.to_path_buf()),
-        pin: true,
-        net: Some(Net::Bridge(Tap::new()?)),
-        ..Vm::new(Vmm::Bhyve, Arch::X86_64, disk.to_path_buf())
-    };
-    let mut session = Session::start(vm, log)?;
-    let started = (|| -> Result<()> {
-        crate::net::login(&mut session, Duration::from_secs(600), &["panic:"])?;
-        session.send(&format!(
-            "mount -o ro /dev/vtbd0 /mnt && sh /mnt/run.sh {PEER} {secs}\n"
-        ))
-    })();
-    let exited = session.finish(Duration::from_secs(secs + 2000))?;
-    started?;
-    let text = fs::read_to_string(log)?;
+    let (text, exited) = boot_and_run(
+        disk,
+        bench_disk,
+        log,
+        &format!(" {secs}"),
+        Duration::from_secs(secs + 2000),
+    )?;
     soak_verdict(&text).map_err(|e| format!("{}: {e} (exited: {exited})", log.display()).into())
 }
 
@@ -359,33 +367,13 @@ pub(super) fn script() -> &'static str {
     RUN
 }
 
-/// One run: boots `disk` (the installed root, on NVMe) with the bench disk
-/// and a tap on the test bridge, logs in as root, and runs [`RUN`], which
-/// powers the guest off.
+/// One run: boots `disk` and runs [`RUN`], which powers the guest off.
 pub(super) fn run_one(
     disk: &Path,
     bench_disk: &Path,
     log: &Path,
 ) -> Result<Vec<(String, f64, String)>> {
-    let vm = Vm {
-        smp: SMP,
-        mem: "2G".into(),
-        nvme: true,
-        extra_disk: Some(bench_disk.to_path_buf()),
-        pin: true,
-        net: Some(Net::Bridge(Tap::new()?)),
-        ..Vm::new(Vmm::Bhyve, Arch::X86_64, disk.to_path_buf())
-    };
-    let mut session = Session::start(vm, log)?;
-    let started = (|| -> Result<()> {
-        crate::net::login(&mut session, Duration::from_secs(600), &["panic:"])?;
-        session.send(&format!(
-            "mount -o ro /dev/vtbd0 /mnt && sh /mnt/run.sh {PEER}\n"
-        ))
-    })();
-    let exited = session.finish(Duration::from_secs(1800))?;
-    started?;
-    let text = fs::read_to_string(log)?;
+    let (text, exited) = boot_and_run(disk, bench_disk, log, "", Duration::from_secs(1800))?;
     parse(&text).map_err(|e| format!("{}: {e} (exited: {exited})", log.display()).into())
 }
 
