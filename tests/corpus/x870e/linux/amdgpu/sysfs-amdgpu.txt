@@ -1,0 +1,39 @@
+== vbios_version
+102-RAPHAEL-008
+== mem_info_vram_total
+536870912
+== mem_info_vis_vram_total
+536870912
+== mem_info_gtt_total
+50143420416
+== mem_info_vram_used
+16650240
+== pp_dpm_sclk
+0: 400Mhz 
+1: 600Mhz *
+2: 2200Mhz 
+== pp_dpm_mclk
+0: 3300Mhz *
+== pp_dpm_fclk
+
+== pp_dpm_socclk
+0: 400Mhz 
+1: 1200Mhz *
+== pp_dpm_dcefclk
+
+== pp_features
+cat: /sys/class/drm/card1/device/pp_features: No such file or directory
+== power_dpm_force_performance_level
+auto
+== current_link_speed
+16.0 GT/s PCIe
+== current_link_width
+16
+== revision
+0xc2
+== subsystem_vendor
+0x1458
+== subsystem_device
+0xd000
+== unique_id
+cat: /sys/class/drm/card1/device/unique_id: No such file or directory

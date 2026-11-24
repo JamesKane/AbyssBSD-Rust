@@ -1,0 +1,51 @@
+-rw-r--r--. 1 root root  146224 Oct 18 19:00 dcn_3_1_5_dmcub.bin.xz
+-rw-r--r--. 1 root root    4296 Oct 18 19:00 dimgrey_cavefish_ce.bin.xz
+lrwxrwxrwx. 1 root root      23 Oct 18 19:00 dimgrey_cavefish_dmcub.bin.xz -> beige_goby_dmcub.bin.xz
+-rw-r--r--. 1 root root    7876 Oct 18 19:00 dimgrey_cavefish_me.bin.xz
+lrwxrwxrwx. 1 root root      27 Oct 18 19:00 dimgrey_cavefish_mec2.bin.xz -> dimgrey_cavefish_mec.bin.xz
+-rw-r--r--. 1 root root   34268 Oct 18 19:00 dimgrey_cavefish_mec.bin.xz
+-rw-r--r--. 1 root root   13740 Oct 18 19:00 dimgrey_cavefish_pfp.bin.xz
+-rw-r--r--. 1 root root   37152 Oct 18 19:00 dimgrey_cavefish_rlc.bin.xz
+-rw-r--r--. 1 root root   10504 Oct 18 19:00 dimgrey_cavefish_sdma.bin.xz
+-rw-r--r--. 1 root root  102580 Oct 18 19:00 dimgrey_cavefish_smc.bin.xz
+-rw-r--r--. 1 root root  104444 Oct 18 19:00 dimgrey_cavefish_sos.bin.xz
+lrwxrwxrwx. 1 root root      20 Oct 18 19:00 dimgrey_cavefish_ta.bin.xz -> beige_goby_ta.bin.xz
+lrwxrwxrwx. 1 root root      21 Oct 18 19:00 dimgrey_cavefish_vcn.bin.xz -> beige_goby_vcn.bin.xz
+-rw-r--r--. 1 root root    4292 Oct 18 19:00 gc_10_3_6_ce.bin.xz
+-rw-r--r--. 1 root root    7696 Oct 18 19:00 gc_10_3_6_me.bin.xz
+lrwxrwxrwx. 1 root root      20 Oct 18 19:00 gc_10_3_6_mec2.bin.xz -> gc_10_3_6_mec.bin.xz
+-rw-r--r--. 1 root root   34032 Oct 18 19:00 gc_10_3_6_mec.bin.xz
+-rw-r--r--. 1 root root   13632 Oct 18 19:00 gc_10_3_6_pfp.bin.xz
+-rw-r--r--. 1 root root   39896 Oct 18 19:00 gc_10_3_6_rlc.bin.xz
+-rw-r--r--. 1 root root    4300 Oct 18 19:00 navy_flounder_ce.bin.xz
+lrwxrwxrwx. 1 root root      23 Oct 18 19:00 navy_flounder_dmcub.bin.xz -> beige_goby_dmcub.bin.xz
+-rw-r--r--. 1 root root    7808 Oct 18 19:00 navy_flounder_me.bin.xz
+lrwxrwxrwx. 1 root root      24 Oct 18 19:00 navy_flounder_mec2.bin.xz -> navy_flounder_mec.bin.xz
+-rw-r--r--. 1 root root   34300 Oct 18 19:00 navy_flounder_mec.bin.xz
+-rw-r--r--. 1 root root   13656 Oct 18 19:00 navy_flounder_pfp.bin.xz
+-rw-r--r--. 1 root root   44060 Oct 18 19:00 navy_flounder_rlc.bin.xz
+-rw-r--r--. 1 root root   10512 Oct 18 19:00 navy_flounder_sdma.bin.xz
+-rw-r--r--. 1 root root  105364 Oct 18 19:00 navy_flounder_smc.bin.xz
+-rw-r--r--. 1 root root  112228 Oct 18 19:00 navy_flounder_sos.bin.xz
+lrwxrwxrwx. 1 root root      20 Oct 18 19:00 navy_flounder_ta.bin.xz -> beige_goby_ta.bin.xz
+lrwxrwxrwx. 1 root root      21 Oct 18 19:00 navy_flounder_vcn.bin.xz -> beige_goby_vcn.bin.xz
+-rw-r--r--. 1 root root   52852 Oct 18 19:00 psp_13_0_5_asd.bin.xz
+-rw-r--r--. 1 root root   64516 Oct 18 19:00 psp_13_0_5_ta.bin.xz
+-rw-r--r--. 1 root root     892 Oct 18 19:00 psp_13_0_5_toc.bin.xz
+lrwxrwxrwx. 1 root root      20 Oct 18 19:00 psp_13_0_7_ta.bin.xz -> psp_13_0_5_ta.bin.xz
+-rw-r--r--. 1 root root   10184 Oct 18 19:00 sdma_5_2_6.bin.xz
+-rw-r--r--. 1 root root    4304 Oct 18 19:00 sienna_cichlid_ce.bin.xz
+lrwxrwxrwx. 1 root root      23 Oct 18 19:00 sienna_cichlid_dmcub.bin.xz -> beige_goby_dmcub.bin.xz
+-rw-r--r--. 1 root root    7824 Oct 18 19:00 sienna_cichlid_me.bin.xz
+lrwxrwxrwx. 1 root root      25 Oct 18 19:00 sienna_cichlid_mec2.bin.xz -> sienna_cichlid_mec.bin.xz
+-rw-r--r--. 1 root root   34324 Oct 18 19:00 sienna_cichlid_mec.bin.xz
+-rw-r--r--. 1 root root   13660 Oct 18 19:00 sienna_cichlid_pfp.bin.xz
+-rw-r--r--. 1 root root   44532 Oct 18 19:00 sienna_cichlid_rlc.bin.xz
+-rw-r--r--. 1 root root   10588 Oct 18 19:00 sienna_cichlid_sdma.bin.xz
+-rw-r--r--. 1 root root  109128 Oct 18 19:00 sienna_cichlid_smc.bin.xz
+-rw-r--r--. 1 root root  118572 Oct 18 19:00 sienna_cichlid_sos.bin.xz
+-rw-r--r--. 1 root root   95728 Oct 18 19:00 sienna_cichlid_ta.bin.xz
+lrwxrwxrwx. 1 root root      21 Oct 18 19:00 sienna_cichlid_vcn.bin.xz -> beige_goby_vcn.bin.xz
+-rw-r--r--. 1 root root  366140 Oct 18 19:00 vcn_3_1_2.bin.xz
+lrwxrwxrwx. 1 root root      20 Oct 18 19:00 yellow_carp_ta.bin.xz -> psp_13_0_5_ta.bin.xz
+lrwxrwxrwx. 1 root root      16 Oct 18 19:00 yellow_carp_vcn.bin.xz -> vcn_3_1_2.bin.xz

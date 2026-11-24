@@ -1,0 +1,200 @@
+== amdgpu_pm_info
+GFX Clocks and Power:
+	3300 MHz (MCLK)
+	600 MHz (SCLK)
+	0 MHz (PSTATE_SCLK)
+	0 MHz (PSTATE_MCLK)
+	1449 mV (VDDGFX)
+	1290 mV (VDDNB)
+	6.37 W (current SoC including CPU)
+
+GPU Temperature: 42 C
+GPU Load: 0 %
+VCN Load: 0 %
+
+SMC Feature Mask: 0x0002ff33b15fefff
+VCN: Powered down
+
+Clock Gating Flags Mask: 0xb8390f0d
+	Graphics Fine Grain Clock Gating: On
+	Graphics Medium Grain Clock Gating: On
+	Graphics Medium Grain memory Light Sleep: Off
+	Graphics Coarse Grain Clock Gating: On
+	Graphics Coarse Grain memory Light Sleep: On
+	Graphics Coarse Grain Tree Shader Clock Gating: Off
+	Graphics Coarse Grain Tree Shader Light Sleep: Off
+	Graphics Command Processor Light Sleep: Off
+	Graphics Run List Controller Light Sleep: Off
+	Graphics 3D Coarse Grain Clock Gating: On
+	Graphics 3D Coarse Grain memory Light Sleep: On
+	Memory Controller Light Sleep: On
+	Memory Controller Medium Grain Clock Gating: On
+	System Direct Memory Access Light Sleep: On
+	System Direct Memory Access Medium Grain Clock Gating: On
+	Bus Interface Medium Grain Clock Gating: On
+	Bus Interface Light Sleep: Off
+	Unified Video Decoder Medium Grain Clock Gating: Off
+	Video Compression Engine Medium Grain Clock Gating: Off
+	Host Data Path Light Sleep: Off
+	Host Data Path Medium Grain Clock Gating: On
+	Digital Right Management Medium Grain Clock Gating: Off
+	Digital Right Management Light Sleep: Off
+	Rom Medium Grain Clock Gating: Off
+	Data Fabric Medium Grain Clock Gating: Off
+	VCN Medium Grain Clock Gating: Off
+	Host Data Path Deep Sleep: Off
+	Host Data Path Shutdown: Off
+	Interrupt Handler Clock Gating: On
+	JPEG Medium Grain Clock Gating: Off
+	Repeater Fine Grain Clock Gating: Off
+	Perfmon Clock Gating: Off
+	Address Translation Hub Medium Grain Clock Gating: On
+	Address Translation Hub Light Sleep: On
+
+== amdgpu_vm_info
+pid:0	Process: ----------
+	Kernel PT/PDs:
+	Evicted BOs:
+	Moved BOs:
+		0x00000000:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+		0x00000001:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+	Idle BOs:
+		0x00000000:         4096 byte UNKNOWN CPU_GTT_USWC VRAM_CONTIGUOUS
+	Per VM BOs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+	Individual BOs:
+	Evicted BOs:
+	Moved BOs:
+	Idle BOs:
+		0x00000000:      2097152 byte GTT pin count 1 CPU_ACCESS_REQUIRED VRAM_CONTIGUOUS
+== amdgpu_vram_mm
+  use_type: 1
+  use_tt: 0
+  size: 536870912
+  usage: 16650240
+  vis usage:16650240
+default_page_size: 4KiB
+chunk_size: 4KiB, total: 512MiB, free: 496MiB, clear_free: 11MiB
+order-17 free:        0 MiB, used:        0 MiB, free_blocks: 0, used_blocks: 0
+order-16 free:      256 MiB, used:        0 MiB, free_blocks: 1, used_blocks: 0
+order-15 free:      128 MiB, used:        0 MiB, free_blocks: 1, used_blocks: 0
+order-14 free:       64 MiB, used:        0 MiB, free_blocks: 1, used_blocks: 0
+order-13 free:       32 MiB, used:        0 MiB, free_blocks: 1, used_blocks: 0
+order-12 free:        0 MiB, used:        0 MiB, free_blocks: 0, used_blocks: 0
+order-11 free:        0 MiB, used:        8 MiB, free_blocks: 0, used_blocks: 1
+order-10 free:       12 MiB, used:        0 MiB, free_blocks: 3, used_blocks: 0
+order- 9 free:        2 MiB, used:        6 MiB, free_blocks: 1, used_blocks: 3
+order- 8 free:        0 MiB, used:        1 MiB, free_blocks: 0, used_blocks: 1
+order- 7 free:      512 KiB, used:      512 KiB, free_blocks: 1, used_blocks: 1
+order- 6 free:     1024 KiB, used:        0 KiB, free_blocks: 4, used_blocks: 0
+order- 5 free:      512 KiB, used:      128 KiB, free_blocks: 4, used_blocks: 1
+order- 4 free:       64 KiB, used:       64 KiB, free_blocks: 1, used_blocks: 1
+order- 3 free:       32 KiB, used:       32 KiB, free_blocks: 1, used_blocks: 1
+order- 2 free:       16 KiB, used:       32 KiB, free_blocks: 1, used_blocks: 2
+order- 1 free:        8 KiB, used:        8 KiB, free_blocks: 1, used_blocks: 1
+order- 0 free:        4 KiB, used:      124 KiB, free_blocks: 1, used_blocks: 31
+reserved:
+== amdgpu_gtt_mm
+  use_type: 1
+  use_tt: 1
+  size: 50143420416
+  usage: 12701696
+0x0000000000000000-0x0000000000000001: 1: used
+0x0000000000000001-0x0000000000000009: 8: used
+0x0000000000000009-0x0000000000000209: 512: used
+0x0000000000000209-0x0000000000000249: 64: used
+0x0000000000000249-0x000000000000024d: 4: used
+0x000000000000024d-0x000000000000024f: 2: used
+0x000000000000024f-0x0000000000000251: 2: used
+0x0000000000000251-0x0000000000000253: 2: used
+0x0000000000000253-0x0000000000000255: 2: used
+0x0000000000000255-0x0000000000000257: 2: used
+0x0000000000000257-0x0000000000000259: 2: used
+0x0000000000000259-0x000000000000025b: 2: used
+0x000000000000025b-0x000000000000025d: 2: used
+0x000000000000025d-0x000000000000025f: 2: used
+0x000000000000025f-0x0000000000000261: 2: used
+0x0000000000000261-0x0000000000000262: 1: used
+0x0000000000000262-0x0000000000000264: 2: used
+0x0000000000000264-0x0000000000000265: 1: used
+0x0000000000000265-0x0000000000000266: 1: used
+0x0000000000000266-0x0000000000000267: 1: used
+0x0000000000000267-0x0000000000000268: 1: used
+0x0000000000000268-0x0000000000000288: 32: used
+0x0000000000000288-0x0000000000000289: 1: used
+0x0000000000000289-0x0000000000000300: 119: free
+0x0000000000000300-0x0000000000000400: 256: used
+0x0000000000000400-0x0000000000000500: 256: used
+0x0000000000000500-0x0000000000000600: 256: used
+0x0000000000000600-0x0000000000000680: 128: used
+0x0000000000000680-0x00000000000008ca: 586: used
+0x00000000000008ca-0x0000000000000cca: 1024: used
+0x0000000000000cca-0x00000000000014ca: 2048: used
+0x00000000000014ca-0x0000000000001894: 970: used
+0x0000000000001894-0x0000000000040000: 255852: free
+total: 262144, used 6173 free 255971
+== amdgpu_fence_info
+--- ring 0 (gfx_0.0.0) ---
+Last signaled fence          0x00000001
+Last emitted                 0x00000001
+Last signaled trailing fence 0x00000000
+Last emitted                 0x00000000
+Last preempted               0x00000000
+Last reset                   0x00000000
+Last both                    0x00000000
+--- ring 1 (gfx_0.1.0) ---
+Last signaled fence          0x00000001
+Last emitted                 0x00000001
+Last signaled trailing fence 0x00000000
+Last emitted                 0x00000000
+Last preempted               0x00000000
+Last reset                   0x00000000
+Last both                    0x00000000
+--- ring 2 (comp_1.0.0) ---
+Last signaled fence          0x00000001
+Last emitted                 0x00000001
+--- ring 3 (comp_1.1.0) ---
+Last signaled fence          0x0000000d
+Last emitted                 0x0000000d
+--- ring 4 (comp_1.2.0) ---
+Last signaled fence          0x0000002d
+Last emitted                 0x0000002d
+--- ring 5 (comp_1.3.0) ---
+Last signaled fence          0x00000003
+Last emitted                 0x00000003
+--- ring 6 (comp_1.0.1) ---
+Last signaled fence          0x00000001
+Last emitted                 0x00000001
+--- ring 7 (comp_1.1.1) ---
+Last signaled fence          0x00000001
+Last emitted                 0x00000001
+--- ring 8 (comp_1.2.1) ---
+Last signaled fence          0x00000001
+Last emitted                 0x00000001
+--- ring 9 (comp_1.3.1) ---
+Last signaled fence          0x00000001
+Last emitted                 0x00000001
+--- ring 10 (kiq_0.2.1.0) ---
+Last signaled fence          0x0000001c
+Last emitted                 0x0000001c
+--- ring 11 (sdma0) ---
+Last signaled fence          0x00000187
+Last emitted                 0x00000187
+Last signaled trailing fence 0x00000000
+Last emitted                 0x00000000
+--- ring 12 (vcn_dec_0) ---
+Last signaled fence          0x00000004
+Last emitted                 0x00000004
+--- ring 13 (vcn_enc_0.0) ---
+Last signaled fence          0x00000002
+Last emitted                 0x00000002
+--- ring 14 (vcn_enc_0.1) ---
+Last signaled fence          0x00000002
+Last emitted                 0x00000002
+--- ring 15 (jpeg_dec) ---
+Last signaled fence          0x00000001
+Last emitted                 0x00000001
+== amdgpu_sensors
+cat: /sys/kernel/debug/dri/1/amdgpu_sensors: Invalid argument

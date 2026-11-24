@@ -29,3 +29,13 @@ Linux's namespace (`\CPVS` bytes 0-3: 1, 0, 2, 1), and the other registers the A
 Linux's results imply. `_STA` that AMD's CPM library (SSDT10) decides (`APAD`, and the `GPP7` and
 `GPP8` bridges) isn't compared: it reads a firmware data structure under a lock the test host
 doesn't model.
+
+## `linux/amdgpu/` (2026-11-24)
+
+How Fedora 45 (kernel 7.3.4-300.fc45) sees the Radeon 610M (`1002:164e`, at `7a:00.0` on this boot; the
+PCI bus numbers in the older captures above differ), captured with a read-only script for the amd-rdna2
+specification: `lspci` dumps of its four functions, `/proc/iomem`, the sysfs IP discovery tree and the raw
+debugfs `amdgpu_discovery` table, the firmware versions Linux reports, the gca configuration, and the
+SHA-256 sums of the firmware files. The video BIOS (`vbios.bin`, and the `VFCT` ACPI table that carries it) is
+**not** in the repository (AMD's image is not ours to redistribute); a copy is kept outside it, in
+`../AbyssBSD-Rust-notes/amdgpu-capture-2026-11-24/`, for the specification's author.

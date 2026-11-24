@@ -1,0 +1,555 @@
+== /sys/class/drm/card1/device/ip_discovery/die/0/108/0/base_addr
+0x00000000
+0x00000014
+0x00000D20
+0x00010400
+0x0241B000
+0x04040000
+== /sys/class/drm/card1/device/ip_discovery/die/0/108/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/108/0/hw_id
+108
+== /sys/class/drm/card1/device/ip_discovery/die/0/108/0/major
+7
+== /sys/class/drm/card1/device/ip_discovery/die/0/108/0/minor
+3
+== /sys/class/drm/card1/device/ip_discovery/die/0/108/0/num_base_addresses
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/108/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/108/0/revision
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/1/0/base_addr
+0x00016000
+0x00DC0000
+0x00E00000
+0x00E40000
+0x0243FC00
+== /sys/class/drm/card1/device/ip_discovery/die/0/1/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/1/0/hw_id
+1
+== /sys/class/drm/card1/device/ip_discovery/die/0/1/0/major
+13
+== /sys/class/drm/card1/device/ip_discovery/die/0/1/0/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/1/0/num_base_addresses
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/1/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/1/0/revision
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/11/0/base_addr
+0x00001260
+0x0000A000
+0x02402C00
+== /sys/class/drm/card1/device/ip_discovery/die/0/11/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/11/0/hw_id
+11
+== /sys/class/drm/card1/device/ip_discovery/die/0/11/0/major
+10
+== /sys/class/drm/card1/device/ip_discovery/die/0/11/0/minor
+3
+== /sys/class/drm/card1/device/ip_discovery/die/0/11/0/num_base_addresses
+3
+== /sys/class/drm/card1/device/ip_discovery/die/0/11/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/11/0/revision
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/12/0/base_addr
+0x00007800
+0x00007E00
+0x02403000
+== /sys/class/drm/card1/device/ip_discovery/die/0/12/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/12/0/hw_id
+12
+== /sys/class/drm/card1/device/ip_discovery/die/0/12/0/major
+3
+== /sys/class/drm/card1/device/ip_discovery/die/0/12/0/minor
+1
+== /sys/class/drm/card1/device/ip_discovery/die/0/12/0/num_base_addresses
+3
+== /sys/class/drm/card1/device/ip_discovery/die/0/12/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/12/0/revision
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/14/0/base_addr
+0x00480000
+0x02403800
+== /sys/class/drm/card1/device/ip_discovery/die/0/14/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/14/0/hw_id
+14
+== /sys/class/drm/card1/device/ip_discovery/die/0/14/0/major
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/14/0/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/14/0/num_base_addresses
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/14/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/14/0/revision
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/0/base_addr
+0x00014000
+0x02425800
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/0/hw_id
+150
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/0/major
+9
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/0/minor
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/0/num_base_addresses
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/0/revision
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/1/base_addr
+0x00054000
+0x02425C00
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/1/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/1/hw_id
+150
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/1/major
+9
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/1/minor
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/1/num_base_addresses
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/1/num_instance
+1
+== /sys/class/drm/card1/device/ip_discovery/die/0/150/1/revision
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/2/0/base_addr
+0x00016000
+0x00DC0000
+0x00E00000
+0x00E40000
+0x0243FC00
+== /sys/class/drm/card1/device/ip_discovery/die/0/2/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/2/0/hw_id
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/2/0/major
+13
+== /sys/class/drm/card1/device/ip_discovery/die/0/2/0/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/2/0/num_base_addresses
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/2/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/2/0/revision
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/24/0/base_addr
+0x00010000
+0x02406000
+0x04EC0000
+== /sys/class/drm/card1/device/ip_discovery/die/0/24/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/24/0/hw_id
+24
+== /sys/class/drm/card1/device/ip_discovery/die/0/24/0/major
+7
+== /sys/class/drm/card1/device/ip_discovery/die/0/24/0/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/24/0/num_base_addresses
+3
+== /sys/class/drm/card1/device/ip_discovery/die/0/24/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/24/0/revision
+1
+== /sys/class/drm/card1/device/ip_discovery/die/0/255/0/base_addr
+0x00016000
+0x00DC0000
+0x00E00000
+0x00E40000
+0x0243FC00
+== /sys/class/drm/card1/device/ip_discovery/die/0/255/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/255/0/hw_id
+255
+== /sys/class/drm/card1/device/ip_discovery/die/0/255/0/major
+13
+== /sys/class/drm/card1/device/ip_discovery/die/0/255/0/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/255/0/num_base_addresses
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/255/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/255/0/revision
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/271/0/base_addr
+0x00000012
+0x000000C0
+0x000034C0
+0x00009000
+0x02403C00
+== /sys/class/drm/card1/device/ip_discovery/die/0/271/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/271/0/hw_id
+271
+== /sys/class/drm/card1/device/ip_discovery/die/0/271/0/major
+3
+== /sys/class/drm/card1/device/ip_discovery/die/0/271/0/minor
+1
+== /sys/class/drm/card1/device/ip_discovery/die/0/271/0/num_base_addresses
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/271/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/271/0/revision
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/3/0/base_addr
+0x00016600
+0x02400C00
+== /sys/class/drm/card1/device/ip_discovery/die/0/3/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/3/0/hw_id
+3
+== /sys/class/drm/card1/device/ip_discovery/die/0/3/0/major
+13
+== /sys/class/drm/card1/device/ip_discovery/die/0/3/0/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/3/0/num_base_addresses
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/3/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/3/0/revision
+4
+== /sys/class/drm/card1/device/ip_discovery/die/0/34/0/base_addr
+0x00013200
+0x0001A000
+0x02408800
+== /sys/class/drm/card1/device/ip_discovery/die/0/34/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/34/0/hw_id
+34
+== /sys/class/drm/card1/device/ip_discovery/die/0/34/0/major
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/34/0/minor
+4
+== /sys/class/drm/card1/device/ip_discovery/die/0/34/0/num_base_addresses
+3
+== /sys/class/drm/card1/device/ip_discovery/die/0/34/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/34/0/revision
+1
+== /sys/class/drm/card1/device/ip_discovery/die/0/35/0/base_addr
+0x00000C00
+0x00013300
+0x02408C00
+== /sys/class/drm/card1/device/ip_discovery/die/0/35/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/35/0/hw_id
+35
+== /sys/class/drm/card1/device/ip_discovery/die/0/35/0/major
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/35/0/minor
+4
+== /sys/class/drm/card1/device/ip_discovery/die/0/35/0/num_base_addresses
+3
+== /sys/class/drm/card1/device/ip_discovery/die/0/35/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/35/0/revision
+1
+== /sys/class/drm/card1/device/ip_discovery/die/0/40/0/base_addr
+0x000010A0
+0x0240A000
+== /sys/class/drm/card1/device/ip_discovery/die/0/40/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/40/0/hw_id
+40
+== /sys/class/drm/card1/device/ip_discovery/die/0/40/0/major
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/40/0/minor
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/40/0/num_base_addresses
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/40/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/40/0/revision
+1
+== /sys/class/drm/card1/device/ip_discovery/die/0/4/0/base_addr
+0x00016800
+0x00016A00
+0x0001CC00
+0x00440000
+0x02401000
+0x0242D400
+== /sys/class/drm/card1/device/ip_discovery/die/0/4/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/4/0/hw_id
+4
+== /sys/class/drm/card1/device/ip_discovery/die/0/4/0/major
+13
+== /sys/class/drm/card1/device/ip_discovery/die/0/4/0/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/4/0/num_base_addresses
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/4/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/4/0/revision
+10
+== /sys/class/drm/card1/device/ip_discovery/die/0/41/0/base_addr
+0x00000F20
+0x0240A400
+== /sys/class/drm/card1/device/ip_discovery/die/0/41/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/41/0/hw_id
+41
+== /sys/class/drm/card1/device/ip_discovery/die/0/41/0/major
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/41/0/minor
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/41/0/num_base_addresses
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/41/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/41/0/revision
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/42/0/base_addr
+0x00001260
+0x0000A000
+0x02402C00
+== /sys/class/drm/card1/device/ip_discovery/die/0/42/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/42/0/hw_id
+42
+== /sys/class/drm/card1/device/ip_discovery/die/0/42/0/major
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/42/0/minor
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/42/0/num_base_addresses
+3
+== /sys/class/drm/card1/device/ip_discovery/die/0/42/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/42/0/revision
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/45/0/base_addr
+0x000001E0
+0x00000260
+0x00000280
+0x0240B400
+0x02413C00
+0x02416000
+== /sys/class/drm/card1/device/ip_discovery/die/0/45/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/45/0/hw_id
+45
+== /sys/class/drm/card1/device/ip_discovery/die/0/45/0/major
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/45/0/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/45/0/num_base_addresses
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/45/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/45/0/revision
+1
+== /sys/class/drm/card1/device/ip_discovery/die/0/46/0/base_addr
+0x00007000
+0x00C00000
+0x0240B800
+0x07C00000
+0x12400000
+== /sys/class/drm/card1/device/ip_discovery/die/0/46/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/46/0/hw_id
+46
+== /sys/class/drm/card1/device/ip_discovery/die/0/46/0/major
+4
+== /sys/class/drm/card1/device/ip_discovery/die/0/46/0/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/46/0/num_base_addresses
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/46/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/46/0/revision
+1
+== /sys/class/drm/card1/device/ip_discovery/die/0/48/0/base_addr
+0x000002C0
+0x00B40000
+0x0240C000
+0x11000000
+== /sys/class/drm/card1/device/ip_discovery/die/0/48/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/48/0/hw_id
+48
+== /sys/class/drm/card1/device/ip_discovery/die/0/48/0/major
+7
+== /sys/class/drm/card1/device/ip_discovery/die/0/48/0/minor
+1
+== /sys/class/drm/card1/device/ip_discovery/die/0/48/0/num_base_addresses
+4
+== /sys/class/drm/card1/device/ip_discovery/die/0/48/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/48/0/revision
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/5/0/base_addr
+0x00017400
+0x02401400
+== /sys/class/drm/card1/device/ip_discovery/die/0/5/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/5/0/hw_id
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/5/0/major
+13
+== /sys/class/drm/card1/device/ip_discovery/die/0/5/0/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/5/0/num_base_addresses
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/5/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/5/0/revision
+4
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/0/base_addr
+0x00016C00
+0x02401800
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/0/hw_id
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/0/major
+13
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/0/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/0/num_base_addresses
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/0/revision
+4
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/1/base_addr
+0x00016E00
+0x02401C00
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/1/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/1/hw_id
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/1/major
+13
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/1/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/1/num_base_addresses
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/1/num_instance
+1
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/1/revision
+4
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/2/base_addr
+0x00017000
+0x02402000
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/2/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/2/hw_id
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/2/major
+13
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/2/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/2/num_base_addresses
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/2/num_instance
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/2/revision
+4
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/3/base_addr
+0x00017200
+0x02402400
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/3/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/3/hw_id
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/3/major
+13
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/3/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/3/num_base_addresses
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/3/num_instance
+3
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/3/revision
+4
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/4/base_addr
+0x0001B000
+0x0242D800
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/4/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/4/hw_id
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/4/major
+13
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/4/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/4/num_base_addresses
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/4/num_instance
+4
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/4/revision
+4
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/5/base_addr
+0x0001B200
+0x0242DC00
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/5/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/5/hw_id
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/5/major
+13
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/5/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/5/num_base_addresses
+2
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/5/num_instance
+5
+== /sys/class/drm/card1/device/ip_discovery/die/0/6/5/revision
+4
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/0/base_addr
+0x00000000
+0x00000014
+0x00000D20
+0x00010400
+0x0241B000
+0x04040000
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/0/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/0/hw_id
+70
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/0/major
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/0/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/0/num_base_addresses
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/0/num_instance
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/0/revision
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/1/base_addr
+0x00000000
+0x00000014
+0x00000D20
+0x00010400
+0x0241B000
+0x04040000
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/1/harvest
+0x0
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/1/hw_id
+70
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/1/major
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/1/minor
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/1/num_base_addresses
+6
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/1/num_instance
+1
+== /sys/class/drm/card1/device/ip_discovery/die/0/70/1/revision
+0
+== /sys/class/drm/card1/device/ip_discovery/die/0/num_ips
+30
