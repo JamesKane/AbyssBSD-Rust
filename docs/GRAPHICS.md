@@ -976,6 +976,30 @@ are left out, as reading one takes the semaphore) on the X870E at the GOP's stat
   others, no overflow. With the card on it (`CrtcHw::vblank_interrupt` true, while the interrupts run, and the
   handler calls `Kms::vblank`), `kmsflip` flips at 3.2 ms and Sway with glmark2's jellyfish runs at about 504 to
   533 frames a second, the interrupt count matching the frame count.
-- **Still to do for R2.1:** the soak (no overflow over ten minutes of Sway), and `hw.vgapci.msi` on by default once
-  the owner agrees. The read pointer is written by register; the doorbell is R2.4.
+- **The soak passed:** ten minutes of Sway with glmark2's jellyfish, 42,048 frame starts, no overflow, no error in
+  the Sway log. `hw.vgapci.msi` stays off by default until the owner agrees. The read pointer is written by
+  register; the doorbell is R2.4.
+
+### 16.9 R2.2 and R2.3: the translation hubs (2026-11-24)
+
+- **Code.** `lib/amdgpu/src/gmc.rs` has both hubs' register maps (arrays on the graphics hub, eight-dword
+  interleaved blocks on the memory hub) and the specification's setup order (05 section 5.1): the GART's flat
+  table, AGP off (bottom above top), a dummy page for faults and aperture misses, the L1 translation buffer and
+  the L2 read-modify-write so the firmware's ECO bits and reset values survive, context 0 on with depth 0 and no
+  retry, the identity aperture off (graphics hub), the fifteen user contexts, the invalidation engines'
+  ranges; plus the invalidation through engine 17 (the memory hub's semaphore taken around it). Tested on the host
+  against a model of each hub, including the order (the context is enabled only after the table, the buffers and
+  the L2 are set), the register strides, and that the semaphore is released.
+- **In the driver.** `dev.drmn.1.gmc` (graphics hub) and `dev.drmn.1.gmc_mm` (memory hub), each a trigger, share one
+  GART table: 2 MiB at BAR0 offset 144 MiB (video memory physical `0x1849000000`), every entry invalid, covering
+  GPU addresses 0 to 1 GiB, and one dummy system page from a new DMA tag on the AMD function (44 address bits).
+- **On the X870E, graphics hub then memory hub:** each reads back context 0 `0x007ffe01` (enabled, flat, no
+  retry), the L2 `0x00080e01` (on, default page out to system memory), the L1 `0x00001d59` (the firmware's ECO bits
+  kept, access mode 3, advanced driver model, uncached type), and its VMID 0 invalidation is acknowledged. The
+  display and the interrupt handler, which use the memory hub, did not notice: the interrupts kept coming at 60 a
+  second through both, `kmsflip` flipped at 3.2 ms, and Sway with glmark2's jellyfish ran at about 497 to 537
+  frames a second with no overflow and no error (`tests/graphics/accept-x86_64-amd-display-irq.png`).
+- **Not automatic yet.** Nothing uses the GART until the engines (R4), so the hubs are set up on request. The
+  memory hub's identity-aperture registers are not in the specification's table and are left alone; context 1
+  is not used.
 

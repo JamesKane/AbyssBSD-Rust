@@ -250,13 +250,23 @@ fn amd_aperture(cx: &mut AttachCx<'_>, child: &Arc<PciChild>) -> Option<Arc<Aper
                 }
             }
         });
+    // What the GPU reaches in system memory: 44 bits on an APU (the
+    // reference's DMA mask), pages aligned. A tag the broker will not make
+    // leaves the driver without system memory for the GPU, as before.
+    let tag = cx
+        .dma_tag(DmaConstraints {
+            addr_bits: 44,
+            align: 4096,
+            ..DmaConstraints::UNLIMITED
+        })
+        .ok();
     match cx.mmio_bytes(index) {
         Ok(mmio) => Some(Arc::new(Aperture {
             mmio,
             len: usize::try_from(len).unwrap_or(0),
             vram,
             pci: Arc::clone(child),
-            tag: None,
+            tag,
             sink: Once::new(),
             has_irq: AtomicBool::new(false),
         })),

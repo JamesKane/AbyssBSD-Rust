@@ -65,7 +65,16 @@ pub(crate) struct Amd {
     kms: SpinLock<Option<(Arc<amd_kms::AmdKms>, Arc<drm::Card>)>>,
     /// The interrupts.
     irq: Arc<crate::interrupt::Irq>,
+    /// The page the hubs send faults and aperture misses to, while the
+    /// hubs are set up.
+    dummy: SpinLock<Option<vm::dma::DmaCoherent<u8>>>,
 }
+
+/// Where the GART's page table is in video memory (BAR0 offset): past the
+/// interrupt handler's ring, well below the top 2 MiB.
+pub(crate) const GART_AT: usize = 144 << 20;
+/// The table's size: 8 bytes for each 4 KiB page of a 1 GiB GART.
+pub(crate) const GART_BYTES: usize = (1 << 30) / 4096 * 8;
 
 impl core::fmt::Debug for Amd {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -99,6 +108,7 @@ impl Amd {
             irq: Arc::new(crate::interrupt::Irq::new(gpu.clone())),
             gpu,
             kms: SpinLock::new(None),
+            dummy: SpinLock::new(None),
         }
     }
 
@@ -519,6 +529,86 @@ impl Amd {
         self.irq.stop();
     }
 
+    /// Sets a translation hub up (stages R2.2 and R2.3, docs/GRAPHICS.md
+    /// §16.6): the GART's flat page table in video memory (every entry
+    /// invalid; the two hubs share it), a dummy system page for faults, the
+    /// hub's registers in the specification's order, and an invalidation of
+    /// VMID 0 on the processor's engine. The graphics hub serves the
+    /// engines and is idle; the memory hub serves the display and the
+    /// interrupt handler, so the frame counter is read before and after, to
+    /// show the display kept running.
+    pub(crate) fn gmc(&self, hub: amdgpu::gmc::Hub) -> Result<(), abi::errno::Errno> {
+        use abi::errno::Errno;
+        use amdgpu::flip;
+        use amdgpu::gmc::{self, Hub, Reg};
+        use amdgpu::regs::Window;
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        let (len, tag) = (gpu.vram_len(), gpu.dma_tag());
+        let (Some(len), Some(tag)) = (len, tag) else {
+            self.log(format_args!(
+                "translation hub: no video memory window or no DMA tag"
+            ));
+            return Err(Errno::ENXIO);
+        };
+        if len < GART_AT + GART_BYTES {
+            return Err(Errno::ENXIO);
+        }
+        // The first hub makes the table and the page; the second shares them.
+        let existing = self
+            .dummy
+            .lock()
+            .as_ref()
+            .map(vm::dma::DmaCoherent::bus_addr);
+        let (dummy_page, fresh) = if let Some(addr) = existing {
+            (addr, None)
+        } else {
+            for at in (0..GART_BYTES).step_by(4) {
+                gpu.vram_write32(GART_AT + at, 0);
+            }
+            let page = tag.coherent::<u8>(4096).map_err(|_| Errno::ENOMEM)?;
+            (page.bus_addr(), Some(page))
+        };
+        let setup = gmc::Setup {
+            gart_table: (u64::from(w.read32(hub.reg(Reg::FbOffset))) << 24) + GART_AT as u64,
+            gart_start: 0,
+            gart_end: (1 << 30) - 1,
+            dummy_page,
+            retry_interrupt: hub == Hub::Gfx,
+        };
+        let before = flip::frame_count(&w);
+        // The table is in video memory: make the writes visible first.
+        let _ = gpu.vram_read32(GART_AT);
+        if !self
+            .hdp_ready
+            .swap(true, core::sync::atomic::Ordering::AcqRel)
+        {
+            flip::hdp_init(&w);
+        }
+        flip::hdp_flush(&w);
+        if let Err(e) = gmc::init(&w, hub, &setup) {
+            self.log(format_args!("{hub:?} hub: not set up: {e:?}"));
+            return Err(Errno::EINVAL);
+        }
+        if let Some(page) = fresh {
+            *self.dummy.lock() = Some(page);
+        }
+        flip::hdp_flush(&w);
+        let done = gmc::invalidate(&w, hub, 0, 1000, &|| bus::manager().delay_us(10));
+        let after = flip::frame_count(&w);
+        self.log(format_args!(
+            "{hub:?} hub: GART {:#x}..{:#x} (table at {:#x}), context 0 {:#010x}, L2 {:#010x}, L1 {:#010x}; \
+             invalidation {done:?}; display frames {before} to {after}",
+            setup.gart_start,
+            setup.gart_end,
+            setup.gart_table,
+            w.read32(hub.context_cntl(0)),
+            w.read32(hub.reg(Reg::L2Cntl)),
+            w.read32(hub.reg(Reg::L1Tlb)),
+        ));
+        done.map_err(|_| Errno::EIO)
+    }
+
     /// A one-line summary of the cached table, for a sysctl.
     pub(crate) fn summary(&self) -> String {
         match &*self.table.lock() {
@@ -595,6 +685,22 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         "flip",
         "Write 1 to show a test pattern from video memory for three seconds, then restore the firmware's picture",
         move || r.flip_test(),
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "gmc",
+        "Write 1 to set the graphics hub up: the GART's table in video memory, the apertures, context 0, an invalidation",
+        move || r.gmc(amdgpu::gmc::Hub::Gfx),
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "gmc_mm",
+        "Write 1 to set the memory hub up (the display's and the interrupt handler's): as `gmc`",
+        move || r.gmc(amdgpu::gmc::Hub::Mm),
     );
     let r = Arc::clone(a);
     crate::control::trigger(
