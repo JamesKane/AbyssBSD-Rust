@@ -1,0 +1,12 @@
+drm-612-kmod-6.12.110.1501000_3:
+	/boot/modules/amdgpu.ko
+	/boot/modules/dmabuf.ko
+	/boot/modules/drm.ko
+	/boot/modules/i915kms.ko
+	/boot/modules/radeonkms.ko
+	/boot/modules/ttm.ko
+	/usr/local/share/licenses/drm-612-kmod-6.12.110.1501000_3/BSD2CLAUSE
+	/usr/local/share/licenses/drm-612-kmod-6.12.110.1501000_3/GPLv2
+	/usr/local/share/licenses/drm-612-kmod-6.12.110.1501000_3/LICENSE
+	/usr/local/share/licenses/drm-612-kmod-6.12.110.1501000_3/MIT
+	/usr/local/share/licenses/drm-612-kmod-6.12.110.1501000_3/catalog.mk

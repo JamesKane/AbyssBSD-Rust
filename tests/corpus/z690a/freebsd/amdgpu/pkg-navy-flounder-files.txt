@@ -1,0 +1,16 @@
+gpu-firmware-amd-kmod-navy-flounder-20260519.1501000:
+	/boot/modules/amdgpu_navy_flounder_ce_bin.ko
+	/boot/modules/amdgpu_navy_flounder_dmcub_bin.ko
+	/boot/modules/amdgpu_navy_flounder_me_bin.ko
+	/boot/modules/amdgpu_navy_flounder_mec2_bin.ko
+	/boot/modules/amdgpu_navy_flounder_mec_bin.ko
+	/boot/modules/amdgpu_navy_flounder_pfp_bin.ko
+	/boot/modules/amdgpu_navy_flounder_rlc_bin.ko
+	/boot/modules/amdgpu_navy_flounder_sdma_bin.ko
+	/boot/modules/amdgpu_navy_flounder_smc_bin.ko
+	/boot/modules/amdgpu_navy_flounder_sos_bin.ko
+	/boot/modules/amdgpu_navy_flounder_ta_bin.ko
+	/boot/modules/amdgpu_navy_flounder_vcn_bin.ko
+	/usr/local/share/licenses/gpu-firmware-amd-kmod-navy-flounder-20260519.1501000/AMD
+	/usr/local/share/licenses/gpu-firmware-amd-kmod-navy-flounder-20260519.1501000/LICENSE
+	/usr/local/share/licenses/gpu-firmware-amd-kmod-navy-flounder-20260519.1501000/catalog.mk

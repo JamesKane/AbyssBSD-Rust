@@ -1,0 +1,6 @@
+drm-612-kmod-6.12.110.1501000_3 Direct Rendering Manager (DRM) GPU drivers
+drm-kmod-20260508              Direct Rendering Manager (DRM) GPU drivers metaport
+gpu-firmware-amd-kmod-green-sardine-20260519.1501000 Firmware modules for green_sardine AMD GPUs
+gpu-firmware-amd-kmod-navy-flounder-20260519.1501000 Firmware modules for navy_flounder AMD GPUs
+gpu-firmware-kmod-20260519,1   Firmware modules for the drm-kmod drivers
+libdrm-2.4.134,1               Direct Rendering Manager library and headers

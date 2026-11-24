@@ -1,0 +1,12 @@
+-r--r--r--  1 root wheel 275520 Oct  7 03:47 /boot/modules/amdgpu_navy_flounder_ce_bin.ko
+-r--r--r--  1 root wheel 126296 Oct  7 03:47 /boot/modules/amdgpu_navy_flounder_dmcub_bin.ko
+-r--r--r--  1 root wheel 275648 Oct  7 03:47 /boot/modules/amdgpu_navy_flounder_me_bin.ko
+-r--r--r--  1 root wheel 280408 Oct  7 03:47 /boot/modules/amdgpu_navy_flounder_mec2_bin.ko
+-r--r--r--  1 root wheel 280392 Oct  7 03:47 /boot/modules/amdgpu_navy_flounder_mec_bin.ko
+-r--r--r--  1 root wheel 275656 Oct  7 03:47 /boot/modules/amdgpu_navy_flounder_pfp_bin.ko
+-r--r--r--  1 root wheel 149568 Oct  7 03:47 /boot/modules/amdgpu_navy_flounder_rlc_bin.ko
+-r--r--r--  1 root wheel  46296 Oct  7 03:47 /boot/modules/amdgpu_navy_flounder_sdma_bin.ko
+-r--r--r--  1 root wheel 257136 Oct  7 03:47 /boot/modules/amdgpu_navy_flounder_smc_bin.ko
+-r--r--r--  1 root wheel 230840 Oct  7 03:47 /boot/modules/amdgpu_navy_flounder_sos_bin.ko
+-r--r--r--  1 root wheel 271552 Oct  7 03:47 /boot/modules/amdgpu_navy_flounder_ta_bin.ko
+-r--r--r--  1 root wheel 592472 Oct  7 03:47 /boot/modules/amdgpu_navy_flounder_vcn_bin.ko

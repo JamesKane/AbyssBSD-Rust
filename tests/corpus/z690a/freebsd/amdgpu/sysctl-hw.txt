@@ -1,0 +1,27 @@
+hw.model: 12th Gen Intel(R) Core(TM) i7-12700KF
+hw.physmem: 137243713536
+hw.pci.mcfg: 1
+hw.pci.host_mem_start: 2147483648
+hw.pci.default_vgapci_unit: -1
+hw.pci.enable_pcie_ei: 0
+hw.pci.pcie_hp_detach_timeout: 5000
+hw.pci.enable_pcie_hp: 1
+hw.pci.clear_pcib: 0
+hw.pci.iov_max_config: 1048576
+hw.pci.intx_reroute: 1
+hw.pci.enable_mps_tune: 1
+hw.pci.clear_aer_on_attach: 0
+hw.pci.enable_aspm: 1
+hw.pci.enable_ari: 1
+hw.pci.clear_buses: 0
+hw.pci.clear_bars: 0
+hw.pci.usb_early_takeover: 1
+hw.pci.honor_msi_blacklist: 1
+hw.pci.msix_rewrite_table: 0
+hw.pci.enable_msix: 1
+hw.pci.enable_msi: 1
+hw.pci.do_power_suspend: 1
+hw.pci.do_power_resume: 1
+hw.pci.do_power_nodriver: 0
+hw.pci.realloc_bars: 1
+hw.pci.enable_io_modes: 1

@@ -1,0 +1,544 @@
+/*
+  RSD PTR: OEM=ALASKA, ACPI_Rev=2.0x (2)
+	XSDT=0x0000000048e68728, length=36, cksum=255
+ */
+/*
+  XSDT: Length=260, Revision=1, Checksum=99,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=AMI, Creator Revision=0x1000013
+	Entries={ 0x0000000048d3c000, 0x0000000048cbf000, 0x0000000048cb9000, 0x0000000048cb6000, 0x0000000048cb2000, 0x0000000048d3e000, 0x0000000048d3d000, 0x0000000048cb1000, 0x0000000048caf000, 0x0000000048e52000, 0x0000000048cae000, 0x0000000048cad000, 0x0000000048ca9000, 0x0000000048ca6000, 0x0000000048ca5000, 0x0000000048ca4000, 0x0000000048ca3000, 0x0000000048ca1000, 0x0000000048c9d000, 0x0000000048c9a000, 0x0000000048c99000, 0x0000000048c8e000, 0x0000000048c8d000, 0x0000000048c8c000, 0x0000000048c8b000, 0x0000000048c8a000, 0x0000000048cac000, 0x0000000048c89000 }
+ */
+/*
+  FACP: Length=276, Revision=6, Checksum=95,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=AMI, Creator Revision=0x1000013
+ 	FACS=0x48f3e000, DSDT=0x48cc0000
+	INT_MODEL=PIC
+	Preferred_PM_Profile=Desktop (1)
+	SCI_INT=9
+	SMI_CMD=0xb2, ACPI_ENABLE=0xa0, ACPI_DISABLE=0xa1, S4BIOS_REQ=0x0
+	PSTATE_CNT=0x0
+	PM1a_EVT_BLK=0x1800-0x1803
+	PM1a_CNT_BLK=0x1804-0x1805
+	PM2_CNT_BLK=0x1850-0x1850
+	PM_TMR_BLK=0x1808-0x180b
+	GPE0_BLK=0x1860-0x187f
+	P_LVL2_LAT=101 us, P_LVL3_LAT=1001 us
+	FLUSH_SIZE=1024, FLUSH_STRIDE=16
+	DUTY_OFFSET=0, DUTY_WIDTH=0
+	DAY_ALRM=13, MON_ALRM=0, CENTURY=50
+	IAPC_BOOT_ARCH={NO_ASPM}
+	Flags={WBINVD,C1_SUPPORTED,SLEEP_BUTTON,FIXED_RTC,S4_RTC_WAKE,DOCKING_SUPPORTED,RESET_REGISTER,PCI_EXPRESS_WAKE,PLATFORM_CLOCK,S4_RTC_VALID,REMOTE_POWER_ON}
+	RESET_REG=0xcf9:0[8] (IO), RESET_VALUE=0x6
+	X_FACS=0x0000000000000000, X_DSDT=0x0000000048cc0000
+	X_PM1a_EVT_BLK=0x1800:0[32] (IO)
+	X_PM1a_CNT_BLK=0x1804:0[16] (IO)
+	X_PM2_CNT_BLK=0x1850:0[8] (IO)
+	X_PM_TMR_BLK=0x1808:0[32] (IO)
+	X_GPE0_BLK=0x1860:0[128] (IO)
+ */
+/*
+  DSDT: Length=507569, Revision=2, Checksum=232,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=INTL, Creator Revision=0x20200717
+ */
+/*
+  FIDT: Length=156, Revision=1, Checksum=248,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=AMI, Creator Revision=0x10013
+ */
+/*
+  SSDT: Length=23776, Revision=2, Checksum=209,
+	OEMID=CpuRef, OEM Table ID=CpuSsdt, OEM Revision=0x3000,
+	Creator ID=INTL, Creator Revision=0x20200717
+ */
+/*
+  SSDT: Length=10724, Revision=2, Checksum=66,
+	OEMID=SaSsdt, OEM Table ID=SaSsdt, OEM Revision=0x3000,
+	Creator ID=INTL, Creator Revision=0x20200717
+ */
+/*
+  SSDT: Length=13078, Revision=2, Checksum=82,
+	OEMID=INTEL, OEM Table ID=IgfxSsdt, OEM Revision=0x3000,
+	Creator ID=INTL, Creator Revision=0x20200717
+ */
+/*
+  HPET: Length=56, Revision=1, Checksum=63,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=AMI, Creator Revision=0x1000013
+	HPET Number=0
+	ADDR=0x00000000fed00000:0[64] (Memory)
+	HW Rev=0x1
+	Comparators=2
+	Counter Size=1
+	Legacy IRQ routing capable={TRUE}
+	PCI Vendor ID=0x8086
+	Minimal Tick=128
+	Flags=0x00
+ */
+/*
+  APIC: Length=476, Revision=5, Checksum=124,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=AMI, Creator Revision=0x1000013
+	Local APIC ADDR=0xfee00000
+	Flags={PC-AT}
+
+	Type=Local APIC
+	ACPI CPU=0
+	Flags={ENABLED}
+	APIC ID=0
+
+	Type=Local APIC
+	ACPI CPU=1
+	Flags={ENABLED}
+	APIC ID=1
+
+	Type=Local APIC
+	ACPI CPU=2
+	Flags={ENABLED}
+	APIC ID=8
+
+	Type=Local APIC
+	ACPI CPU=3
+	Flags={ENABLED}
+	APIC ID=9
+
+	Type=Local APIC
+	ACPI CPU=4
+	Flags={ENABLED}
+	APIC ID=16
+
+	Type=Local APIC
+	ACPI CPU=5
+	Flags={ENABLED}
+	APIC ID=17
+
+	Type=Local APIC
+	ACPI CPU=6
+	Flags={ENABLED}
+	APIC ID=24
+
+	Type=Local APIC
+	ACPI CPU=7
+	Flags={ENABLED}
+	APIC ID=25
+
+	Type=Local APIC
+	ACPI CPU=8
+	Flags={ENABLED}
+	APIC ID=32
+
+	Type=Local APIC
+	ACPI CPU=9
+	Flags={ENABLED}
+	APIC ID=33
+
+	Type=Local APIC
+	ACPI CPU=10
+	Flags={ENABLED}
+	APIC ID=40
+
+	Type=Local APIC
+	ACPI CPU=11
+	Flags={ENABLED}
+	APIC ID=41
+
+	Type=Local APIC
+	ACPI CPU=12
+	Flags={ENABLED}
+	APIC ID=48
+
+	Type=Local APIC
+	ACPI CPU=13
+	Flags={ENABLED}
+	APIC ID=49
+
+	Type=Local APIC
+	ACPI CPU=14
+	Flags={ENABLED}
+	APIC ID=56
+
+	Type=Local APIC
+	ACPI CPU=15
+	Flags={ENABLED}
+	APIC ID=57
+
+	Type=Local APIC
+	ACPI CPU=16
+	Flags={ENABLED}
+	APIC ID=72
+
+	Type=Local APIC
+	ACPI CPU=17
+	Flags={ENABLED}
+	APIC ID=74
+
+	Type=Local APIC
+	ACPI CPU=18
+	Flags={ENABLED}
+	APIC ID=76
+
+	Type=Local APIC
+	ACPI CPU=19
+	Flags={ENABLED}
+	APIC ID=78
+
+	Type=Local APIC
+	ACPI CPU=20
+	Flags={DISABLED}
+	APIC ID=255
+
+	Type=Local APIC
+	ACPI CPU=21
+	Flags={DISABLED}
+	APIC ID=255
+
+	Type=Local APIC
+	ACPI CPU=22
+	Flags={DISABLED}
+	APIC ID=255
+
+	Type=Local APIC
+	ACPI CPU=23
+	Flags={DISABLED}
+	APIC ID=255
+
+	Type=Local APIC
+	ACPI CPU=24
+	Flags={DISABLED}
+	APIC ID=255
+
+	Type=Local APIC
+	ACPI CPU=25
+	Flags={DISABLED}
+	APIC ID=255
+
+	Type=Local APIC
+	ACPI CPU=26
+	Flags={DISABLED}
+	APIC ID=255
+
+	Type=Local APIC
+	ACPI CPU=27
+	Flags={DISABLED}
+	APIC ID=255
+
+	Type=Local APIC
+	ACPI CPU=28
+	Flags={DISABLED}
+	APIC ID=255
+
+	Type=Local APIC
+	ACPI CPU=29
+	Flags={DISABLED}
+	APIC ID=255
+
+	Type=Local APIC
+	ACPI CPU=30
+	Flags={DISABLED}
+	APIC ID=255
+
+	Type=Local APIC
+	ACPI CPU=31
+	Flags={DISABLED}
+	APIC ID=255
+
+	Type=IO APIC
+	APIC ID=2
+	INT BASE=0
+	ADDR=0x00000000fec00000
+
+	Type=INT Override
+	BUS=0
+	IRQ=0
+	INTR=2
+	Flags={Polarity=conforming, Trigger=conforming}
+
+	Type=INT Override
+	BUS=0
+	IRQ=9
+	INTR=9
+	Flags={Polarity=active-hi, Trigger=level}
+
+	Type=Local APIC NMI
+	ACPI CPU=1
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=2
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=3
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=4
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=5
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=6
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=7
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=8
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=9
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=10
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=11
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=12
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=13
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=14
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=15
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=16
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=17
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=18
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=19
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=20
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=21
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=22
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=23
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+
+	Type=Local APIC NMI
+	ACPI CPU=0
+	LINT Pin=1
+	Flags={Polarity=active-hi, Trigger=edge}
+ */
+/*
+  MCFG: Length=60, Revision=1, Checksum=199,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=AMI, Creator Revision=0x1000013
+
+	Base Address=0x00000000c0000000
+	Segment Group=0x0000
+	Start Bus=0
+	End Bus=255
+ */
+/*
+  SSDT: Length=7962, Revision=2, Checksum=21,
+	OEMID=ALASKA, OEM Table ID=Ther_Rvp, OEM Revision=0x1000,
+	Creator ID=INTL, Creator Revision=0x20200717
+ */
+/*
+  UEFI: Length=72, Revision=1, Checksum=118,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=AMI, Creator Revision=0x1000013
+ */
+/*
+  NHLT: Length=45, Revision=0, Checksum=65,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=AMI, Creator Revision=0x1000013
+ */
+/*
+  LPIT: Length=204, Revision=1, Checksum=238,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=AMI, Creator Revision=0x1000013
+
+	Type=ACPI_LPIT_TYPE_NATIVE_CSTATE
+	Length=56
+	UniqueId=0x0000
+	Flags=
+	EntryTrigger=0x0000000000000060 (?)
+	Residency=30000
+	Latency=3000
+	ResidencyCounter=0x0000000000000632 (?)
+	CounterFrequency=TSC
+
+	Type=ACPI_LPIT_TYPE_NATIVE_CSTATE
+	Length=56
+	UniqueId=0x0001
+	Flags=
+	EntryTrigger=0x0000000000000060 (?)
+	Residency=30000
+	Latency=3000
+	ResidencyCounter=0x00000000fe001098:0[32] (Memory)
+	CounterFrequency=32768
+
+	Type=ACPI_LPIT_TYPE_NATIVE_CSTATE
+	Length=56
+	UniqueId=0x0002
+	Flags={STATE_DISABLED}
+	EntryTrigger=0x0000000000000060 (?)
+	Residency=30000
+	Latency=3000
+	ResidencyCounter=0x00000000000000ff:0[32] (Memory)
+	CounterFrequency=TSC
+ */
+/*
+  SSDT: Length=10883, Revision=2, Checksum=200,
+	OEMID=ALASKA, OEM Table ID=PtidDevc, OEM Revision=0x1000,
+	Creator ID=INTL, Creator Revision=0x20200717
+ */
+/*
+  SSDT: Length=9047, Revision=2, Checksum=1,
+	OEMID=ALASKA, OEM Table ID=TbtTypeC, OEM Revision=0x0,
+	Creator ID=INTL, Creator Revision=0x20200717
+ */
+/*
+  DBGP: Length=52, Revision=1, Checksum=138,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=AMI, Creator Revision=0x1000013
+ */
+/*
+  DBG2: Length=84, Revision=0, Checksum=24,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=AMI, Creator Revision=0x1000013
+ */
+/*
+  DMAR: Length=80, Revision=2, Checksum=65,
+	OEMID=INTEL, OEM Table ID=EDK2, OEM Revision=0x2,
+	Creator ID=, Creator Revision=0x1000013
+	Host Address Width=39
+	Flags={INTR_REMAP}
+
+	Type=DRHD
+	Length=32
+	Flags={INCLUDE_ALL}
+	Segment=0
+	Address=0x00000000fed91000
+	Device Scope:
+		Type=IOAPIC
+		Length=8
+		EnumerationId=2
+		StartBusNumber=0
+		Path={30:7}
+
+		Type=HPET
+		Length=8
+		EnumerationId=0
+		StartBusNumber=0
+		Path={30:6}
+ */
+/*
+  SSDT: Length=4807, Revision=2, Checksum=12,
+	OEMID=INTEL, OEM Table ID=xh_adls3, OEM Revision=0x0,
+	Creator ID=INTL, Creator Revision=0x20200717
+ */
+/*
+  SSDT: Length=15082, Revision=2, Checksum=50,
+	OEMID=SocGpe, OEM Table ID=SocGpe, OEM Revision=0x3000,
+	Creator ID=INTL, Creator Revision=0x20200717
+ */
+/*
+  SSDT: Length=11050, Revision=2, Checksum=111,
+	OEMID=SocCmn, OEM Table ID=SocCmn, OEM Revision=0x3000,
+	Creator ID=INTL, Creator Revision=0x20200717
+ */
+/*
+  SSDT: Length=324, Revision=2, Checksum=84,
+	OEMID=Intel, OEM Table ID=ADebTabl, OEM Revision=0x1000,
+	Creator ID=INTL, Creator Revision=0x20200717
+ */
+/*
+  VFCT: Length=43652, Revision=1, Checksum=232,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1,
+	Creator ID=AMD, Creator Revision=0x31504f47
+ */
+/*
+  TPM2: Length=76, Revision=4, Checksum=167,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1,
+	Creator ID=AMI, Creator Revision=0x0
+		ControlArea=fed40040
+		StartMethod=7
+ */
+/*
+  BGRT: Length=56, Revision=1, Checksum=12,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=AMI, Creator Revision=0x10013
+ */
+/*
+  BGRT: Length=56, Revision=1, Checksum=207,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=AMI, Creator Revision=0x10013
+ */
+/*
+  PHAT: Length=1517, Revision=0, Checksum=112,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x5,
+	Creator ID=MSFT, Creator Revision=0x100000d
+ */
+/*
+  WSMT: Length=40, Revision=1, Checksum=108,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=AMI, Creator Revision=0x10013
+ */
+/*
+  FPDT: Length=68, Revision=1, Checksum=174,
+	OEMID=ALASKA, OEM Table ID=A M I, OEM Revision=0x1072009,
+	Creator ID=AMI, Creator Revision=0x1000013
+ */

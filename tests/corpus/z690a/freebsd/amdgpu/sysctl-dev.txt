@@ -1,0 +1,163 @@
+dev.drmn.0.%iommu: 
+dev.drmn.0.%parent: vgapci0
+dev.drmn.0.%pnpinfo: 
+dev.drmn.0.%location: 
+dev.drmn.0.%driver: drmn
+dev.drmn.0.%desc: drmn
+dev.drmn.%parent: 
+dev.hdaa.1.init_clear: 0
+dev.hdaa.1.reconfig: 0
+dev.hdaa.1.gpo_config: 
+dev.hdaa.1.gpo_state: 
+dev.hdaa.1.gpio_config: 0=keep 1=keep 2=keep 3=keep 4=keep
+dev.hdaa.1.gpio_state: 0=disabled 1=disabled 2=disabled 3=disabled 4=disabled
+dev.hdaa.1.gpi_state: 
+dev.hdaa.1.config: forcestereo,ivref50,ivref80,ivref100,ivref,vref
+dev.hdaa.1.nid38: audio mixer
+dev.hdaa.1.nid37: audio output
+dev.hdaa.1.nid36: vendor widget [DISABLED]
+dev.hdaa.1.nid35: audio mixer
+dev.hdaa.1.nid34: audio mixer
+dev.hdaa.1.nid33: vendor widget [DISABLED]
+dev.hdaa.1.nid32: vendor widget [DISABLED]
+dev.hdaa.1.nid31_original: 0x411111f0 as=15 seq=0 device=Speaker conn=None ctype=1/8 loc=Rear color=Black misc=1
+dev.hdaa.1.nid31_config: 0x411111f0 as=15 seq=0 device=Speaker conn=None ctype=1/8 loc=Rear color=Black misc=1
+dev.hdaa.1.nid31: pin: Speaker (None) [DISABLED]
+dev.hdaa.1.nid30_original: 0x411111f0 as=15 seq=0 device=Speaker conn=None ctype=1/8 loc=Rear color=Black misc=1
+dev.hdaa.1.nid30_config: 0x411111f0 as=15 seq=0 device=Speaker conn=None ctype=1/8 loc=Rear color=Black misc=1
+dev.hdaa.1.nid30: pin: Speaker (None) [DISABLED]
+dev.hdaa.1.nid29_original: 0x402af66b as=6 seq=11 device=Headphones conn=None ctype=RJ-11 loc=0x00 color=Other misc=6
+dev.hdaa.1.nid29_config: 0x402af66b as=6 seq=11 device=Headphones conn=None ctype=RJ-11 loc=0x00 color=Other misc=6
+dev.hdaa.1.nid29: beep widget
+dev.hdaa.1.nid28_original: 0x411111f0 as=15 seq=0 device=Speaker conn=None ctype=1/8 loc=Rear color=Black misc=1
+dev.hdaa.1.nid28_config: 0x411111f0 as=15 seq=0 device=Speaker conn=None ctype=1/8 loc=Rear color=Black misc=1
+dev.hdaa.1.nid28: pin: Speaker (None) [DISABLED]
+dev.hdaa.1.nid27_original: 0x02214020 as=2 seq=0 device=Headphones conn=Jack ctype=1/8 loc=Front color=Green misc=0
+dev.hdaa.1.nid27_config: 0x02214020 as=2 seq=0 device=Headphones conn=Jack ctype=1/8 loc=Front color=Green misc=0
+dev.hdaa.1.nid27: pin: Headphones (Green Jack)
+dev.hdaa.1.nid26_original: 0x0181303f as=3 seq=15 device=Line-in conn=Jack ctype=1/8 loc=Rear color=Blue misc=0
+dev.hdaa.1.nid26_config: 0x0181303f as=3 seq=15 device=Line-in conn=Jack ctype=1/8 loc=Rear color=Blue misc=0
+dev.hdaa.1.nid26: pin: Line-in (Blue Jack)
+dev.hdaa.1.nid25_original: 0x02a19040 as=4 seq=0 device=Mic conn=Jack ctype=1/8 loc=Front color=Pink misc=0
+dev.hdaa.1.nid25_config: 0x02a19040 as=4 seq=0 device=Mic conn=Jack ctype=1/8 loc=Front color=Pink misc=0
+dev.hdaa.1.nid25: pin: Mic (Pink Jack)
+dev.hdaa.1.nid24_original: 0x01a19030 as=3 seq=0 device=Mic conn=Jack ctype=1/8 loc=Rear color=Pink misc=0
+dev.hdaa.1.nid24_config: 0x01a19030 as=3 seq=0 device=Mic conn=Jack ctype=1/8 loc=Rear color=Pink misc=0
+dev.hdaa.1.nid24: pin: Mic (Pink Jack)
+dev.hdaa.1.nid23_original: 0x01012014 as=1 seq=4 device=Line-out conn=Jack ctype=1/8 loc=Rear color=Grey misc=0
+dev.hdaa.1.nid23_config: 0x01012014 as=1 seq=4 device=Line-out conn=Jack ctype=1/8 loc=Rear color=Grey misc=0
+dev.hdaa.1.nid23: pin: Line-out (Grey Jack)
+dev.hdaa.1.nid22_original: 0x01016011 as=1 seq=1 device=Line-out conn=Jack ctype=1/8 loc=Rear color=Orange misc=0
+dev.hdaa.1.nid22_config: 0x01016011 as=1 seq=1 device=Line-out conn=Jack ctype=1/8 loc=Rear color=Orange misc=0
+dev.hdaa.1.nid22: pin: Line-out (Orange Jack)
+dev.hdaa.1.nid21_original: 0x01011012 as=1 seq=2 device=Line-out conn=Jack ctype=1/8 loc=Rear color=Black misc=0
+dev.hdaa.1.nid21_config: 0x01011012 as=1 seq=2 device=Line-out conn=Jack ctype=1/8 loc=Rear color=Black misc=0
+dev.hdaa.1.nid21: pin: Line-out (Black Jack)
+dev.hdaa.1.nid20_original: 0x01014010 as=1 seq=0 device=Line-out conn=Jack ctype=1/8 loc=Rear color=Green misc=0
+dev.hdaa.1.nid20_config: 0x01014010 as=1 seq=0 device=Line-out conn=Jack ctype=1/8 loc=Rear color=Green misc=0
+dev.hdaa.1.nid20: pin: Line-out (Green Jack)
+dev.hdaa.1.nid19: vendor widget [DISABLED]
+dev.hdaa.1.nid18_original: 0x411111f0 as=15 seq=0 device=Speaker conn=None ctype=1/8 loc=Rear color=Black misc=1
+dev.hdaa.1.nid18_config: 0x411111f0 as=15 seq=0 device=Speaker conn=None ctype=1/8 loc=Rear color=Black misc=1
+dev.hdaa.1.nid18: pin: Speaker (None) [DISABLED]
+dev.hdaa.1.nid17_original: 0x4037d540 as=4 seq=0 device=CD conn=None ctype=Analog loc=0x00 color=Res.D misc=5
+dev.hdaa.1.nid17_config: 0x4037d540 as=4 seq=0 device=CD conn=None ctype=Analog loc=0x00 color=Res.D misc=5
+dev.hdaa.1.nid17: pin: CD (None) [DISABLED]
+dev.hdaa.1.nid16: audio output [DISABLED]
+dev.hdaa.1.nid15: audio mixer
+dev.hdaa.1.nid14: audio mixer
+dev.hdaa.1.nid13: audio mixer
+dev.hdaa.1.nid12: audio mixer
+dev.hdaa.1.nid11: audio mixer
+dev.hdaa.1.nid10: audio input [DISABLED]
+dev.hdaa.1.nid9: audio input
+dev.hdaa.1.nid8: audio input
+dev.hdaa.1.nid7: audio input [DISABLED]
+dev.hdaa.1.nid6: audio output [DISABLED]
+dev.hdaa.1.nid5: audio output
+dev.hdaa.1.nid4: audio output
+dev.hdaa.1.nid3: audio output
+dev.hdaa.1.nid2: audio output
+dev.hdaa.1.%iommu: 
+dev.hdaa.1.%parent: hdacc1
+dev.hdaa.1.%pnpinfo: type=0x01 subsystem=0x14629d25
+dev.hdaa.1.%location: nid=1
+dev.hdaa.1.%driver: hdaa
+dev.hdaa.1.%desc: Realtek ALC897 Audio Function Group
+dev.hdaa.0.init_clear: 0
+dev.hdaa.0.reconfig: 0
+dev.hdaa.0.gpo_config: 
+dev.hdaa.0.gpo_state: 
+dev.hdaa.0.gpio_config: 
+dev.hdaa.0.gpio_state: 
+dev.hdaa.0.gpi_state: 
+dev.hdaa.0.config: forcestereo,ivref50,ivref80,ivref100,ivref,vref
+dev.hdaa.0.nid13_original: 0x185600f0 as=15 seq=0 device=Digital-out conn=Jack ctype=Digital loc=0x18 color=Unknown misc=0
+dev.hdaa.0.nid13_config: 0x185600f0 as=15 seq=0 device=Digital-out conn=Jack ctype=Digital loc=0x18 color=Unknown misc=0
+dev.hdaa.0.nid13: pin: Digital-out (Jack)
+dev.hdaa.0.nid12: audio output
+dev.hdaa.0.nid11_original: 0x185600f0 as=15 seq=0 device=Digital-out conn=Jack ctype=Digital loc=0x18 color=Unknown misc=0
+dev.hdaa.0.nid11_config: 0x185600f0 as=15 seq=0 device=Digital-out conn=Jack ctype=Digital loc=0x18 color=Unknown misc=0
+dev.hdaa.0.nid11: pin: Digital-out (Jack)
+dev.hdaa.0.nid10: audio output
+dev.hdaa.0.nid9_original: 0x185600f0 as=15 seq=0 device=Digital-out conn=Jack ctype=Digital loc=0x18 color=Unknown misc=0
+dev.hdaa.0.nid9_config: 0x185600f0 as=15 seq=0 device=Digital-out conn=Jack ctype=Digital loc=0x18 color=Unknown misc=0
+dev.hdaa.0.nid9: pin: Digital-out (Jack)
+dev.hdaa.0.nid8: audio output
+dev.hdaa.0.nid7_original: 0x185600f0 as=15 seq=0 device=Digital-out conn=Jack ctype=Digital loc=0x18 color=Unknown misc=0
+dev.hdaa.0.nid7_config: 0x185600f0 as=15 seq=0 device=Digital-out conn=Jack ctype=Digital loc=0x18 color=Unknown misc=0
+dev.hdaa.0.nid7: pin: Digital-out (Jack)
+dev.hdaa.0.nid6: audio output
+dev.hdaa.0.nid5_original: 0x185600f0 as=15 seq=0 device=Digital-out conn=Jack ctype=Digital loc=0x18 color=Unknown misc=0
+dev.hdaa.0.nid5_config: 0x185600f0 as=15 seq=0 device=Digital-out conn=Jack ctype=Digital loc=0x18 color=Unknown misc=0
+dev.hdaa.0.nid5: pin: Digital-out (Jack)
+dev.hdaa.0.nid4: audio output
+dev.hdaa.0.nid3_original: 0x185600f0 as=15 seq=0 device=Digital-out conn=Jack ctype=Digital loc=0x18 color=Unknown misc=0
+dev.hdaa.0.nid3_config: 0x185600f0 as=15 seq=0 device=Digital-out conn=Jack ctype=Digital loc=0x18 color=Unknown misc=0
+dev.hdaa.0.nid3: pin: Digital-out (Jack)
+dev.hdaa.0.nid2: audio output
+dev.hdaa.0.%iommu: 
+dev.hdaa.0.%parent: hdacc0
+dev.hdaa.0.%pnpinfo: type=0x01 subsystem=0x00aa0100
+dev.hdaa.0.%location: nid=1
+dev.hdaa.0.%driver: hdaa
+dev.hdaa.0.%desc: ATI R6xx Audio Function Group
+dev.hdaa.%parent: 
+dev.hdacc.1.%iommu: 
+dev.hdacc.1.%parent: hdac1
+dev.hdacc.1.%pnpinfo: vendor=0x10ec device=0x0897 revision=0x04 stepping=0x02
+dev.hdacc.1.%location: cad=0
+dev.hdacc.1.%driver: hdacc
+dev.hdacc.1.%desc: Realtek ALC897 HDA CODEC
+dev.hdacc.0.%iommu: 
+dev.hdacc.0.%parent: hdac0
+dev.hdacc.0.%pnpinfo: vendor=0x1002 device=0xaa01 revision=0x08 stepping=0x00
+dev.hdacc.0.%location: cad=0
+dev.hdacc.0.%driver: hdacc
+dev.hdacc.0.%desc: ATI R6xx HDA CODEC
+dev.hdacc.%parent: 
+dev.hdac.1.polling: 0
+dev.hdac.1.pindump: 0
+dev.hdac.1.wake: 0
+dev.hdac.1.%iommu: rid=0xfb
+dev.hdac.1.%parent: pci0
+dev.hdac.1.%pnpinfo: vendor=0x8086 device=0x7ad0 subvendor=0x1462 subdevice=0x9d25 class=0x040300
+dev.hdac.1.%location: slot=31 function=3 dbsf=pci0:0:31:3 handle=\_SB_.PC00.HDAS
+dev.hdac.1.%driver: hdac
+dev.hdac.1.%desc: Intel Alder Lake HDA Controller
+dev.hdac.0.polling: 0
+dev.hdac.0.pindump: 0
+dev.hdac.0.%iommu: rid=0x301
+dev.hdac.0.%parent: pci3
+dev.hdac.0.%pnpinfo: vendor=0x1002 device=0xab28 subvendor=0x1002 subdevice=0xab28 class=0x040300
+dev.hdac.0.%location: slot=0 function=1 dbsf=pci0:3:0:1
+dev.hdac.0.%driver: hdac
+dev.hdac.0.%desc: ATI (0xab28) HDA Controller
+dev.hdac.%parent: 
+dev.vgapci.0.%iommu: rid=0x300
+dev.vgapci.0.%parent: pci3
+dev.vgapci.0.%pnpinfo: vendor=0x1002 device=0x73df subvendor=0x1458 subdevice=0x2408 class=0x030000
+dev.vgapci.0.%location: slot=0 function=0 dbsf=pci0:3:0:0
+dev.vgapci.0.%driver: vgapci
+dev.vgapci.0.%desc: VGA-compatible display
+dev.vgapci.%parent: 

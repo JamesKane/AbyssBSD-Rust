@@ -1,0 +1,39 @@
+Id Refs Address                Size Name
+ 1  129 0xffffffff80200000  2351bd0 kernel
+ 2    1 0xffffffff82553000   628350 zfs.ko
+ 3    1 0xffffffff83800000   8c1e28 amdgpu.ko
+ 4    2 0xffffffff83710000    9f430 drm.ko
+ 5    1 0xffffffff837b0000     22b8 iic.ko
+ 6    2 0xffffffff837b3000     4120 linuxkpi_video.ko
+ 7    3 0xffffffff837b8000     7360 dmabuf.ko
+ 8    3 0xffffffff837c0000     3378 lindebugfs.ko
+ 9    1 0xffffffff837c4000     c358 ttm.ko
+10    1 0xffffffff840c2000    376d0 amdgpu_navy_flounder_sos_bin.ko
+11    1 0xffffffff840fa000    415e0 amdgpu_navy_flounder_ta_bin.ko
+12    1 0xffffffff8413c000    3dd88 amdgpu_navy_flounder_smc_bin.ko
+13    1 0xffffffff837d1000    1de58 amdgpu_navy_flounder_dmcub_bin.ko
+14    1 0xffffffff8417a000    425e0 amdgpu_navy_flounder_pfp_bin.ko
+15    1 0xffffffff841bd000    425e0 amdgpu_navy_flounder_me_bin.ko
+16    1 0xffffffff84200000    42560 amdgpu_navy_flounder_ce_bin.ko
+17    1 0xffffffff84243000    23958 amdgpu_navy_flounder_rlc_bin.ko
+18    1 0xffffffff84267000    43860 amdgpu_navy_flounder_mec_bin.ko
+19    1 0xffffffff842ab000    43860 amdgpu_navy_flounder_mec2_bin.ko
+20    1 0xffffffff837ef000     a5e0 amdgpu_navy_flounder_sdma_bin.ko
+21    1 0xffffffff842ef000    8fb70 amdgpu_navy_flounder_vcn_bin.ko
+22    1 0xffffffff837fa000     3390 acpi_wmi.ko
+23    1 0xffffffff8437f000     21e8 hms.ko
+24    1 0xffffffff84382000     30a8 hidmap.ko
+25    1 0xffffffff84386000     4250 ichsmb.ko
+26    1 0xffffffff8438b000     2178 smbus.ko
+27    1 0xffffffff8438e000    32240 linux.ko
+28    2 0xffffffff843c1000     6da8 mqueuefs.ko
+29    4 0xffffffff843c8000     cdc8 linux_common.ko
+30    1 0xffffffff843d5000    2f300 linux64.ko
+31    1 0xffffffff84405000     2278 pty.ko
+32    1 0xffffffff84408000     3578 fdescfs.ko
+33    1 0xffffffff8440c000     73c0 linprocfs.ko
+34    1 0xffffffff84414000     440c linsysfs.ko
+35    1 0xffffffff84419000     8810 if_bridge.ko
+36    1 0xffffffff84422000     6120 bridgestp.ko
+37    1 0xffffffff84429000    64c08 pf.ko
+38    1 0xffffffff8448e000     2a80 mac_ntpd.ko

@@ -1,0 +1,3 @@
+/compat/linux/sys/class/drm
+/compat/linux/sys/class/drm/card0
+/compat/linux/sys/class/drm/card0/device
