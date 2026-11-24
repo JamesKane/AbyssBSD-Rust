@@ -37,3 +37,4 @@ pub mod memory;
 mod memory_regs;
 pub mod psp;
 pub mod regs;
+pub mod timing;
