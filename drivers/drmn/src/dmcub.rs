@@ -123,7 +123,11 @@ pub(crate) fn load(
     let stopped = dmcub::stop(&w, STOP_POLLS, 1000, &pause);
     log(format_args!(
         "DMCUB: the platform's firmware {} the stop request",
-        if stopped { "answered" } else { "did not answer" }
+        if stopped {
+            "answered"
+        } else {
+            "did not answer"
+        }
     ));
     dmcub::hold(&w);
     dmcub::clean(&w);
@@ -201,7 +205,9 @@ fn round_trips(
 ) {
     let pause = |us: u32| bus::manager().delay_us(u64::from(us));
     match dmcub::version(w, 100, 1000, &pause) {
-        Some(v) => log(format_args!("DMCUB: the firmware says its version is {v:#x}")),
+        Some(v) => log(format_args!(
+            "DMCUB: the firmware says its version is {v:#x}"
+        )),
         None => log(format_args!("DMCUB: the version request was not taken")),
     }
     let inbox = dmcub::Inbox::new(base + MAILBOXES_AT as u64);

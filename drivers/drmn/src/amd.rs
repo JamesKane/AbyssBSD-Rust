@@ -711,7 +711,10 @@ impl Amd {
                     Err(e) => self.log(format_args!("DMCUB: stopped: {e:?}")),
                 }
             }
-            Err(e) => self.log(format_args!("DMCUB: {} not read: {e:?}", crate::dmcub::PATH)),
+            Err(e) => self.log(format_args!(
+                "DMCUB: {} not read: {e:?}",
+                crate::dmcub::PATH
+            )),
         }
         *self.psp.lock() = Some(brought);
     }
@@ -726,7 +729,10 @@ impl Amd {
             flip::frame_count(w)
         ));
         for (name, at) in hdmi::WATCH {
-            self.log(format_args!("  {name} @{at:#07x} = {:#010x}", w.read32(*at)));
+            self.log(format_args!(
+                "  {name} @{at:#07x} = {:#010x}",
+                w.read32(*at)
+            ));
         }
         let ep = |i: u32| hdmi::endpoint_read(w, i);
         self.log(format_args!(
@@ -764,7 +770,10 @@ impl Amd {
         use amdgpu::{flip, hdmi};
         let gpu = self.gpu()?;
         let w = Bar5(&gpu);
-        if !self.hdmi_prepared.load(core::sync::atomic::Ordering::Acquire) {
+        if !self
+            .hdmi_prepared
+            .load(core::sync::atomic::Ordering::Acquire)
+        {
             self.hdmi_prepare()?;
         }
         let pause = |us: u32| bus::manager().delay_us(u64::from(us));
@@ -937,9 +946,11 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         "Write 1 to load the display microcontroller's firmware through the security processor (on a kernel thread; see the log)",
         move || {
             let r = Arc::clone(&r);
-            sched::spawn("amd-dmcub", sched::Priority::KERNEL, move |s| r.dmcub_load(s))
-                .map(|_| ())
-                .map_err(|_| abi::errno::Errno::EAGAIN)
+            sched::spawn("amd-dmcub", sched::Priority::KERNEL, move |s| {
+                r.dmcub_load(s)
+            })
+            .map(|_| ())
+            .map_err(|_| abi::errno::Errno::EAGAIN)
         },
     );
     let r = Arc::clone(a);

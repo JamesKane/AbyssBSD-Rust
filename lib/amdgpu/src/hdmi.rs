@@ -104,6 +104,9 @@ pub const EP_CHANNEL_SPEAKER: u32 = 0x25;
 pub const EP_AUDIO_DESCRIPTOR: u32 = 0x28;
 /// The hot-plug control: bit 0 clock-gating disable, bit 31 audio enabled.
 pub const EP_HOTPLUG: u32 = 0x54;
+/// The first sink-info register (manufacturer and product; then the name's
+/// length, two port words, and the name from `+ 4`, four characters each).
+pub const EP_SINK_INFO: u32 = 0x3a;
 /// The codec's supported-rates register and its power-state register.
 pub const CODEC_RATES: usize = 0xe32c;
 /// The codec's power-state register.
@@ -163,10 +166,20 @@ pub fn audio_encoder<W: Window + ?Sized>(w: &W, endpoint: u32) {
         update(w, pair.1, 0x000f_ffff, n);
     }
     // Auto-send on, hardware-computed CTS, normal priority.
-    update(w, ACR_PACKET_CONTROL, (1 << 12) | (1 << 8) | (1 << 31), 1 << 12);
+    update(
+        w,
+        ACR_PACKET_CONTROL,
+        (1 << 12) | (1 << 8) | (1 << 31),
+        1 << 12,
+    );
     update(w, AFMT_AUDIO_SRC_CONTROL, 7, endpoint);
     // Two channels; the layout and OSF overrides off.
-    update(w, AFMT_AUDIO_PACKET_CONTROL2, 0xff00 | 1 | (1 << 28), 0x03 << 8);
+    update(
+        w,
+        AFMT_AUDIO_PACKET_CONTROL2,
+        0xff00 | 1 | (1 << 28),
+        0x03 << 8,
+    );
 }
 
 /// Writes one endpoint register through the index and data pair.
@@ -211,6 +224,48 @@ pub fn endpoint_configure<W: Window + ?Sized>(w: &W) {
     endpoint_write(w, EP_HOTPLUG, hotplug & !1);
 }
 
+/// The endpoint's descriptor word for a short audio descriptor: maximum
+/// channels minus one in 2:0, supported rates in 15:8, the third byte (bit
+/// depths for linear PCM) in 23:16. The stereo-only rates (31:24) are not
+/// derived from the monitor's data.
+#[must_use]
+pub const fn descriptor_word(d: [u8; 3]) -> u32 {
+    (d[0] as u32 & 7) | (d[1] as u32) << 8 | (d[2] as u32) << 16
+}
+
+/// Step 2 with the sink's EDID: the same bracket and registers as
+/// [`endpoint_configure`], but the speakers, the audio descriptors (by
+/// format code), the manufacturer and product, and the monitor's name come
+/// from `sink`.
+pub fn endpoint_configure_for<W: Window + ?Sized>(w: &W, sink: &edid::Edid) {
+    update(w, CODEC_RATES, 0xfff, 0x70);
+    let hotplug = endpoint_read(w, EP_HOTPLUG);
+    endpoint_write(w, EP_HOTPLUG, hotplug | 1);
+    endpoint_write(
+        w,
+        EP_CHANNEL_SPEAKER,
+        u32::from(sink.audio.speakers) | (1 << 16),
+    );
+    for (format, d) in (1u32..).zip(sink.audio.descriptors.iter().skip(1)) {
+        endpoint_write(w, EP_AUDIO_DESCRIPTOR + format, descriptor_word(*d));
+    }
+    endpoint_write(
+        w,
+        EP_SINK_INFO,
+        u32::from(sink.manufacturer) | u32::from(sink.product) << 16,
+    );
+    let name = sink.name.as_deref().unwrap_or("").as_bytes();
+    let name = &name[..name.len().min(18)];
+    endpoint_write(w, EP_SINK_INFO + 1, u32::try_from(name.len()).unwrap_or(0));
+    for (i, chunk) in (0u32..).zip(name.chunks(4)) {
+        let mut b = [0u8; 4];
+        b[..chunk.len()].copy_from_slice(chunk);
+        endpoint_write(w, EP_SINK_INFO + 4 + i, u32::from_le_bytes(b));
+    }
+    let hotplug = endpoint_read(w, EP_HOTPLUG);
+    endpoint_write(w, EP_HOTPLUG, hotplug & !1);
+}
+
 /// Step 3: the audio clock for 148.5 MHz, in the order the specification
 /// insists on: the source first, then the module, then the phase.
 pub fn audio_clock<W: Window + ?Sized>(w: &W) {
@@ -242,17 +297,7 @@ pub fn video_mode<W: Window + ?Sized>(w: &W, pause_us: &dyn Fn(u32)) {
 
 /// The AVI info frame for 1920x1080p60, RGB, 16:9, VIC 16 (08 section 4.5):
 /// the header dword and the eight body dwords.
-pub const AVI_1080P60: [u32; 9] = [
-    0x000d_0282,
-    0x0028_1027,
-    0x0000_0010,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-];
+pub const AVI_1080P60: [u32; 9] = [0x000d_0282, 0x0028_1027, 0x0000_0010, 0, 0, 0, 0, 0, 0];
 
 /// Writes the packet at index `n` (the dwords at `n * 9`), as the reference
 /// does: wait for no conflict, clear it, set the index, write, ask for an
@@ -290,7 +335,12 @@ pub fn avi_info_frame<W: Window + ?Sized>(w: &W, pause_us: &dyn Fn(u32)) -> bool
 /// (the AVI) sent every frame on line 2.
 pub fn packet_controls<W: Window + ?Sized>(w: &W) {
     update(w, DB_CONTROL, 1 << 12, 1 << 12);
-    update(w, VBI_PACKET_CONTROL, (1 << 4) | (1 << 5) | 1 | (1 << 12), (1 << 4) | (1 << 5) | 1);
+    update(
+        w,
+        VBI_PACKET_CONTROL,
+        (1 << 4) | (1 << 5) | 1 | (1 << 12),
+        (1 << 4) | (1 << 5) | 1,
+    );
     update(w, INFOFRAME_CONTROL0, 1 << 4, 1 << 4);
     update(w, INFOFRAME_CONTROL1, 0x3f00, 2 << 8);
     update(w, HDMI_GC, 1, 0);
@@ -361,7 +411,12 @@ mod tests {
             *self.endpoint.borrow().get(&i).unwrap_or(&0)
         }
         fn wrote(&self, o: usize) -> Vec<u32> {
-            self.log.borrow().iter().filter(|(r, _)| *r == o).map(|(_, v)| *v).collect()
+            self.log
+                .borrow()
+                .iter()
+                .filter(|(r, _)| *r == o)
+                .map(|(_, v)| *v)
+                .collect()
         }
     }
 
@@ -401,7 +456,10 @@ mod tests {
         assert_eq!(m.get(ACR_48.1) & 0xfffff, 0x1800);
         assert_eq!(m.get(ACR_32.1) & 0xfffff, 4096);
         assert_eq!(m.get(ACR_44_1.1) & 0xfffff, 6272);
-        assert_eq!(m.get(ACR_PACKET_CONTROL) & ((1 << 12) | (1 << 8) | (1 << 31)), 1 << 12);
+        assert_eq!(
+            m.get(ACR_PACKET_CONTROL) & ((1 << 12) | (1 << 8) | (1 << 31)),
+            1 << 12
+        );
     }
 
     #[test]
@@ -425,7 +483,10 @@ mod tests {
         m.set(AUDIO_DTO_SOURCE, 0x77);
         audio_clock(&m);
         let order: Vec<usize> = m.log.borrow().iter().map(|(r, _)| *r).collect();
-        assert_eq!(order, [AUDIO_DTO_SOURCE, AUDIO_DTO0_MODULE, AUDIO_DTO0_PHASE]);
+        assert_eq!(
+            order,
+            [AUDIO_DTO_SOURCE, AUDIO_DTO0_MODULE, AUDIO_DTO0_PHASE]
+        );
         assert_eq!(m.get(AUDIO_DTO_SOURCE), 0);
         assert_eq!(m.get(AUDIO_DTO0_MODULE), 0x16_a8c8);
         assert_eq!(m.get(AUDIO_DTO0_PHASE), 0x3_a980);
@@ -449,6 +510,47 @@ mod tests {
             .collect();
         assert_eq!(hot, [0x8000_0001, 0x8000_0000]);
         assert_eq!(m.get(CODEC_RATES) & 0xfff, 0x70);
+    }
+
+    #[test]
+    fn the_endpoint_gets_the_sinks_edid_data() {
+        let m = Model::new();
+        let mut sink = edid_sample();
+        endpoint_configure_for(&m, &sink);
+        assert_eq!(m.ep(EP_CHANNEL_SPEAKER), 0x0001_0001);
+        assert_eq!(m.ep(EP_AUDIO_DESCRIPTOR + 1), 0x0007_0701);
+        assert_eq!(m.ep(EP_AUDIO_DESCRIPTOR + 2), 0x0050_0705);
+        assert_eq!(m.ep(EP_AUDIO_DESCRIPTOR + 3), 0);
+        assert_eq!(m.ep(EP_SINK_INFO), 0x1234_ac10);
+        assert_eq!(m.ep(EP_SINK_INFO + 1), 7);
+        assert_eq!(m.ep(EP_SINK_INFO + 4), u32::from_le_bytes(*b"TEST"));
+        assert_eq!(
+            m.ep(EP_SINK_INFO + 5),
+            u32::from_le_bytes([b'M', b'O', b'N', 0])
+        );
+        // The bracket closes with the clock gating as it was.
+        assert_eq!(m.ep(EP_HOTPLUG), 0);
+        // A name longer than the endpoint holds is cut to 18 characters.
+        sink.name = Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ".into());
+        endpoint_configure_for(&m, &sink);
+        assert_eq!(m.ep(EP_SINK_INFO + 1), 18);
+    }
+
+    fn edid_sample() -> edid::Edid {
+        let mut audio = edid::Audio::default();
+        audio.descriptors[1] = [9, 0x07, 0x07];
+        audio.descriptors[2] = [(2 << 3) | 5, 0x07, 0x50];
+        audio.speakers = 1;
+        edid::Edid {
+            name: Some("TESTMON".into()),
+            size_mm: (0, 0),
+            modes: Vec::new(),
+            extensions: 1,
+            bpc: None,
+            manufacturer: 0xac10,
+            product: 0x1234,
+            audio,
+        }
     }
 
     #[test]

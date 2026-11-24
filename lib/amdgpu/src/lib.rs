@@ -25,10 +25,9 @@ extern crate std;
 
 pub mod discovery;
 pub mod display;
-pub mod dmcub;
 mod display_regs;
+pub mod dmcub;
 pub mod doorbell;
-pub mod edid;
 pub mod flip;
 pub mod gmc;
 pub mod hdmi;

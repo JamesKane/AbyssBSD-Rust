@@ -159,6 +159,63 @@ pub(crate) fn modes(b: &[u8]) -> Vec<Mode> {
     out
 }
 
+/// Audio format codes run 1 (linear PCM) to 14, so descriptors are indexed
+/// by the code, with 0 unused.
+pub const FORMATS: usize = 15;
+
+/// What a CTA-861 block says about the sink's audio.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Audio {
+    /// The short audio descriptors (three bytes each) by format code; all
+    /// zero for a format the sink does not list.
+    pub descriptors: [[u8; 3]; FORMATS],
+    /// The speaker allocation data block's first byte (0 if there is none).
+    pub speakers: u8,
+    /// Whether the block says the sink supports basic audio (bit 6 of its
+    /// byte 3).
+    pub basic: bool,
+}
+
+/// The audio data of one CTA-861 block: its audio data blocks (tag 1) and
+/// speaker allocation block (tag 4). `None` for a block that is not
+/// CTA-861 or does not sum to zero; blocks running off the end stop the
+/// walk.
+pub(crate) fn audio(b: &[u8]) -> Option<Audio> {
+    let b = b.get(..BLOCK)?;
+    if b[0] != TAG || b.iter().fold(0u8, |a, x| a.wrapping_add(*x)) != 0 {
+        return None;
+    }
+    let mut out = Audio {
+        basic: b[3] & 0x40 != 0,
+        ..Audio::default()
+    };
+    let dtd = usize::from(b[2]);
+    if b[1] < 3 || !(4..BLOCK).contains(&dtd) {
+        return Some(out);
+    }
+    let mut i = 4;
+    while i < dtd {
+        let (tag, len) = (b[i] >> 5, usize::from(b[i] & 0x1F));
+        let Some(payload) = b.get(i + 1..i + 1 + len).filter(|_| i + 1 + len <= dtd) else {
+            break;
+        };
+        match tag {
+            1 => {
+                for s in payload.as_chunks::<3>().0 {
+                    let format = usize::from((s[0] >> 3) & 0xF);
+                    if format != 0 && format < FORMATS {
+                        out.descriptors[format] = [s[0], s[1], s[2]];
+                    }
+                }
+            }
+            4 if len >= 3 => out.speakers = payload[0],
+            _ => {}
+        }
+        i += 1 + len;
+    }
+    Some(out)
+}
+
 /// The refresh rate of `m` in hertz, rounded.
 pub(crate) fn refresh_hz(m: &Mode) -> u32 {
     let total = u64::from(m.htotal) * u64::from(m.vtotal);

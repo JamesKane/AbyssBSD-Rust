@@ -6,8 +6,9 @@
 //!
 //! The data is untrusted input from the monitor: every read is checked and
 //! a malformed base block is an error, never a panic; an extension block
-//! that is malformed gives no modes. DisplayID extensions and the audio
-//! data are not read yet.
+//! that is malformed gives no modes. DisplayID extensions are not read yet.
+//! The sink's audio capabilities (the CTA-861 short audio descriptors and
+//! speaker allocation) are read for the display drivers' audio endpoints.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -17,6 +18,8 @@ extern crate alloc;
 extern crate std;
 
 mod cta;
+
+pub use cta::{Audio, FORMATS};
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -54,6 +57,12 @@ pub struct Edid {
     pub extensions: u8,
     /// Bits per colour component of a digital input, if stated (EDID 1.4).
     pub bpc: Option<u8>,
+    /// The manufacturer's id: bytes 8 and 9 as stored, read little-endian.
+    pub manufacturer: u16,
+    /// The product code (bytes 10 and 11, little-endian).
+    pub product: u16,
+    /// What the first CTA-861 extension says about audio.
+    pub audio: Audio,
 }
 
 const HEADER: [u8; 8] = [0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0];
@@ -122,7 +131,11 @@ pub fn parse(data: &[u8]) -> Result<Edid, Error> {
     }
     // Extension blocks: their modes follow the base block's, without those
     // the monitor gave twice (the same size at the same rate).
+    let mut audio = None;
     for ext in data[BLOCK..].as_chunks::<BLOCK>().0.iter().take(3) {
+        if audio.is_none() {
+            audio = cta::audio(ext);
+        }
         for m in cta::modes(ext) {
             let seen = modes.iter().any(|o| {
                 o.hdisplay == m.hdisplay
@@ -140,6 +153,9 @@ pub fn parse(data: &[u8]) -> Result<Edid, Error> {
         modes,
         extensions: b[126],
         bpc,
+        manufacturer: u16::from_le_bytes([b[8], b[9]]),
+        product: u16::from_le_bytes([b[10], b[11]]),
+        audio: audio.unwrap_or_default(),
     })
 }
 

@@ -199,7 +199,10 @@ pub fn hold<W: Window + ?Sized>(w: &W) {
         return;
     }
     w.write32(CNTL2, w.read32(CNTL2) | 1);
-    w.write32(MMHUBBUB_SOFT_RESET, w.read32(MMHUBBUB_SOFT_RESET) | (1 << 8));
+    w.write32(
+        MMHUBBUB_SOFT_RESET,
+        w.read32(MMHUBBUB_SOFT_RESET) | (1 << 8),
+    );
     w.write32(CNTL, cntl & !(1 << 16));
 }
 
@@ -252,7 +255,10 @@ pub fn configure<W: Window + ?Sized>(w: &W, l: &Layout) {
 /// enable and trace port on, the soft reset off. `psp_version` is the
 /// security processor's version register.
 pub fn release<W: Window + ?Sized>(w: &W, psp_version: u32) {
-    w.write32(MMHUBBUB_SOFT_RESET, w.read32(MMHUBBUB_SOFT_RESET) & !(1 << 8));
+    w.write32(
+        MMHUBBUB_SOFT_RESET,
+        w.read32(MMHUBBUB_SOFT_RESET) & !(1 << 8),
+    );
     w.write32(SCRATCH15, psp_version & 0x0011_00ff);
     w.write32(CNTL, w.read32(CNTL) | (1 << 16) | (1 << 19));
     w.write32(CNTL2, w.read32(CNTL2) & !1);
@@ -643,7 +649,10 @@ mod tests {
         // Wrap: the write pointer one slot behind the read pointer is full.
         r.regs.borrow_mut().insert(INBOX1 + 8, 0x1fc0);
         r.regs.borrow_mut().insert(INBOX1 + 12, 0);
-        assert_eq!(inbox.submit(&r, &m, &[0; 4], 2, 1, &|_| {}), Err(Error::Full));
+        assert_eq!(
+            inbox.submit(&r, &m, &[0; 4], 2, 1, &|_| {}),
+            Err(Error::Full)
+        );
     }
 
     #[test]
