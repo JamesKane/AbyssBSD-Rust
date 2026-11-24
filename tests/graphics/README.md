@@ -14,6 +14,12 @@ Stock Wayland and Sway from FreeBSD 15.1 packages, unmodified, on the card under
 - `accept-aarch64-gop-kms.png`: the same on arm64 (`virt` with `ramfb`, 800x600, under emulation, so
   the jellyfish runs at about 7 frames a second).
 
+- `accept-x86_64-amd-display.png`: the same on the X870E, on the Radeon 610M's display (`amd-display`,
+  `drivers/amd-kms` through `drivers/drmn`) at 1920x1080, Sway 1.12, Mesa 26.2.2 llvmpipe, the jellyfish at
+  about 549 frames a second. fastfetch lists both the GeForce RTX 4070 and the AMD Raphael.
+- `kmsflip.c`: a client with raw ioctls and no libdrm that sets the mode and flips between two buffers on a card
+  (`kmsflip [node [hold-seconds]]`).
+
 ## Running it
 
 ```sh

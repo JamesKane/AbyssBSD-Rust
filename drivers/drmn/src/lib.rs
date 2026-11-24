@@ -120,8 +120,11 @@ fn report_vbios(aperture: &Aperture, log: &dyn Fn(core::fmt::Arguments<'_>)) {
     }
 }
 
-/// Whether a Radeon's display becomes a graphics card (`hw.drmn.kms`).
-static KMS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Whether a Radeon's display becomes a graphics card (`hw.drmn.kms`, on
+/// unless set to 0). It does only if the firmware's display is running and
+/// is the console's (`kms::card`), so the setting is for turning a working
+/// card off.
+static KMS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
 /// Takes the boot-time tunables (`TUNABLE_INT_FETCH`): `get` gives a
 /// name's integer value, if set. The kernel calls it before drivers
