@@ -701,7 +701,6 @@ impl Driver for VtNet {
             let tag = dev.dma_tag(
                 cx,
                 DmaConstraints {
-                    addr_bits: if dev.is_modern() { 64 } else { 44 },
                     ..DmaConstraints::UNLIMITED
                 },
             )?;

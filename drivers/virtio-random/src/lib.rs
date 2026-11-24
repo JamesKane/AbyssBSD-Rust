@@ -176,15 +176,7 @@ impl Driver for VtRnd {
         // Once a queue is set up the device may DMA: any failure from here
         // resets it before the memory goes.
         let built = (|| {
-            // The legacy interface takes a 32-bit page number.
-            let addr_bits = if dev.is_modern() { 64 } else { 44 };
-            let tag = dev.dma_tag(
-                cx,
-                DmaConstraints {
-                    addr_bits,
-                    ..DmaConstraints::UNLIMITED
-                },
-            )?;
+            let tag = dev.dma_tag(cx, DmaConstraints::UNLIMITED)?;
             let buf = tag
                 .coherent::<u8>(REQUEST)
                 .map_err(|_| AttachError::NoMemory)?;

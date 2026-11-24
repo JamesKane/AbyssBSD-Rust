@@ -377,7 +377,6 @@ impl Driver for VtBlk {
             let tag = dev.dma_tag(
                 cx,
                 DmaConstraints {
-                    addr_bits: if dev.is_modern() { 64 } else { 44 },
                     max_segment: size_max,
                     ..DmaConstraints::UNLIMITED
                 },

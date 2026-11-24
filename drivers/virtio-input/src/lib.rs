@@ -399,7 +399,6 @@ impl Driver for VtInput {
             let tag = dev.dma_tag(
                 cx,
                 DmaConstraints {
-                    addr_bits: if dev.is_modern() { 64 } else { 44 },
                     ..DmaConstraints::UNLIMITED
                 },
             )?;

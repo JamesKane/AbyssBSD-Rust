@@ -123,6 +123,9 @@ pub struct VirtioDevice {
     pub(crate) access_platform: core::sync::atomic::AtomicBool,
 }
 
+/// Address bits a legacy device reaches: a 32-bit page number of 4 KiB pages.
+const LEGACY_ADDR_BITS: u8 = 44;
+
 impl VirtioDevice {
     /// The grant holding window `w`, if `width` bytes at `off` lie inside
     /// it. Fixed registers were checked at attach; offsets the device
@@ -326,8 +329,12 @@ impl VirtioDevice {
     pub fn dma_tag(
         &self,
         cx: &mut bus::AttachCx<'_>,
-        c: vm::dma::DmaConstraints,
+        mut c: vm::dma::DmaConstraints,
     ) -> Result<DmaTag, bus::ResourceError> {
+        // The legacy interface takes a 32-bit page number: 44 address bits.
+        if !self.is_modern() {
+            c.addr_bits = c.addr_bits.min(LEGACY_ADDR_BITS);
+        }
         if self
             .access_platform
             .load(core::sync::atomic::Ordering::Relaxed)
