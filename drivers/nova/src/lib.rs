@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! `nova`: the native driver for NVIDIA GPUs, as `drmn0` under `vgapci0`.
 //!
-//! This is the first step: it reads the two identification registers and
-//! names the chip. It writes nothing to the GPU, turns on no bus mastering,
-//! and does not touch the display, which firmware set up and `gop-kms`
-//! keeps showing. A chip it does not know, or a device that does not
+//! At attach it reads the identification registers and the Video BIOS and
+//! names the chip; it writes nothing, turns on no bus mastering, and does not
+//! touch the display, which firmware set up and `gop-kms` keeps showing. The
+//! stages that write to the GPU run only when asked, through sysctls
+//! ([`control`]). A chip it does not know, or a device that does not
 //! answer, is declined (the node stays in the tree without a driver).
 //!
 //! Layouts: the clean-room specification `nvidia-nova` (section 01).
@@ -14,27 +15,19 @@
 
 extern crate alloc;
 
+mod control;
+
 use alloc::string::String;
 use core::any::Any;
 
-use bus::{AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, StopCx, StopReason};
+use alloc::sync::Arc;
+
+use bus::{AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, StartCx, StopCx, StopReason};
+use control::{Control, Prom};
 use nvgpu::chip::{self, ChipError, Identity};
-use nvgpu::vbios::{self, Descriptor, WordSource};
+use nvgpu::vbios::{self, Descriptor};
 use nvgpu::{fuse, mem};
 use vgapci::{Aperture, Registers};
-
-/// The Video BIOS window of the register aperture, read as the parser
-/// wants it.
-struct Prom<'a>(&'a Aperture);
-
-impl WordSource for Prom<'_> {
-    fn read32(&self, offset: usize) -> Option<u32> {
-        if offset >= vbios::WINDOW {
-            return None;
-        }
-        self.0.read32(vbios::WINDOW_BASE.checked_add(offset)?)
-    }
-}
 
 /// Says what the GPU's boot left in the registers the driver will need:
 /// reads only.
@@ -118,6 +111,7 @@ fn report_vbios(aperture: &Aperture, log: &dyn Fn(core::fmt::Arguments<'_>)) {
 pub struct Nova {
     /// Which chip this is.
     identity: Identity,
+    control: Arc<Control>,
 }
 
 impl Driver for Nova {
@@ -154,7 +148,10 @@ impl Driver for Nova {
                 ));
                 report_state(&aperture, &log);
                 report_vbios(&aperture, &log);
-                Ok(Self { identity })
+                Ok(Self {
+                    identity,
+                    control: Arc::new(Control::new(registers.0.clone(), boot_0)),
+                })
             }
             Err(ChipError::Unsupported { id }) => {
                 log(format_args!(
@@ -171,8 +168,21 @@ impl Driver for Nova {
         }
     }
 
+    fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        let c = Arc::clone(&self.control);
+        let unit = cx.unit();
+        bus::manager().sysctl(cx.sleepable(), &mut |t| {
+            if let Some(node) = bus::device_node(t, Self::NAME, unit) {
+                control::publish(t, node, &c);
+            }
+        });
+        Ok(())
+    }
+
     fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {
         let _ = self.identity;
+        // The flush registers must not point at memory that is freed.
+        self.control.release();
     }
 }
 

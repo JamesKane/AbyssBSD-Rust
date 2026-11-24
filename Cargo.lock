@@ -859,9 +859,13 @@ dependencies = [
 name = "nova"
 version = "0.0.0"
 dependencies = [
+ "abi",
  "bus",
  "nvgpu",
+ "sync",
+ "sysctl",
  "vgapci",
+ "vm",
 ]
 
 [[package]]
@@ -1292,6 +1296,7 @@ dependencies = [
  "devtree",
  "pci",
  "regs",
+ "vm",
 ]
 
 [[package]]

@@ -35,6 +35,7 @@ use bus::{
 use devtree::ids::PciId;
 use pci::bus::PciChild;
 use regs::Bytes;
+use vm::dma::{DmaConstraints, DmaTag};
 
 /// PCI class 03h, subclass 00h: a VGA-compatible controller.
 const DISPLAY_VGA: PciId = PciId::subclass(0x03, 0x00);
@@ -47,10 +48,14 @@ const VENDOR_NVIDIA: u16 = 0x10de;
 /// The register aperture's size on the NVIDIA GPUs (BAR0: 16 MiB).
 const NVIDIA_BAR0_LEN: u64 = 0x100_0000;
 
-/// A GPU's register aperture, read-only to its driver for now.
+/// What `vgapci` holds of a GPU for its native driver: the register
+/// aperture, the PCI function (bus mastering is the driver's to turn on),
+/// and a DMA tag for what the GPU reads and writes in host memory.
 pub struct Aperture {
     mmio: MmioGrant<Bytes>,
     len: usize,
+    pci: Arc<PciChild>,
+    tag: DmaTag,
 }
 
 impl core::fmt::Debug for Aperture {
@@ -60,6 +65,28 @@ impl core::fmt::Debug for Aperture {
 }
 
 impl Aperture {
+    /// Writes the 32-bit register at byte `offset`; `false` (and no write)
+    /// if it is not aligned or lies outside the aperture.
+    pub fn write32(&self, offset: usize, value: u32) -> bool {
+        if !offset.is_multiple_of(4) || offset.checked_add(4).is_none_or(|e| e > self.len) {
+            return false;
+        }
+        self.mmio.write32(offset, value);
+        true
+    }
+
+    /// The PCI function.
+    #[must_use]
+    pub fn pci(&self) -> &PciChild {
+        &self.pci
+    }
+
+    /// The DMA tag: 47-bit addresses, 256-byte alignment.
+    #[must_use]
+    pub fn dma_tag(&self) -> &DmaTag {
+        &self.tag
+    }
+
     /// The 32-bit register at byte `offset`, or `None` if it is not
     /// aligned or lies outside the aperture.
     #[must_use]
@@ -104,10 +131,17 @@ impl Driver for VgaPci {
         {
             // Memory decoding is on already (firmware drives this display);
             // nothing is written to the function.
-            if let Ok(mmio) = cx.mmio_bytes(0) {
+            let tag = cx.dma_tag(DmaConstraints {
+                addr_bits: 47,
+                align: 256,
+                ..DmaConstraints::UNLIMITED
+            });
+            if let (Ok(mmio), Ok(tag)) = (cx.mmio_bytes(0), tag) {
                 aperture = Some(Arc::new(Aperture {
                     mmio,
                     len: usize::try_from(NVIDIA_BAR0_LEN).unwrap_or(0),
+                    pci: Arc::clone(&child),
+                    tag,
                 }));
             }
         }
