@@ -873,7 +873,12 @@ presents (`simpledrm`-like). Spec 09 lists what RADV expects; none of it is in R
   can be seen. The Radeon card's takes no lock and waits for nothing: two register writes pointing the display at
   the firmware's surface. A host test holds the card's lock and a pending flip and still gets the write; the QEMU
   kernel test calls it on a card showing a client's buffer. On the board `dev.drmn.1.panic_restore` runs the same
-  hook: with `kmsflip` holding surface A (`0xf401000000`) the surface read `0xf400000000` a second later.
+  hook: with `kmsflip` holding surface A (`0xf401000000`) the surface read `0xf400000000` a second later, and the
+  owner saw the held frame give way to the console's, and then to solid magenta when the console's surface was
+  painted (a test, since removed): the display scans the console's surface after the hook. While a client holds the
+  screen, `vt` does not draw, so the console's surface shows what it last drew.
+- **Shutdown and reset keep the last frame.** `stop` flips back to the console's surface for every detach reason
+  except `Shutdown` and `Reset`, across which the last frame stays rather than flashing the console.
 - **Still to do in R1:** a timer-versus-hardware check of vblank, `hw.drmn.kms` on by default once the owner agrees, and the run of the Sway acceptance on it.
 - **Not yet read or done:** the decoding of the platform display firmware's window registers is in the
   specification's 08 section 9.0.1; stage R3 overwrites those windows, so R1 stays out of the top 2 MiB.

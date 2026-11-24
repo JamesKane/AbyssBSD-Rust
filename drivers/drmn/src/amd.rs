@@ -409,11 +409,16 @@ impl Amd {
         *self.kms.lock() = Some((card, node));
     }
 
-    /// Takes the card away and shows the firmware's picture again.
-    pub(crate) fn unregister_kms(&self, s: &sched::Sleepable) {
+    /// Takes the card away. The firmware's picture is shown again unless
+    /// the machine is shutting down or the device is being reset: then the
+    /// last frame stays, as it does across a reboot, rather than flashing
+    /// the console.
+    pub(crate) fn unregister_kms(&self, s: &sched::Sleepable, restore: bool) {
         let held = self.kms.lock().take();
         if let Some((card, node)) = held {
-            card.restore();
+            if restore {
+                card.restore();
+            }
             node.unregister(s);
         }
     }
