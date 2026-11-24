@@ -56,8 +56,14 @@ pub fn table_offset(memsize_mib: u32) -> Option<u64> {
 /// `offset` must be a multiple of 4.
 pub fn read_vram<W: Window + ?Sized>(w: &W, offset: u64) -> u32 {
     let (old_lo, old_hi) = (w.read32(MM_INDEX), w.read32(MM_INDEX_HI));
-    w.write32(MM_INDEX, (offset & 0x7fff_ffff) as u32 | 1 << 31);
-    w.write32(MM_INDEX_HI, (offset >> 31) as u32);
+    // The low 31 bits fit; the high part of a VRAM offset (below 2^40) is
+    // below 2^9.
+    let (lo, hi) = (
+        u32::try_from(offset & 0x7fff_ffff).unwrap_or(0),
+        u32::try_from(offset >> 31).unwrap_or(u32::MAX),
+    );
+    w.write32(MM_INDEX, lo | 1 << 31);
+    w.write32(MM_INDEX_HI, hi);
     let value = w.read32(MM_DATA);
     w.write32(MM_INDEX, old_lo);
     w.write32(MM_INDEX_HI, old_hi);
