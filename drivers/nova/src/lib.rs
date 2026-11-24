@@ -20,6 +20,7 @@ use core::any::Any;
 use bus::{AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, StopCx, StopReason};
 use nvgpu::chip::{self, ChipError, Identity};
 use nvgpu::vbios::{self, Descriptor, WordSource};
+use nvgpu::{fuse, mem};
 use vgapci::{Aperture, Registers};
 
 /// The Video BIOS window of the register aperture, read as the parser
@@ -32,6 +33,49 @@ impl WordSource for Prom<'_> {
             return None;
         }
         self.0.read32(vbios::WINDOW_BASE.checked_add(offset)?)
+    }
+}
+
+/// Says what the GPU's boot left in the registers the driver will need:
+/// reads only.
+fn report_state(aperture: &Aperture, log: &dyn Fn(core::fmt::Arguments<'_>)) {
+    let r = |o: usize| aperture.read32(o).unwrap_or(u32::MAX);
+    let mask = r(mem::NV_PGC6_AON_SECURE_SCRATCH_GROUP_05_PRIV_LEVEL_MASK);
+    let boot =
+        match mem::gfw_boot_done(mask, r(mem::NV_PGC6_AON_SECURE_SCRATCH_GROUP_05_0_GFW_BOOT)) {
+            Some(true) => "done",
+            Some(false) => "not done",
+            None => "progress not readable",
+        };
+    let fb = mem::usable_fb_bytes(r(mem::NV_USABLE_FB_SIZE_IN_MB));
+    let display_disabled = r(mem::NV_FUSE_STATUS_OPT_DISPLAY) & 1 != 0;
+    let vga_register = r(mem::NV_PDISP_VGA_WORKSPACE_BASE);
+    let vga = mem::vga_workspace_base(fb, display_disabled, vga_register);
+    let wpr2 = mem::wpr2_bounds(
+        r(mem::NV_PFB_PRI_MMU_WPR2_ADDR_LO),
+        r(mem::NV_PFB_PRI_MMU_WPR2_ADDR_HI),
+    );
+    log(format_args!(
+        "drmn0: boot firmware {boot}; {} MiB of video memory; display {}; VGA workspace at \
+         {vga:#x} (register {vga_register:#010x}); protected region 2 {}",
+        fb >> 20,
+        if display_disabled {
+            "fused off"
+        } else {
+            "present"
+        },
+        match wpr2 {
+            Some((lo, hi)) => alloc::format!("{lo:#x}..{hi:#x}"),
+            None => alloc::string::String::from("not set up"),
+        },
+    ));
+    if let Ok(reg) = fuse::register(0x0400, 9) {
+        let v = r(reg);
+        log(format_args!(
+            "drmn0: fuse version of GPU system processor microcode 9: register {reg:#x} = \
+             {v:#010x}, version {}",
+            fuse::version(v),
+        ));
     }
 }
 
@@ -108,6 +152,7 @@ impl Driver for Nova {
                     identity.major,
                     identity.minor,
                 ));
+                report_state(&aperture, &log);
                 report_vbios(&aperture, &log);
                 Ok(Self { identity })
             }
