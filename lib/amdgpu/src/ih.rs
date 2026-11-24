@@ -82,6 +82,10 @@ pub struct Ring {
     pub bytes: u32,
     /// The GPU address of the 8-byte write-back slot.
     pub writeback: u64,
+    /// Whether the hardware's writes snoop the processors' caches: for a
+    /// ring in system memory. A ring in video memory is not snooped, and
+    /// the processor reads it uncached or write-combining.
+    pub snoop: bool,
 }
 
 /// Why a ring cannot be made.
@@ -124,10 +128,12 @@ impl Ring {
         v &= !(0x1f << cntl::SIZE_SHIFT | cntl::MC_RO | cntl::MC_VMID_MASK | cntl::MC_SPACE_MASK);
         v |= (self.bytes / 4).trailing_zeros() << cntl::SIZE_SHIFT;
         v |= MC_SPACE_GPU << cntl::MC_SPACE_SHIFT;
-        v |= cntl::WPTR_OVERFLOW_CLEAR
-            | cntl::WPTR_OVERFLOW_ENABLE
-            | cntl::WPTR_WRITEBACK
-            | cntl::MC_SNOOP;
+        v |= cntl::WPTR_OVERFLOW_CLEAR | cntl::WPTR_OVERFLOW_ENABLE | cntl::WPTR_WRITEBACK;
+        if self.snoop {
+            v |= cntl::MC_SNOOP;
+        } else {
+            v &= !cntl::MC_SNOOP;
+        }
         if rearm {
             v |= cntl::RPTR_REARM;
         }
@@ -140,27 +146,20 @@ impl Ring {
 /// specification 05 section 8.2 (steps 1, 2, 3, 4, 6 and 7; the doorbell
 /// steps wait for stage R2.4, and the caller enables bus mastering).
 ///
-/// The ring's memory must be zeroed first, and `dummy_page` (a GPU address
-/// the interrupt handler reads when it has nothing to read) must be one the
-/// caller keeps for as long as the handler runs.
+/// The ring's memory must be zeroed first. The bus interface's dummy page is
+/// not set: the firmware leaves the dummy read off, and with message-signalled
+/// interrupts its bypass bit (16) skips it (the specification's author, 05
+/// section 11.1). Were it ever turned on, the page would have to be system
+/// memory, by bus address.
 ///
 /// # Errors
 ///
 /// [`RingError`] for a ring the hardware does not take; nothing is written.
-pub fn bring_up<W: Window + ?Sized>(
-    w: &W,
-    ring: &Ring,
-    dummy_page: u64,
-    rearm: bool,
-) -> Result<(), RingError> {
+pub fn bring_up<W: Window + ?Sized>(w: &W, ring: &Ring, rearm: bool) -> Result<(), RingError> {
     ring.check()?;
-    // 1. With the ring disabled: the bus interface's dummy page, and its
-    //    dummy-read override and non-snoop request bits clear.
+    // 1. With the ring disabled: the bus interface's dummy-read override and
+    //    non-snoop request bits clear (they are).
     w.write32(RB_CNTL, w.read32(RB_CNTL) & !cntl::ENABLE);
-    w.write32(
-        BIF_INTERRUPT_CNTL2,
-        u32::try_from(dummy_page >> 8).unwrap_or(0),
-    );
     w.write32(
         BIF_INTERRUPT_CNTL,
         w.read32(BIF_INTERRUPT_CNTL) & !(1 << 0 | 1 << 3),
@@ -360,6 +359,7 @@ mod tests {
         address: 0xf4_0800_0000,
         bytes: 64 * 1024,
         writeback: 0xf4_0801_0000,
+        snoop: false,
     };
 
     #[test]
@@ -367,29 +367,20 @@ mod tests {
         let m = Model::new();
         let mut bad = RING;
         bad.bytes = 3000;
-        assert_eq!(
-            bring_up(&m, &bad, 0xf4_0802_0000, true),
-            Err(RingError::Size)
-        );
+        assert_eq!(bring_up(&m, &bad, true), Err(RingError::Size));
         bad = RING;
         bad.address += 16;
-        assert_eq!(
-            bring_up(&m, &bad, 0xf4_0802_0000, true),
-            Err(RingError::Address)
-        );
+        assert_eq!(bring_up(&m, &bad, true), Err(RingError::Address));
         bad = RING;
         bad.bytes = 1 << 19;
-        assert_eq!(
-            bring_up(&m, &bad, 0xf4_0802_0000, true),
-            Err(RingError::Size)
-        );
+        assert_eq!(bring_up(&m, &bad, true), Err(RingError::Size));
         assert!(m.log.borrow().is_empty());
     }
 
     #[test]
     fn bring_up_follows_the_specification_and_the_firmwares_state() {
         let m = Model::new();
-        bring_up(&m, &RING, 0xf4_0802_0000, true).unwrap();
+        bring_up(&m, &RING, true).unwrap();
         assert_eq!(
             u64::from(m.reg(RB_BASE)),
             (0xf4_0800_0000u64 >> 8) & 0xffff_ffff
@@ -399,9 +390,10 @@ mod tests {
         assert_eq!(m.reg(RB_WPTR_ADDR_HI), 0xf4);
         assert_eq!(m.reg(RB_RPTR), 0);
         assert_eq!(m.reg(RB_WPTR), 0);
-        assert_eq!(
-            m.reg(BIF_INTERRUPT_CNTL2),
-            u32::try_from(0xf4_0802_0000u64 >> 8).unwrap()
+        // The dummy page is not written (the firmware leaves the dummy read off).
+        assert!(
+            m.log.borrow().iter().all(|w| w.0 != BIF_INTERRUPT_CNTL2),
+            "the dummy page register is left alone"
         );
         // Bits 0 and 3 cleared, bit 16 (the firmware's) kept.
         assert_eq!(m.reg(BIF_INTERRUPT_CNTL), 0x1_0000);
@@ -412,7 +404,11 @@ mod tests {
         assert_eq!(c >> cntl::SIZE_SHIFT & 0x1f, 14, "64 KiB is 2^14 dwords");
         assert_eq!(c >> cntl::MC_SPACE_SHIFT & 7, 4);
         assert_eq!(c & cntl::MC_RO, 0, "the firmware's MC_RO is cleared");
-        assert_eq!(c & cntl::MC_SNOOP, cntl::MC_SNOOP);
+        assert_eq!(
+            c & cntl::MC_SNOOP,
+            0,
+            "a ring in video memory is not snooped"
+        );
         assert_eq!(c & cntl::RPTR_REARM, cntl::RPTR_REARM);
         assert_eq!(c & cntl::WPTR_OVERFLOW_ENABLE, cntl::WPTR_OVERFLOW_ENABLE);
         assert_eq!(m.reg(CNTL2) & 0x1ff, 8 | 1 << 8);
@@ -423,7 +419,7 @@ mod tests {
         assert!(last_pointer < on);
         // Without a message-signalled interrupt the re-arm bit is not set.
         let m = Model::new();
-        bring_up(&m, &RING, 0xf4_0802_0000, false).unwrap();
+        bring_up(&m, &RING, false).unwrap();
         assert_eq!(
             m.reg(RB_CNTL) & cntl::RPTR_REARM,
             cntl::RPTR_REARM,
@@ -434,7 +430,7 @@ mod tests {
     #[test]
     fn disabling_turns_the_ring_and_its_interrupt_off_and_nothing_else() {
         let m = Model::new();
-        bring_up(&m, &RING, 0xf4_0802_0000, true).unwrap();
+        bring_up(&m, &RING, true).unwrap();
         let before = m.reg(RB_CNTL);
         disable(&m);
         assert_eq!(m.reg(RB_CNTL), before & !(cntl::ENABLE | cntl::ENABLE_INTR));
