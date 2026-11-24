@@ -842,9 +842,22 @@ presents (`simpledrm`-like). Spec 09 lists what RADV expects; none of it is in R
 3. **The order after R1 (still open; the owner's "recommendations" did not cover it):** R2 (memory and interrupts) before R3 (PSP, SMU, mode setting), or R3 first because
    mode changes need it and R2 only matters for the render side.
 
-### 16.5 State of the probe
+### 16.5 Proven on the board (2026-11-24)
 
-With the adopting grant, `dev.drmn.1.vram` (2026-11-24) maps BAR0 (256 MiB) and reads: zeros at offset 0, 0x7800
-and 8 MiB, and live-looking data at 128 MiB. The verdict test (BAR0 against the index-register read of the same
-offsets, inside and beyond the framebuffer) is still to write. The extra display registers were read on the board
-and are in `tests/corpus/x870e/abyssbsd/raphael-drmn1.txt`; the specification's decoding is its 08 section 9.0.1.
+- **BAR0 is the video memory.** `dev.drmn.1.vram` writes two words through BAR0 (at 64 MiB and at the aperture's
+  end) and reads them back through the index registers: identical. The loader's framebuffer is therefore the first
+  8,294,400 bytes of the iGPU's video memory, and the console and the display's scan-out read the same bytes.
+- **The flip works.** `dev.drmn.1.flip` adopts pipe 0 (`lib/amdgpu/src/flip.rs`: timing generator on, no flip
+  pending, surface at the start of video memory, pitch 1920), paints eight colour bars with a white frame at video
+  memory 16 MiB through BAR0, flushes the host data path, flips to it (taken in 9.6 ms, within one 60 Hz frame),
+  holds three seconds, and flips back (16.5 ms). The owner saw the bars and then the console again. Only the
+  surface address (high half first, then the low half that latches it) and the flip-type bit were written to the
+  display, plus the host-data-path setup (05 section 7).
+- **Scan-out in place is not possible yet.** `sys/drm`'s buffer objects are cached system memory only
+  (`Gem::new` refuses other placements), and the display reads system memory only through GART page tables (R2).
+  So R1's KMS device keeps clients' buffers in system memory and a commit **copies** the pixels into one of two
+  video-memory surfaces through BAR0, then flips to it: tear-free, and the copy is the cost `gop-kms` pays too.
+- **Next in R1:** the `CrtcHw`/`PlaneHw`/`EncoderHw`/`ConnectorHw` implementation over this flip, the card
+  registration that replaces `gop-kms` and hands `vt` its framebuffer, and the panic path that flips back.
+- **Not yet read or done:** the decoding of the platform display firmware's window registers is in the
+  specification's 08 section 9.0.1; stage R3 overwrites those windows, so R1 stays out of the top 2 MiB.
