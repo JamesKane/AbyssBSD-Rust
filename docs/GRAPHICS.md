@@ -957,8 +957,7 @@ are left out, as reading one takes the semaphore) on the X870E at the GOP's stat
 
 ### 16.8 R2.1: interrupts (2026-11-24)
 
-- **The vector.** `vgapci` enables one MSI message for an AMD function it is wanted for (`hw.vgapci.msi`, which is
-  off until the owner agrees; the specification's reference asks for one vector of any type), turns bus mastering
+- **The vector.** `vgapci` enables one MSI message for an AMD function it is wanted for (`hw.vgapci.msi`, on by default; the specification's reference asks for one vector of any type), turns bus mastering
   on, and installs the interrupt filter, which calls the sink the GPU driver registers once
   (`vgapci::InterruptSink`).
 - **The ring is in video memory, with no page tables.** 64 KiB (2,048 entries) at BAR0 offset 128 MiB with its
@@ -977,7 +976,7 @@ are left out, as reading one takes the semaphore) on the X870E at the GOP's stat
   handler calls `Kms::vblank`), `kmsflip` flips at 3.2 ms and Sway with glmark2's jellyfish runs at about 504 to
   533 frames a second, the interrupt count matching the frame count.
 - **The soak passed:** ten minutes of Sway with glmark2's jellyfish, 42,048 frame starts, no overflow, no error in
-  the Sway log. `hw.vgapci.msi` stays off by default until the owner agrees. The read pointer is written by
+  the Sway log. `hw.vgapci.msi` is on by default (the owner agreed 2026-11-24; `=0` turns it off). The read pointer is written by
   register; the doorbell is R2.4.
 
 ### 16.9 R2.2 and R2.3: the translation hubs (2026-11-24)

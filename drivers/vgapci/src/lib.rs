@@ -81,9 +81,10 @@ pub struct Aperture {
     has_irq: AtomicBool,
 }
 
-/// Whether an AMD GPU gets a message-signalled interrupt (`hw.vgapci.msi`):
-/// off until the board has shown it works.
-static MSI: AtomicBool = AtomicBool::new(false);
+/// Whether an AMD GPU gets a message-signalled interrupt (`hw.vgapci.msi`,
+/// on unless set to 0): the display's vertical blanking comes from it. It is
+/// set up only for a function a native driver is wanted for.
+static MSI: AtomicBool = AtomicBool::new(true);
 
 /// Takes the boot-time tunables (`TUNABLE_INT_FETCH`): `get` gives a name's
 /// integer value, if set. The kernel calls it before drivers attach.
