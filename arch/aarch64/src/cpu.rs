@@ -440,6 +440,13 @@ pub fn wait_for_interrupt() {
     unsafe { asm!("dsb sy", "wfi", options(nostack)) };
 }
 
+/// Ends the wait of idle CPU `cpu` without an interrupt: no CPU here
+/// waits on a monitored line, so always false (the caller interrupts it).
+#[must_use]
+pub fn wake_idle(_cpu: u32) -> bool {
+    false
+}
+
 /// Ends a QEMU session through semihosting (`SYS_EXIT_EXTENDED`).
 ///
 /// Only call when QEMU runs with semihosting enabled: elsewhere the `HLT`

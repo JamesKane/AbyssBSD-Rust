@@ -171,12 +171,34 @@ pub fn interrupts_enabled() -> bool {
 /// How idle CPUs wait: 0 not yet decided, 1 `MWAIT`, 2 `HLT`.
 static IDLE_WAIT: AtomicU8 = AtomicU8::new(0);
 
-/// The cache line `MONITOR` watches while idle. Nothing writes it: an
-/// interrupt is what ends the wait, as it does a halt (the waker's IPI);
-/// the line only has to be armed for `MWAIT` to wait.
+/// One idle CPU's `MONITOR` line: 1 while it waits in `MWAIT`, 0 otherwise.
+/// A waker that changes 1 to 0 ends the wait by that write alone, with no
+/// interrupt (FreeBSD's `cpu_idle_wakeup` on `pc_monitorbuf`); a CPU found
+/// at 0 is running or halted and needs the interrupt.
 #[repr(align(64))]
-struct MonitorLine(#[allow(dead_code)] u64);
-static MONITOR_LINE: MonitorLine = MonitorLine(0);
+struct MonitorLine(AtomicU8);
+static MONITOR_LINES: [MonitorLine; hal::MAX_CPUS] =
+    [const { MonitorLine(AtomicU8::new(0)) }; hal::MAX_CPUS];
+
+/// Ends the `MWAIT` of idle CPU `cpu` by writing its line. True if it was
+/// waiting, so the caller sends no interrupt; false when it is running,
+/// halted, or about to wait, and needs one. Call after queueing the work
+/// the CPU is to find: the exchange orders it before the wait's recheck.
+#[must_use]
+pub fn wake_idle(cpu: u32) -> bool {
+    if idle_wait_decided() != 1 {
+        return false;
+    }
+    match MONITOR_LINES.get(cpu as usize) {
+        Some(line) => line.0.swap(0, Ordering::SeqCst) == 1,
+        None => false,
+    }
+}
+
+/// `IDLE_WAIT` if already decided (1 `MWAIT`, 2 `HLT`), else 0.
+fn idle_wait_decided() -> u8 {
+    IDLE_WAIT.load(Ordering::Relaxed)
+}
 
 /// Whether idle CPUs may wait with `MWAIT` (hint 0, C1) instead of `HLT`:
 /// the CPU has `MONITOR`/`MWAIT` with interrupts as break events, and
@@ -239,6 +261,11 @@ pub fn idle_method() -> &'static str {
 /// again.
 pub fn wait_for_interrupt() {
     if idle_uses_mwait() {
+        let line = &MONITOR_LINES[crate::gdt::cpu_id() as usize % hal::MAX_CPUS];
+        // Announce the wait, arm the monitor, then look again: a waker
+        // that wrote the line before the arming is seen here, one after
+        // it ends the wait.
+        line.0.store(1, Ordering::SeqCst);
         // SAFETY: MONITOR/MWAIT are usable (`mwait_usable`); the line is
         // a valid, readable address; the caller is ready for interrupts
         // while waiting. A write to the line, or any interrupt, ends the
@@ -246,13 +273,16 @@ pub fn wait_for_interrupt() {
         unsafe {
             asm!(
                 "monitor",
-                in("rax") core::ptr::addr_of!(MONITOR_LINE),
+                in("rax") core::ptr::from_ref(line),
                 in("ecx") 0u32,
                 in("edx") 0u32,
                 options(nostack, preserves_flags),
             );
-            asm!("sti", "mwait", "cli", in("eax") 0u32, in("ecx") 0u32, options(nostack));
+            if line.0.load(Ordering::SeqCst) == 1 {
+                asm!("sti", "mwait", "cli", in("eax") 0u32, in("ecx") 0u32, options(nostack));
+            }
         }
+        line.0.swap(0, Ordering::SeqCst);
     } else {
         // SAFETY: the caller is ready for interrupts while halted.
         unsafe { asm!("sti", "hlt", "cli", options(nostack)) };

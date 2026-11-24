@@ -39,7 +39,12 @@ impl sched::Platform for Platform {
     }
 
     fn kick(&self, cpu: hal::CpuId) {
-        crate::intc::send_resched(cpu);
+        // An idle CPU waiting on its monitored line wakes by a write to it,
+        // with no interrupt (FreeBSD's `tdq_notify` through
+        // `cpu_idle_wakeup`).
+        if !crate::arch::cpu::wake_idle(cpu.0) {
+            crate::intc::send_resched(cpu);
+        }
     }
 
     fn rearm_timer(&self) {
