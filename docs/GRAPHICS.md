@@ -1057,3 +1057,28 @@ the zone, and then the display microcontroller's load as one experiment. The fil
   but the platform's windows are overwritten and its state is lost. Untested: the reference loads the image with
   the other engines' and never alone.
 
+### 16.12 R3.3: the display microcontroller loaded through the security processor (2026-11-24)
+
+- **Code.** `lib/amdgpu/src/dmcub.rs` has the registers, the firmware metadata finder (the state and trace window
+  sizes), and the steps of 08 section 3.2 as separate functions (`stop`, `hold`, `clean`, `configure`, `release`,
+  `wait_running`) with eight host tests against a register model. `drivers/drmn/src/dmcub.rs` runs them on the
+  X870E with a log line between each (`dev.drmn.1.dmcub=1`, on a kernel thread; it brings the security processor up
+  first if needed): the image and the windows' memory written in video memory (BAR0 offsets 161 to 165 MiB), the
+  platform's firmware asked to stop, the unit held in reset, the security processor given the whole instruction
+  region (239,392 bytes, type 51), windows 2 to 6, region 5, the mailboxes and the boot options programmed, the unit
+  released.
+- **On the X870E:** the platform's firmware answered the stop request; the unit held (`DMCUB_CNTL2` 1,
+  `MMHUBBUB_SOFT_RESET` `0x100`); the load returned status 0; the **display firmware came up**: `DMCUB_SCRATCH0`
+  `0x42` before (platform) and `0x43` after (bit 0 display firmware, bit 1 mailbox ready). The firmware version in the
+  image's metadata is `0x05003700`, state window `0xc880`, trace window `0x10010`, as 02 section 11 says. The display
+  kept scanning out: the frame-start interrupts went on (2,394 at the time of the check, no overflow).
+- **What the security processor wrote.** Window 0: base `0x0`, top `0x8003a51f` (enabled, last address `0x3a51f`,
+  the image's instruction size less the 512-byte frame), physical offset `0x18_5e300000`. Window 1: base
+  `0x1000000`, top `0x810c5adf`, offset `0x18_5e33a600`. So the security processor uses the platform layout's
+  `0x0n00_0000` bases for windows 0 and 1, not the `0x6000_0000` ones 08 section 3.2's table lists; both
+  windows are inside the trusted memory zone (physical `0x185e000000` up). The firmware ran with the driver's
+  windows 3 to 6 at `0x6n00_0000` regardless. (A note for the specification's author.)
+- **Not done:** the firmware has no command yet (no inbox use, no video BIOS copy: window 3 is zeros), window 2 is
+  off, the boot options are 0. The next step is the first command through inbox 1 (a mailbox round trip), then the
+  clocks and the mode (R3.4).
+

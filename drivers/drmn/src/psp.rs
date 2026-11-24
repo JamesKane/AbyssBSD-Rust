@@ -70,12 +70,20 @@ impl Memory for VramMemory {
     }
 }
 
+/// Video memory as the PSP's buffers use it, from `base` (the GPU address of
+/// its first byte).
+pub(crate) fn vram_memory(gpu: &Arc<Aperture>, base: u64) -> impl Memory {
+    VramMemory {
+        gpu: Arc::clone(gpu),
+        base,
+    }
+}
+
 /// What a bring-up reached.
 #[derive(Debug)]
 pub(crate) struct Brought {
     /// The ring and its frame counter, for the commands after (the
     /// display microcontroller's load, stage R3.3).
-    #[allow(dead_code, reason = "used by the display microcontroller's load")]
     pub(crate) psp: psp::Psp,
     /// The trusted memory zone's size the PSP asked for.
     pub(crate) tmr_size: u32,

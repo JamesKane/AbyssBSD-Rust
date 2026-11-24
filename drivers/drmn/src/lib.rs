@@ -28,6 +28,7 @@ extern crate alloc;
 mod amd;
 mod control;
 mod interrupt;
+mod dmcub;
 mod kms;
 mod psp;
 

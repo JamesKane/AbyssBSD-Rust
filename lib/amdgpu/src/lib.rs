@@ -25,6 +25,7 @@ extern crate std;
 
 pub mod discovery;
 pub mod display;
+pub mod dmcub;
 mod display_regs;
 pub mod doorbell;
 pub mod flip;

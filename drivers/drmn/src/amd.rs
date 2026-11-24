@@ -682,6 +682,37 @@ impl Amd {
         }
     }
 
+    /// Loads the display microcontroller's firmware (stage R3.3), on the
+    /// calling kernel thread: the security processor first if it is not up.
+    pub(crate) fn dmcub_load(&self, s: &sched::Sleepable) {
+        let Ok(gpu) = self.gpu() else {
+            return;
+        };
+        if self.psp.lock().is_none() {
+            self.psp_bring_up(s);
+        }
+        let Some(mut brought) = self.psp.lock().take() else {
+            self.log(format_args!("DMCUB: no security processor"));
+            return;
+        };
+        let Some(fw) = crate::firmware() else {
+            self.log(format_args!("DMCUB: no firmware reader"));
+            *self.psp.lock() = Some(brought);
+            return;
+        };
+        match fw.read(s, crate::dmcub::PATH) {
+            Ok(file) => {
+                let log = |args: core::fmt::Arguments<'_>| self.log(args);
+                match crate::dmcub::load(&gpu, &mut brought.psp, &file, &log) {
+                    Ok(()) => self.log(format_args!("DMCUB: loaded")),
+                    Err(e) => self.log(format_args!("DMCUB: stopped: {e:?}")),
+                }
+            }
+            Err(e) => self.log(format_args!("DMCUB: {} not read: {e:?}", crate::dmcub::PATH)),
+        }
+        *self.psp.lock() = Some(brought);
+    }
+
     /// A one-line summary of the cached table, for a sysctl.
     pub(crate) fn summary(&self) -> String {
         match &*self.table.lock() {
@@ -788,6 +819,19 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             })
             .map(|_| ())
             .map_err(|_| abi::errno::Errno::EAGAIN)
+        },
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "dmcub",
+        "Write 1 to load the display microcontroller's firmware through the security processor (on a kernel thread; see the log)",
+        move || {
+            let r = Arc::clone(&r);
+            sched::spawn("amd-dmcub", sched::Priority::KERNEL, move |s| r.dmcub_load(s))
+                .map(|_| ())
+                .map_err(|_| abi::errno::Errno::EAGAIN)
         },
     );
     let r = Arc::clone(a);
