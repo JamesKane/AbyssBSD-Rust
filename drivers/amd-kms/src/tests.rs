@@ -182,3 +182,11 @@ fn a_panic_shows_the_console_at_once_without_a_lock_or_a_wait() {
     c.panic_restore();
     assert_eq!(*d.shown.lock().unwrap(), std::vec![0]);
 }
+
+#[test]
+fn the_controller_has_a_vblank_interrupt_only_if_the_display_does() {
+    let d = Fake::new();
+    let c = card(1920, 1080, &d).unwrap();
+    // The fake has none: the core times frames.
+    assert!(!Crtc(c.screen.clone()).vblank_interrupt());
+}

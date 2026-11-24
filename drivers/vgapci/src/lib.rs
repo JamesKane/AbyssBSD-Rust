@@ -32,15 +32,19 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use bus::{
-    AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, MmioGrant, Resource, StartCx, StopCx,
-    StopReason,
+    AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, IrqLine, MmioGrant, Resource, StartCx,
+    StopCx, StopReason,
 };
 use devtree::ids::PciId;
+use irq::Filter;
 use pci::BarKind;
-use pci::bus::PciChild;
+use pci::bus::{Messages, PciChild};
 use regs::Bytes;
+use sched::IrqCx;
+use sync::{Once, SpinLock};
 use vm::dma::{DmaConstraints, DmaTag};
 
 /// PCI class 03h, subclass 00h: a VGA-compatible controller.
@@ -69,6 +73,31 @@ pub struct Aperture {
     vram: Option<(MmioGrant<Bytes>, usize)>,
     pci: Arc<PciChild>,
     tag: Option<DmaTag>,
+    /// What the GPU driver does with the function's interrupt, set once.
+    sink: Once<Arc<dyn InterruptSink>>,
+    /// Whether a message-signalled vector was set up for it.
+    has_irq: AtomicBool,
+}
+
+/// Whether an AMD GPU gets a message-signalled interrupt (`hw.vgapci.msi`):
+/// off until the board has shown it works.
+static MSI: AtomicBool = AtomicBool::new(false);
+
+/// Takes the boot-time tunables (`TUNABLE_INT_FETCH`): `get` gives a name's
+/// integer value, if set. The kernel calls it before drivers attach.
+pub fn set_tunables(get: &dyn Fn(&str) -> Option<i32>) {
+    if let Some(v) = get("hw.vgapci.msi") {
+        // Relaxed: a tunable, read at attach.
+        MSI.store(v != 0, Ordering::Relaxed);
+    }
+}
+
+/// What a GPU driver does with its function's interrupt: `vgapci` owns the
+/// message-signalled vector (the function's), and calls this from the
+/// interrupt filter, in interrupt context.
+pub trait InterruptSink: Send + Sync {
+    /// Handles the interrupt in the filter: no sleeping, no sleepable lock.
+    fn interrupt(&self, cx: &IrqCx) -> Filter;
 }
 
 impl core::fmt::Debug for Aperture {
@@ -119,6 +148,20 @@ impl Aperture {
     #[must_use]
     pub fn vram_phys(&self) -> Option<u64> {
         self.vram.as_ref().map(|(m, _)| m.phys())
+    }
+
+    /// Registers the driver's interrupt handler. Only the first registration
+    /// takes; `false` for a later one. The handler runs for the life of
+    /// the function: a driver that goes first makes its sink do nothing.
+    pub fn set_sink(&self, sink: Arc<dyn InterruptSink>) -> bool {
+        self.sink.set(sink).is_ok()
+    }
+
+    /// Whether the function has a message-signalled interrupt for a sink.
+    #[must_use]
+    pub fn has_interrupt(&self) -> bool {
+        // Acquire: set once at attach, before a driver is added.
+        self.has_irq.load(Ordering::Acquire)
     }
 
     /// The size of the VRAM aperture, if there is one.
@@ -214,6 +257,8 @@ fn amd_aperture(cx: &mut AttachCx<'_>, child: &Arc<PciChild>) -> Option<Arc<Aper
             vram,
             pci: Arc::clone(child),
             tag: None,
+            sink: Once::new(),
+            has_irq: AtomicBool::new(false),
         })),
         Err(e) => {
             log(&alloc::format!("the register window was refused: {e:?}"));
@@ -228,6 +273,20 @@ pub struct VgaPci {
     /// The register aperture, for a function a native driver is wanted for.
     aperture: Option<Arc<Aperture>>,
     vendor: u16,
+    /// The message-signalled vector's line, until `start` installs the
+    /// handler.
+    line: SpinLock<Option<IrqLine>>,
+    /// The vector's owner: dropping it turns the function's MSI off.
+    _messages: Option<Messages>,
+}
+
+/// The interrupt filter: whatever the GPU driver registered handles it; with
+/// none, the interrupt is nobody's.
+fn interrupt_filter(d: &VgaPci, _: usize, cx: &IrqCx) -> Filter {
+    match d.aperture.as_ref().and_then(|a| a.sink.get()) {
+        Some(sink) => sink.interrupt(cx),
+        None => Filter::Stray,
+    }
 }
 
 impl Driver for VgaPci {
@@ -265,15 +324,50 @@ impl Driver for VgaPci {
                     vram: None,
                     pci: Arc::clone(&child),
                     tag: Some(tag),
+                    sink: Once::new(),
+                    has_irq: AtomicBool::new(false),
                 }));
             }
         } else if vendor == VENDOR_AMD {
             aperture = amd_aperture(cx, &child);
         }
-        Ok(Self { aperture, vendor })
+        // One message-signalled interrupt for an AMD GPU the driver is
+        // wanted for (05 section 9: the reference asks for exactly one). The
+        // function must be able to write the message.
+        let mut line = None;
+        let mut messages = None;
+        if let (Some(a), true) = (
+            &aperture,
+            vendor == VENDOR_AMD && MSI.load(Ordering::Relaxed),
+        ) {
+            match pci::bus::msi_line(cx) {
+                Ok((l, m)) => {
+                    child.set_bus_master(true);
+                    a.has_irq.store(true, Ordering::Release);
+                    line = Some(l);
+                    messages = Some(m);
+                }
+                Err(e) => bus::manager().log(format_args!(
+                    "vgapci: AMD GPU: no message-signalled interrupt ({e:?})"
+                )),
+            }
+        }
+        Ok(Self {
+            aperture,
+            vendor,
+            line: SpinLock::new(line),
+            _messages: messages,
+        })
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        // Lock released before the handler is installed.
+        let line = self.line.lock().take();
+        if let Some(line) = line
+            && let Err(e) = cx.interrupt(line, Some(interrupt_filter), None, 0)
+        {
+            bus::manager().log(format_args!("vgapci: interrupt not installed ({e:?})"));
+        }
         if let Some(a) = &self.aperture {
             let ident = Ident::Channel {
                 class: "drmn",

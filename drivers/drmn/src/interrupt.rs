@@ -1,0 +1,243 @@
+// SPDX-License-Identifier: BSD-2-Clause
+//! The Radeon's interrupts (stage R2.1 of docs/GRAPHICS.md §16.6): the
+//! interrupt handler's ring in video memory, the vector `vgapci` owns, and
+//! the display's frame-start event, which is the vertical blanking
+//! interrupt.
+
+use alloc::string::String;
+use alloc::sync::{Arc, Weak};
+use core::fmt::Write as _;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+use amdgpu::flip;
+use amdgpu::ih;
+use amdgpu::regs::Window;
+use irq::Filter;
+use sched::IrqCx;
+use vgapci::{Aperture, InterruptSink};
+
+use crate::amd::Bar5;
+
+/// Where the interrupt handler's ring is in video memory (BAR0 offset): past
+/// the display surfaces (`amd-kms`), well below the top 2 MiB.
+pub(crate) const RING_AT: usize = 128 << 20;
+/// Its size: 2,048 entries.
+pub(crate) const RING_BYTES: u32 = 64 << 10;
+/// Its write-back slot, right after it.
+pub(crate) const WRITEBACK_AT: usize = RING_AT + RING_BYTES as usize;
+
+/// `OTG0_OTG_GLOBAL_SYNC_STATUS`: bit 0 enables the frame-start interrupt,
+/// writing bit 4 clears its event (08 section 2.5).
+const OTG0_GLOBAL_SYNC_STATUS: usize = 0x14128;
+const FRAME_START_ENABLE: u32 = 1 << 0;
+const FRAME_START_CLEAR: u32 = 1 << 4;
+
+/// The display's client id in an interrupt entry, and the frame-start
+/// source of the first timing generator.
+const CLIENT_DISPLAY: u8 = 4;
+const SOURCE_FRAME_START_0: u8 = 0x3c;
+
+/// The interrupts of one GPU, and what they were.
+pub(crate) struct Irq {
+    gpu: Weak<Aperture>,
+    /// Whether the ring is made and the sink should act.
+    active: AtomicBool,
+    /// The read pointer, a byte offset, as last given to the hardware.
+    rptr: AtomicU32,
+    /// Called for each frame-start event, in interrupt context.
+    on_frame: sync::Once<alloc::boxed::Box<dyn Fn(u64) + Send + Sync>>,
+    interrupts: AtomicU64,
+    entries: AtomicU64,
+    frames: AtomicU64,
+    other: AtomicU64,
+    overflows: AtomicU64,
+    /// The client and source of the last entry that was not a frame event.
+    last_other: AtomicU32,
+}
+
+impl core::fmt::Debug for Irq {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Irq").finish_non_exhaustive()
+    }
+}
+
+impl Irq {
+    pub(crate) fn new(gpu: Weak<Aperture>) -> Self {
+        Self {
+            gpu,
+            active: AtomicBool::new(false),
+            rptr: AtomicU32::new(0),
+            on_frame: sync::Once::new(),
+            interrupts: AtomicU64::new(0),
+            entries: AtomicU64::new(0),
+            frames: AtomicU64::new(0),
+            other: AtomicU64::new(0),
+            overflows: AtomicU64::new(0),
+            last_other: AtomicU32::new(0),
+        }
+    }
+
+    /// Sets what each frame-start event does (once): `f` gets the time in
+    /// nanoseconds, in interrupt context.
+    #[allow(
+        dead_code,
+        reason = "wired to the card once the board shows the interrupts arrive"
+    )]
+    pub(crate) fn set_on_frame(&self, f: alloc::boxed::Box<dyn Fn(u64) + Send + Sync>) -> bool {
+        self.on_frame.set(f).is_ok()
+    }
+
+    /// Whether the interrupts are running.
+    pub(crate) fn active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
+    /// The counts, for a sysctl.
+    pub(crate) fn summary(&self) -> String {
+        let mut s = String::new();
+        let other = self.last_other.load(Ordering::Relaxed);
+        let _ = write!(
+            s,
+            "{}: {} interrupts, {} entries, {} frame starts, {} others (last client {} source {}), {} overflows",
+            if self.active() { "on" } else { "off" },
+            self.interrupts.load(Ordering::Relaxed),
+            self.entries.load(Ordering::Relaxed),
+            self.frames.load(Ordering::Relaxed),
+            self.other.load(Ordering::Relaxed),
+            other >> 8,
+            other & 0xff,
+            self.overflows.load(Ordering::Relaxed),
+        );
+        s
+    }
+
+    /// Makes the ring, registers `sink` for the vector, and turns the
+    /// handler and the display's frame-start interrupt on.
+    ///
+    /// # Errors
+    ///
+    /// `ENXIO` with no aperture or video memory window, `ENODEV` with no
+    /// vector, `EBUSY` if a sink is registered already, `EINVAL` for a ring
+    /// the hardware does not take.
+    pub(crate) fn start(self: &Arc<Self>) -> Result<(), abi::errno::Errno> {
+        use abi::errno::Errno;
+        let gpu = self.gpu.upgrade().ok_or(Errno::ENXIO)?;
+        if gpu
+            .vram_len()
+            .is_none_or(|len| len < RING_AT + (RING_BYTES as usize) + 16)
+        {
+            return Err(Errno::ENXIO);
+        }
+        if !gpu.has_interrupt() {
+            return Err(Errno::ENODEV);
+        }
+        if self.active() {
+            return Err(Errno::EBUSY);
+        }
+        let w = Bar5(&gpu);
+        // Where video memory is, in the GPU's address space.
+        let base = u64::from(w.read32(flip::FB_LOCATION_BASE) & 0xffff) << 24;
+        // The ring and its slot start out zero.
+        for at in (0..RING_BYTES as usize + 16).step_by(4) {
+            gpu.vram_write32(RING_AT + at, 0);
+        }
+        self.rptr.store(0, Ordering::Release);
+        let sink: Arc<dyn InterruptSink> = Arc::new(Sink(Arc::clone(self)));
+        if !gpu.set_sink(sink) {
+            return Err(Errno::EBUSY);
+        }
+        let ring = ih::Ring {
+            address: base + RING_AT as u64,
+            bytes: RING_BYTES,
+            writeback: base + WRITEBACK_AT as u64,
+            snoop: false,
+        };
+        // The ring first, then the display's event, so nothing is raised
+        // into a ring that is not there.
+        self.active.store(true, Ordering::Release);
+        if ih::bring_up(&w, &ring, true).is_err() {
+            self.active.store(false, Ordering::Release);
+            return Err(Errno::EINVAL);
+        }
+        w.write32(
+            OTG0_GLOBAL_SYNC_STATUS,
+            (w.read32(OTG0_GLOBAL_SYNC_STATUS) & FRAME_START_ENABLE) | FRAME_START_ENABLE,
+        );
+        Ok(())
+    }
+
+    /// Turns the display's event and the handler off.
+    pub(crate) fn stop(&self) {
+        if !self.active.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        if let Some(gpu) = self.gpu.upgrade() {
+            let w = Bar5(&gpu);
+            w.write32(OTG0_GLOBAL_SYNC_STATUS, 0);
+            ih::disable(&w);
+        }
+    }
+
+    /// Reads the ring and handles what is in it.
+    fn handle(&self) -> Filter {
+        self.interrupts.fetch_add(1, Ordering::Relaxed);
+        if !self.active() {
+            return Filter::Stray;
+        }
+        let Some(gpu) = self.gpu.upgrade() else {
+            return Filter::Stray;
+        };
+        let w = Bar5(&gpu);
+        let wptr = gpu.vram_read32(WRITEBACK_AT).unwrap_or(0);
+        let rptr = self.rptr.load(Ordering::Acquire);
+        let mut frame = false;
+        let d = ih::drain(
+            RING_BYTES,
+            rptr,
+            wptr,
+            &|o| gpu.vram_read32(RING_AT + o as usize).unwrap_or(0),
+            &mut |e| {
+                self.entries.fetch_add(1, Ordering::Relaxed);
+                if e.client == CLIENT_DISPLAY && e.source == SOURCE_FRAME_START_0 {
+                    frame = true;
+                } else {
+                    self.other.fetch_add(1, Ordering::Relaxed);
+                    self.last_other.store(
+                        u32::from(e.client) << 8 | u32::from(e.source),
+                        Ordering::Relaxed,
+                    );
+                }
+            },
+        );
+        self.rptr.store(d.rptr, Ordering::Release);
+        if d.overflowed {
+            self.overflows.fetch_add(1, Ordering::Relaxed);
+            // Clear the overflow: write 1 to the clear bit, then 0 (05 8.3).
+            let c = w.read32(ih::RB_CNTL);
+            w.write32(ih::RB_CNTL, c | ih::cntl::WPTR_OVERFLOW_CLEAR);
+            w.write32(ih::RB_CNTL, c & !ih::cntl::WPTR_OVERFLOW_CLEAR);
+        }
+        w.write32(ih::RB_RPTR, d.rptr);
+        if frame {
+            // Acknowledge the event, keeping the interrupt enabled.
+            w.write32(
+                OTG0_GLOBAL_SYNC_STATUS,
+                (w.read32(OTG0_GLOBAL_SYNC_STATUS) & FRAME_START_ENABLE) | FRAME_START_CLEAR,
+            );
+            self.frames.fetch_add(1, Ordering::Relaxed);
+            if let Some(f) = self.on_frame.get() {
+                f(sched::now_ns());
+            }
+        }
+        Filter::Handled
+    }
+}
+
+/// What `vgapci` calls from the vector's filter.
+struct Sink(Arc<Irq>);
+
+impl InterruptSink for Sink {
+    fn interrupt(&self, _: &IrqCx) -> Filter {
+        self.0.handle()
+    }
+}

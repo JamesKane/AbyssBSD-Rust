@@ -52,6 +52,12 @@ pub trait Display: Send + Sync {
     fn pending(&self) -> bool;
     /// Waits `us` microseconds.
     fn delay_us(&self, us: u32);
+    /// Whether the display raises a vertical blanking interrupt whose
+    /// handler calls `Kms::vblank`; if not, the core times frames from the
+    /// mode's refresh rate.
+    fn vblank_interrupt(&self) -> bool {
+        false
+    }
     /// How many bytes of video memory the card may use from the start: the
     /// aperture's size, less what the firmware's display microcontroller
     /// still holds at the top.
@@ -218,6 +224,10 @@ fn mode_of(g: &Geometry) -> Mode {
 struct Crtc(Arc<Screen>);
 
 impl CrtcHw for Crtc {
+    fn vblank_interrupt(&self) -> bool {
+        self.0.display.vblank_interrupt()
+    }
+
     /// Only the mode the firmware set can be shown: its timing is not
     /// reprogrammed.
     fn check(&self, u: &CrtcUpdate<'_>) -> Result<(), Errno> {

@@ -11,6 +11,7 @@ bus = { path = "../../sys/bus" }
 amd-kms = { path = "../amd-kms" }
 amdgpu = { path = "../../lib/amdgpu" }
 drm = { path = "../../sys/drm" }
+irq = { path = "../../sys/irq" }
 sched = { path = "../../sys/sched" }
 nvgpu = { path = "../../lib/nvgpu" }
 sync = { path = "../../sys/sync" }

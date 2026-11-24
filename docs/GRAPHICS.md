@@ -955,3 +955,27 @@ are left out, as reading one takes the semaphore) on the X870E at the GOP's stat
   interrupt control's bit 16, and whether the interrupt ring and its write-back slot may be in video memory with
   no page tables. R2.1 builds on that answer.
 
+### 16.8 R2.1: interrupts (2026-11-24)
+
+- **The vector.** `vgapci` enables one MSI message for an AMD function it is wanted for (`hw.vgapci.msi`, which is
+  off until the owner agrees; the specification's reference asks for one vector of any type), turns bus mastering
+  on, and installs the interrupt filter, which calls the sink the GPU driver registers once
+  (`vgapci::InterruptSink`).
+- **The ring is in video memory, with no page tables.** 64 KiB (2,048 entries) at BAR0 offset 128 MiB with its
+  write-back slot after it, addressed by the video memory's GPU address (`0xF4_0800_0000`), not snooped
+  (`MC_SNOOP` clear), the processor reading it through BAR0. The specification's author expected this to work
+  (the reference puts the ring in GART-mapped system memory and never does this on bare metal; `05` marks it
+  open): **it works**, with both hubs' contexts off and the L2 caches off, as the firmware left them. The bus
+  interface's dummy page is not written (the dummy read is off, and bit 16 skips it for MSI).
+  `lib/amdgpu/src/ih.rs` has the bring-up sequence and the entry decoder and ring drain, tested on the host
+  (wraps, overflow restarts at the oldest entry the ring holds, hostile pointers handle nothing).
+- **The display's frame-start event is the vertical blanking interrupt.** `OTG0_OTG_GLOBAL_SYNC_STATUS` bit 0
+  enables it, writing bit 4 clears it (08 section 2.5); no interrupt-routing registers needed programming
+  (the open question there). The entry is client 4, source `0x3c`.
+- **On the X870E:** 181 interrupts in three seconds and 361 in six: 60 a second, every entry a frame start, no
+  others, no overflow. With the card on it (`CrtcHw::vblank_interrupt` true, while the interrupts run, and the
+  handler calls `Kms::vblank`), `kmsflip` flips at 3.2 ms and Sway with glmark2's jellyfish runs at about 504 to
+  533 frames a second, the interrupt count matching the frame count.
+- **Still to do for R2.1:** the soak (no overflow over ten minutes of Sway), and `hw.vgapci.msi` on by default once
+  the owner agrees. The read pointer is written by register; the doorbell is R2.4.
+

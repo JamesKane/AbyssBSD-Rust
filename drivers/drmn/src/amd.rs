@@ -63,6 +63,8 @@ pub(crate) struct Amd {
     hdp_ready: core::sync::atomic::AtomicBool,
     /// The graphics card, once registered.
     kms: SpinLock<Option<(Arc<amd_kms::AmdKms>, Arc<drm::Card>)>>,
+    /// The interrupts.
+    irq: Arc<crate::interrupt::Irq>,
 }
 
 impl core::fmt::Debug for Amd {
@@ -92,9 +94,10 @@ impl Amd {
     pub(crate) fn new(name: String, gpu: Weak<Aperture>) -> Self {
         Self {
             name,
-            gpu,
             table: SpinLock::new(None),
             hdp_ready: core::sync::atomic::AtomicBool::new(false),
+            irq: Arc::new(crate::interrupt::Irq::new(gpu.clone())),
+            gpu,
             kms: SpinLock::new(None),
         }
     }
@@ -420,7 +423,7 @@ impl Amd {
                 return;
             }
         }
-        let card = match crate::kms::card(&gpu) {
+        let card = match crate::kms::card(&gpu, Arc::clone(&self.irq)) {
             Ok(c) => c,
             Err(e) => {
                 self.log(format_args!("no graphics card: {e:?}"));
@@ -441,6 +444,20 @@ impl Amd {
         let gone = drm::retire_firmware_cards(s);
         if gone > 0 {
             self.log(format_args!("took over from the firmware framebuffer card"));
+        }
+        // Frames come from the display's interrupt when the function has a
+        // vector; without one the core times them.
+        let frames = Arc::clone(&card);
+        self.irq.set_on_frame(alloc::boxed::Box::new(move |now| {
+            use drm::DrmDriver;
+            if let Some(kms) = frames.kms() {
+                kms.vblank(0, now);
+            }
+        }));
+        if self.irq.start().is_ok() {
+            self.log(format_args!(
+                "vertical blanking from the display's interrupt"
+            ));
         }
         *self.kms.lock() = Some((card, node));
     }
@@ -484,6 +501,22 @@ impl Amd {
             None => self.log(format_args!("refresh: no time passed")),
         }
         Ok(())
+    }
+
+    /// Makes the interrupt handler's ring and turns the frame-start interrupt
+    /// on (stage R2.1).
+    pub(crate) fn start_interrupts(&self) -> Result<(), abi::errno::Errno> {
+        let r = self.irq.start();
+        match &r {
+            Ok(()) => self.log(format_args!("interrupts on")),
+            Err(e) => self.log(format_args!("interrupts not started: {e:?}")),
+        }
+        r
+    }
+
+    /// Turns the interrupts off.
+    pub(crate) fn stop_interrupts(&self) {
+        self.irq.stop();
     }
 
     /// A one-line summary of the cached table, for a sysctl.
@@ -562,6 +595,22 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         "flip",
         "Write 1 to show a test pattern from video memory for three seconds, then restore the firmware's picture",
         move || r.flip_test(),
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "interrupts",
+        "Write 1 to make the interrupt handler's ring and turn the frame-start interrupt on",
+        move || r.start_interrupts(),
+    );
+    let r = Arc::clone(a);
+    let _ = t.add_value(
+        node,
+        sysctl::Number::Auto,
+        "irq",
+        "What the interrupts have done",
+        sysctl::Value::Str(Box::new(move |out| out.push_str(&r.irq.summary()))),
     );
     let r = Arc::clone(a);
     crate::control::trigger(
