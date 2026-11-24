@@ -8,6 +8,7 @@ mod arch;
 mod base;
 mod build;
 mod cli;
+mod codegen;
 mod crash;
 mod diff;
 mod expect;
