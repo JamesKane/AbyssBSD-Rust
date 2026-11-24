@@ -196,7 +196,7 @@ impl Driver for VtRnd {
                 interrupts: AtomicU64::new(0),
             }),
             dev,
-            gate: Arc::new(Gate::new()),
+            gate: Gate::shared(),
             line: SpinLock::new(line),
         })
     }

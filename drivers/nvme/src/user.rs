@@ -513,10 +513,19 @@ pub(crate) fn cam_device(
     i.devid = devid(nsdata);
     i.openings = ctrl.max_pending();
     i.nvme = Some(Box::new(cam::NvmeData {
-        cdata: *ctrl.cdata,
-        nsdata: *nsdata,
+        cdata: copy_page(&ctrl.cdata),
+        nsdata: copy_page(nsdata),
     }));
     i
+}
+
+/// A page's copy, made on the heap: `Box::new(*page)` would build it on
+/// the stack first.
+fn copy_page(page: &[u8; 4096]) -> Box<[u8; 4096]> {
+    match page.to_vec().into_boxed_slice().try_into() {
+        Ok(b) => b,
+        Err(_) => unreachable!("a page is 4096 bytes"),
+    }
 }
 
 /// The lines `ndaregister` prints for a namespace (before its size,

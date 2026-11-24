@@ -464,13 +464,13 @@ pub fn pmu_read() -> [u64; 5] {
     // SAFETY: only reads this CPU's performance monitor registers.
     unsafe {
         asm!("isb", "mrs {}, pmccntr_el0", out(reg) out[0], options(nomem, nostack));
-        for n in 0..4u64 {
+        for (n, slot) in (0u64..).zip(out[1..].iter_mut()) {
             asm!(
                 "msr pmselr_el0, {n}",
                 "isb",
                 "mrs {v}, pmxevcntr_el0",
                 n = in(reg) n,
-                v = out(reg) out[n as usize + 1],
+                v = out(reg) *slot,
                 options(nomem, nostack),
             );
         }

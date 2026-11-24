@@ -511,8 +511,8 @@ fn advinfo(ccb: &mut Ccb, t: &Target) -> Result<u32, Errno> {
         cdai::TYPE_SERIAL_NUM => &i.serial,
         cdai::TYPE_PHYS_PATH => empty,
         cdai::TYPE_RCAPLONG | cdai::TYPE_EXT_INQ if i.protocol == proto::SCSI => empty,
-        cdai::TYPE_NVME_CNTRL if nvme => i.nvme.as_ref().map_or(empty, |n| &n.cdata),
-        cdai::TYPE_NVME_NS if nvme => i.nvme.as_ref().map_or(empty, |n| &n.nsdata),
+        cdai::TYPE_NVME_CNTRL if nvme => i.nvme.as_ref().map_or(empty, |n| &n.cdata[..]),
+        cdai::TYPE_NVME_NS if nvme => i.nvme.as_ref().map_or(empty, |n| &n.nsdata[..]),
         _ => return Ok(status::REQ_INVALID),
     };
     if ccb.cdai_flags() & cdai::FLAG_STORE != 0 {

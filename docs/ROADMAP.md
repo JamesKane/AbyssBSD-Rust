@@ -491,9 +491,6 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
     knote's filter is still its own allocation;
   - the kernel's profiler drops samples taken in user mode (`prof.rs`: `USER` and `OTHER` are the
     same bit).
-- **A release kernel built with the tests** (`cargo xtask test --tier boot --release`) overflows a
-  kernel stack in `detach_stress_nvme` on both architectures (`devfs::Registry::insert` under the
-  NVMe driver's start); the boot tier's own (debug) build passes.
 - **The board does not always come back from a reset** (three times in some forty): the system
   shuts down, issues the reset (`PSCI SYSTEM_RESET` on AbyssBSD's console), and no loader starts;
   a power cycle recovers. Seen from both kernels, so the firmware's reset path is the suspect.

@@ -1033,13 +1033,18 @@ fn publish_table(s: &Sleepable, disk: &Arc<Disk>, retasted: bool) {
     queue.push_back((Arc::clone(disk), retasted));
     while let Some((d, retasted)) = queue.pop_front() {
         for p in taste_one(s, &d, retasted) {
+            tell(s, Event::Published(&p));
             queue.push_back((p, false));
         }
     }
 }
 
-/// Tastes `disk` once: publishes the partitions of the table found, and
-/// returns them.
+/// Tastes `disk` once: makes the partitions of the table found, lists them,
+/// and returns them for the caller to announce. Its own function, and the
+/// announcing not in it: reading a table takes a frame of some 3 KiB, which
+/// would otherwise stay on a 16 KiB kernel stack under every subscriber's
+/// handler (devfs's, with its tree insert) and overflow it in a release build.
+#[inline(never)]
 fn taste_one(s: &Sleepable, disk: &Arc<Disk>, retasted: bool) -> Vec<Arc<Disk>> {
     let Some((depth, parent)) = nesting(disk) else {
         return Vec::new();
@@ -1066,9 +1071,6 @@ fn taste_one(s: &Sleepable, disk: &Arc<Disk>, retasted: bool) -> Vec<Arc<Disk>> 
         at_publication: !retasted,
     }));
     DISKS.lock().extend(parts.iter().cloned());
-    for p in &parts {
-        tell(s, Event::Published(p));
-    }
     parts
 }
 
@@ -1266,7 +1268,7 @@ pub fn publish(s: &Sleepable, info: DiskInfo, queues: Arc<dyn DiskQueues>) -> Ar
         ),
         target: Target::Device {
             queues,
-            gate: alloc::boxed::Box::new(Gate::new()),
+            gate: Gate::boxed(),
             deferred: (0..n).map(|_| Mutex::new(&DEFERRED, Vec::new())).collect(),
         },
     });

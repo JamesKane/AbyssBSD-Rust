@@ -15,6 +15,8 @@
 //! a flag that only changes at revocation, so the I/O path shares no
 //! cache line between CPUs.
 
+use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering, fence};
 
 use sched::Sleepable;
@@ -39,6 +41,26 @@ impl Gate {
             inside: PerCpuCounter::new(),
             revoked: AtomicBool::new(false),
         }
+    }
+
+    /// An open gate on the heap, built in place. A gate holds a count per
+    /// CPU, some kilobytes: `Box::new(Gate::new())` builds it on the
+    /// caller's 16 KiB kernel stack first, and a release build keeps that
+    /// frame under everything the caller calls.
+    #[must_use]
+    pub fn boxed() -> Box<Self> {
+        let b = Box::<Self>::new_zeroed();
+        // SAFETY: all-zero is an open gate: every count is an atomic
+        // integer at zero and `revoked` is false.
+        unsafe { b.assume_init() }
+    }
+
+    /// [`Gate::boxed`], shared.
+    #[must_use]
+    pub fn shared() -> Arc<Self> {
+        let a = Arc::<Self>::new_zeroed();
+        // SAFETY: as in `boxed`.
+        unsafe { a.assume_init() }
     }
 
     /// Enters for one call, or fails once the gate is revoked.

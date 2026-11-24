@@ -114,10 +114,12 @@ pub struct DeviceInfo {
 /// An NVMe namespace's identify pages, for `XPT_DEV_ADVINFO`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NvmeData {
-    /// Identify controller.
-    pub cdata: [u8; 4096],
+    /// Identify controller. Boxed: two pages in a struct built on the
+    /// stack would sit in a 16 KiB kernel stack's frame (a release build
+    /// keeps it) under everything the builder calls.
+    pub cdata: Box<[u8; 4096]>,
     /// Identify namespace.
-    pub nsdata: [u8; 4096],
+    pub nsdata: Box<[u8; 4096]>,
 }
 
 impl DeviceInfo {
