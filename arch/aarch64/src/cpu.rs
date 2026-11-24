@@ -52,10 +52,30 @@ pub fn prefetch_write<T>(p: *const T) {
     unsafe { asm!("prfm pstl1keep, [{}]", in(reg) p, options(nostack, preserves_flags)) };
 }
 
-/// Writes this CPU's modified cache lines back to memory before a reset
-/// (x86_64's `WBINVD`, which its idle `MWAIT` made necessary). Nothing is
-/// done here: no aarch64 board has been seen to lose the log at a reset.
-pub fn flush_caches() {}
+/// Cleans and invalidates the cache lines of `[start, start + len)` to the
+/// point of coherency (`DC CIVAC`), before a reset: the persistent log
+/// ring is kept in RAM, and a reset drops what is still only in a cache.
+///
+/// # Safety
+///
+/// The range must be mapped and readable.
+pub unsafe fn flush_cache_range(start: *const u8, len: usize) {
+    let ctr: u64;
+    // SAFETY: CTR_EL0 is readable at EL1.
+    unsafe { asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags)) };
+    // DminLine, log2 of the smallest data cache line in words.
+    let line = 4usize << ((ctr >> 16) & 0xf);
+    let mut at = start as usize & !(line - 1);
+    let end = start as usize + len;
+    while at < end {
+        // SAFETY: the caller guarantees the range is mapped; the operation
+        // changes no data.
+        unsafe { asm!("dc civac, {}", in(reg) at, options(nostack, preserves_flags)) };
+        at += line;
+    }
+    // SAFETY: a barrier; no memory is touched.
+    unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
+}
 
 /// Stops this CPU for good.
 pub fn halt_forever() -> ! {

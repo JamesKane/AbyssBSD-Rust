@@ -465,6 +465,11 @@ pub(crate) fn init(info: &BootInfo) {
     let ring = info.log.get().and_then(|l| {
         let va = bootproto::layout::dmap(l.region.start)?;
         let len = usize::try_from(l.region.len()).ok()?;
+        RING_BASE.store(
+            usize::try_from(va.get()).ok()?,
+            core::sync::atomic::Ordering::Relaxed,
+        );
+        RING_LEN.store(len, core::sync::atomic::Ordering::Relaxed);
         // SAFETY: the loader reserved the ring as log-ring memory, which is
         // RAM in the DMAP; the console is its only user.
         let buf = unsafe { core::slice::from_raw_parts_mut(va.get() as *mut u8, len) };
@@ -861,6 +866,25 @@ macro_rules! kprint {
 macro_rules! kprintln {
     () => { $crate::console::print(format_args!("\n")) };
     ($($t:tt)*) => { $crate::console::print(format_args!("{}\n", format_args!($($t)*))) };
+}
+
+/// Where the persistent log ring is (address and length), for
+/// [`flush_log`]; 0 before it is opened or if there is none.
+static RING_BASE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static RING_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Writes the persistent log ring out of every CPU's caches to memory, so
+/// that what the next boot recovers has the last lines, whichever CPU wrote
+/// them. Called before a reset (`power::reset_saying`), which drops what is
+/// only in a cache; takes no lock (a panic may hold the console's).
+pub(crate) fn flush_log() {
+    let base = RING_BASE.load(core::sync::atomic::Ordering::Relaxed);
+    let len = RING_LEN.load(core::sync::atomic::Ordering::Relaxed);
+    if base != 0 && len != 0 {
+        // SAFETY: the ring is RAM in the DMAP, mapped for the kernel's
+        // lifetime (`init`).
+        unsafe { crate::arch::cpu::flush_cache_range(base as *const u8, len) };
+    }
 }
 
 /// The unit of the `uart` that is the console's serial port, once it

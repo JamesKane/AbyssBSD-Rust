@@ -269,15 +269,34 @@ pub fn prefetch_write<T>(p: *const T) {
     unsafe { asm!("prefetchw [{}]", in(reg) p, options(nostack, preserves_flags)) };
 }
 
-/// Writes this CPU's modified cache lines back to memory and empties its
-/// caches (`WBINVD`), before a reset: the persistent log ring (the previous
-/// boot's log, a panic's message) is kept in RAM, and a platform reset drops
-/// what is still only in a cache. A core halted with `HLT` may flush its
-/// caches by itself in a deep state; one waiting with `MWAIT` in C1 does not.
-pub fn flush_caches() {
-    // SAFETY: WBINVD only moves data between the caches and memory; it is
-    // privileged and the kernel runs at ring 0.
-    unsafe { asm!("wbinvd", options(nostack, preserves_flags)) };
+/// Writes the cache lines of `[start, start + len)` back to memory and
+/// evicts them from every cache in the system (`CLFLUSH`, which acts on all
+/// cores' caches, where `WBINVD` acts on this core's alone), before a reset:
+/// the persistent log ring (the previous boot's log, a panic's message) is
+/// kept in RAM, and a platform reset drops what is still only in a cache,
+/// the lines another core wrote last included. A core halted with `HLT` may
+/// write its caches back by itself in a deep state; one waiting with
+/// `MWAIT` in C1 does not.
+///
+/// # Safety
+///
+/// The range must be mapped and readable.
+pub unsafe fn flush_cache_range(start: *const u8, len: usize) {
+    // CPUID.1:EBX[15:8] is the CLFLUSH line size in quadwords.
+    let line = match (core::arch::x86_64::__cpuid(1).ebx >> 8) & 0xff {
+        0 => 64,
+        q => q as usize * 8,
+    };
+    let mut at = start as usize & !(line - 1);
+    let end = start as usize + len;
+    while at < end {
+        // SAFETY: the caller guarantees the range is mapped; CLFLUSH
+        // changes no data.
+        unsafe { asm!("clflush [{}]", in(reg) at, options(nostack, preserves_flags)) };
+        at += line;
+    }
+    // SAFETY: a fence; no memory is touched.
+    unsafe { asm!("mfence", options(nostack, preserves_flags)) };
 }
 
 /// Stops this CPU for good.

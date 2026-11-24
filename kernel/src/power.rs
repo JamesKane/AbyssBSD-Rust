@@ -188,13 +188,13 @@ pub(crate) fn reset_saying(say: &dyn Fn(core::fmt::Arguments<'_>)) -> ! {
         say(format_args!("power: reset (ACPI reset register)"));
         // The log kept in RAM for the next boot must be in RAM, not in a
         // cache, after its last line.
-        arch::cpu::flush_caches();
+        crate::console::flush_log();
         write_gas(r.register, 1, u32::from(r.value));
         settle();
     }
     #[cfg(target_arch = "aarch64")]
     arch::smp::psci_system_reset(crate::smp::psci_conduit());
     say(format_args!("power: reset (UEFI ResetSystem)"));
-    arch::cpu::flush_caches();
+    crate::console::flush_log();
     crate::firmware::reset(efi::ResetKind::Cold)
 }
