@@ -55,7 +55,7 @@ fn until(at: u64) -> u64 {
 
 /// `ts` in nanoseconds, if it is a valid interval (`timespecvalid_interval`).
 pub(crate) fn ts_ns(ts: &Timespec) -> Result<u64, Errno> {
-    if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
+    if !ts.is_valid() {
         return Err(Errno::EINVAL);
     }
     Ok(ts

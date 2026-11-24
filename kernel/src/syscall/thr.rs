@@ -395,7 +395,7 @@ pub(super) fn thr_suspend(s: &Sleepable, timeout: u64) -> SysResult {
         None
     } else {
         let ts = UserPtr::<Timespec>::new(timeout).read()?;
-        if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
+        if !ts.is_valid() {
             return Err(Errno::EINVAL);
         }
         Some(

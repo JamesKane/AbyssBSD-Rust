@@ -465,10 +465,7 @@ fn slept(wmesg: &'static str, since: u64) {
     if let Some(mut req) = request(&e.0, KTR_CSW) {
         // When it switched out.
         let ns = crate::time::realtime_base_ns() + crate::time::ticks_to_ns(since);
-        req.header.ktr_time = abi::time::Timespec {
-            tv_sec: i64::try_from(ns / 1_000_000_000).unwrap_or(i64::MAX),
-            tv_nsec: i64::try_from(ns % 1_000_000_000).unwrap_or(0),
-        };
+        req.header.ktr_time = abi::time::Timespec::from_ns(ns);
         req.part = crate::uaccess::bytes_of(&part).to_vec();
         enqueue(&e.0, req);
     }

@@ -142,7 +142,7 @@ impl Abi {
 
 /// `timespecvalid_interval`.
 fn valid(t: Timespec) -> Result<Timespec, Errno> {
-    if t.tv_sec < 0 || !(0..1_000_000_000).contains(&t.tv_nsec) {
+    if !t.is_valid() {
         return Err(Errno::EINVAL);
     }
     Ok(t)

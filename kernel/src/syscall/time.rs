@@ -102,10 +102,7 @@ pub(super) fn clock_getres(id: u64, tp: u64) -> SysResult {
 pub(super) fn gettimeofday(tp: u64, tzp: u64) -> SysResult {
     if tp != 0 {
         let us = crate::shared_page::to_us(crate::shared_page::realtime());
-        let tv = Timeval {
-            tv_sec: i64::try_from(us / 1_000_000).unwrap_or(i64::MAX),
-            tv_usec: i64::try_from(us % 1_000_000).unwrap_or(0),
-        };
+        let tv = Timeval::from_us(us);
         UserPtr::<Timeval>::new(tp).write(&tv)?;
     }
     if tzp != 0 {

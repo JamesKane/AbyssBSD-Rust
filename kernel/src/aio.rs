@@ -1510,7 +1510,7 @@ pub(crate) fn aio_error(ujob: u64) -> Result<u64, Errno> {
 
 /// A timeout's nanoseconds (`itimerfix`'s checks).
 fn timeout_ns(ts: &Timespec) -> Result<u64, Errno> {
-    if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
+    if !ts.is_valid() {
         return Err(Errno::EINVAL);
     }
     Ok(ts

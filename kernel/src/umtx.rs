@@ -208,10 +208,7 @@ impl umtx::Env for Ctx<'_> {
 
     fn now(&self, clock: u32) -> Result<Timespec, Errno> {
         let ns = crate::syscall::clock_ns(clock)?;
-        Ok(Timespec {
-            tv_sec: (ns / 1_000_000_000).cast_signed(),
-            tv_nsec: (ns % 1_000_000_000).cast_signed(),
-        })
+        Ok(Timespec::from_ns(ns))
     }
 
     fn find(&self, tid: u32, shared: bool) -> Option<Arc<Entry>> {

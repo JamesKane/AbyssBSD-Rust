@@ -58,10 +58,7 @@ pub(crate) fn state() -> (i64, i64, i32) {
 /// The time of day as a timespec.
 fn nanotime() -> Timespec {
     let ns = crate::shared_page::to_ns(crate::shared_page::realtime());
-    Timespec {
-        tv_sec: i64::try_from(ns / 1_000_000_000).unwrap_or(i64::MAX),
-        tv_nsec: i64::try_from(ns % 1_000_000_000).unwrap_or(0),
-    }
+    Timespec::from_ns(ns)
 }
 
 /// `ntp_gettime1`: the time with its error bounds and leap state.

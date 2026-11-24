@@ -77,10 +77,7 @@ pub(crate) fn zeroed<T: Plain>() -> alloc::boxed::Box<T> {
 
 /// Microseconds as a `timeval`.
 pub(crate) fn timeval(us: u64) -> Timeval {
-    Timeval {
-        tv_sec: i64::try_from(us / 1_000_000).unwrap_or(i64::MAX),
-        tv_usec: i64::try_from(us % 1_000_000).unwrap_or(0),
-    }
+    Timeval::from_us(us)
 }
 
 /// Resource use, as FreeBSD's `struct rusage` keeps it, plus the run time

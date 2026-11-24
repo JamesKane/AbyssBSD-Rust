@@ -50,15 +50,12 @@ fn tv_ns(tv: &Timeval) -> u64 {
 /// not fired reads as not quite done).
 fn ns_tv(ns: u64) -> Timeval {
     let us = ns.div_ceil(1000);
-    Timeval {
-        tv_sec: i64::try_from(us / 1_000_000).unwrap_or(i64::MAX),
-        tv_usec: (us % 1_000_000).cast_signed(),
-    }
+    Timeval::from_us(us)
 }
 
 /// `itimerfix`: valid, and at least `tick / 16` (62 µs) if not zero.
 fn itimerfix(tv: &Timeval) -> Result<u64, Errno> {
-    if tv.tv_sec < 0 || !(0..1_000_000).contains(&tv.tv_usec) {
+    if !tv.is_valid() {
         return Err(Errno::EINVAL);
     }
     if tv.tv_sec == 0 && tv.tv_usec != 0 && tv.tv_usec < 1000 / 16 {
@@ -428,7 +425,7 @@ pub(super) fn clock_settime(id: u64, tp: u64) -> SysResult {
     if int(id).cast_unsigned() != clock::REALTIME {
         return Err(Errno::EINVAL);
     }
-    if ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 || ts.tv_sec < 0 {
+    if !ts.is_valid() {
         return Err(Errno::EINVAL);
     }
     set_time(ts_ns(&ts)?)?;
@@ -447,7 +444,7 @@ pub(super) fn settimeofday(tv: u64, tzp: u64) -> SysResult {
     }
     process()?.priv_check(Priv::Settimeofday)?;
     if let Some(t) = t {
-        if t.tv_usec < 0 || t.tv_usec >= 1_000_000 || t.tv_sec < 0 {
+        if !t.is_valid() {
             return Err(Errno::EINVAL);
         }
         set_time(tv_ns(&t))?;

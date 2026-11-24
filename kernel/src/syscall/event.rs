@@ -39,7 +39,7 @@ const NANOS: u64 = 1_000_000_000;
 /// unless valid; more than `INT32_MAX` seconds is for ever, as FreeBSD
 /// treats it.
 fn timespec_timeout(ts: &Timespec) -> Result<Option<u64>, Errno> {
-    if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
+    if !ts.is_valid() {
         return Err(Errno::EINVAL);
     }
     if ts.tv_sec > i64::from(i32::MAX) {
@@ -308,7 +308,7 @@ fn kern_select(
     let ns = match tv {
         None => None,
         Some(t) => {
-            if t.tv_sec < 0 || !(0..1_000_000).contains(&t.tv_usec) {
+            if !t.is_valid() {
                 return Err(Errno::EINVAL);
             }
             if t.tv_sec > i64::from(i32::MAX) {
