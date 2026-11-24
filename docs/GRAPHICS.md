@@ -1095,3 +1095,31 @@ the zone, and then the display microcontroller's load as one experiment. The fil
   next steps are: the firmware commands that matter without a new mode (query of the connectors' hot-plug state,
   enabling outbox 1), then HDMI mode and audio on the firmware's own mode, and only then a different timing.
 
+### 16.14 R3.4: HDMI mode, the AVI info frame and the audio side (2026-11-24)
+
+- **Code.** `lib/amdgpu/src/hdmi.rs` (ten host tests against a register model, with the endpoint index/data pair and
+  the packet memory modelled): the audio encoder setup, the endpoint configuration bracketed by the clock-gating
+  disable, the audio clock written source first, the switch of the first encoder to HDMI mode (back-end mode, clock
+  pattern, a pulse of the front-end start bit, the stream controls), the AVI info frame for 1080p60 at index 0 with the
+  specification's bytes, the packet controls, the endpoint's enable and the unmute. `drivers/drmn/src/amd.rs` runs
+  them as three triggers: `dev.drmn.1.hdmi_audio` (the audio side only; the picture is not touched), `hdmi` (the
+  video switch, the packets, the enable and the unmute; prepares the audio side first if needed) and `hdmi_off`. Each
+  logs the registers it changes, before and after.
+- **On the X870E:** the audio side took (endpoint 0 speakers `0x10001`, linear PCM descriptor `0x70701`, audio clock
+  module `0x16a8c8`, phase `0x3a980`, the clock-regeneration pairs, auto-send on). `hdmi` then moved `DIG_BE_CNTL`
+  from `0x20100` to `0x30100`, `HDMI_CONTROL` from `0x10011` to `0x10019`, wrote the AVI frame without a packet-memory
+  conflict, set the packet controls (the AVI sent every frame), set the endpoint's audio-enabled bit (`0x80000000`)
+  and the sample-send bit. **The user watched the screen: the picture stayed fine through the switch.** The frame count ran
+  on (3 frames in 50 ms after the switch), and the interrupt count kept pace, no overflow.
+- **Observed, not explained:** `HDMI_DB_CONTROL` read `0x10010` before and `0x1000` after setting bit 12 (the two
+  other bits went to 0, status bits by their look). `AFMT_STATUS` bit 4 (audio enabled) still reads 0: probably it
+  needs an audio stream from the HD Audio side (not started). The audio info frame bytes and the choice between the
+  three clock-regeneration pairs are OPEN in the specification.
+- **Sound is not tested.** The kernel's HD Audio driver (`drivers/hda`) attaches to the Radeon's controller (`hdac1`,
+  vendor 1002 device 1640, function group `hdaa1`) but names the devices only; there are no streams or a PCM device
+  yet, so nothing plays. That is the next piece of work for audio (an HD Audio stream and a sound device), not part of
+  the display driver.
+- **Not done:** the sink's EDID (no DDC engine yet), so the endpoint's descriptors are the generic stereo ones and the
+  sink name is empty; the 60958 channel numbers for channels 2 to 7; modes other than 1080p60 (the audio clock is
+  fixed at 148.5 MHz).
+
