@@ -430,7 +430,7 @@ events and at boot (`rc.d/devmatch`), reading the PNP tables that `kldxref` writ
   configuration, as FreeBSD 15.1 does. `devinfo` and `/dev/devctl` already give `devmatch` what it
   reads (DRIVER-MODEL.md §11).
 - `kld_list` in `rc.conf` and `*_load` in `loader.conf` work as FreeBSD's
-  ([DESKTOP.md](DESKTOP.md) §2 expects `kld_list="amdgpu"`).
+  (FreeBSD's `drm-kmod` setups put `kld_list="amdgpu"` in `rc.conf`).
 
 ### 8.3 Dependencies
 

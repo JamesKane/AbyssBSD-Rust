@@ -319,7 +319,7 @@ Windows libraries with only built-in targets and the bundled linker, as
 - **Windows.** Each top-level window is a Wayland `xdg_toplevel`. Fullscreen, mode changes (served
   by scaling through the compositor, never by changing the display's mode), relative pointer
   motion, pointer confinement, and the clipboard use the standard protocols that wlroots and the
-  desktop's `undertow` implement.
+  desktop's `scoriad` implement ([DESKTOP.md](DESKTOP.md) §4.2).
 - **The session service** (`ntsessd`, native, one per session) owns what on Windows belongs to the
   window manager and has no place in a kernel: the window tree, message routing between
   processes, the clipboard, and the registry's store. It is the only user service in the design.
@@ -389,8 +389,8 @@ Two titles share nothing writable.
 Each running title is one NT **session**: its own object directory, session service, and drive
 table. A session runs in a jail (`kernel/src/prison.rs`) whose file system is the title's root
 and whose devices are the render node, the sound device, and the input devices the
-desktop grants. This is the same application-jail model the desktop uses
-([DESKTOP.md](DESKTOP.md)). A game cannot read the user's home directory unless the manifest
+desktop grants. The desktop itself does not jail programs ([DESKTOP.md](DESKTOP.md) §4.2), so
+this model is the runtime's own. A game cannot read the user's home directory unless the manifest
 grants a path.
 
 ---
@@ -457,7 +457,7 @@ diagnostic for `nt.frame` and never a gate.
 | Vulkan in QEMU (Venus), dma-buf, explicit synchronization | M-G.3 | W3 |
 | Sound: `sound(4)` with a hardware driver, then native streams | [AUDIO.md](AUDIO.md) A2 to A4, unscheduled | W4 |
 | RADV on RDNA2 | M-G.6 | W4 on hardware |
-| `nullfs` or `unionfs`, application jails | M-D.1 | W5 |
+| `nullfs` or `unionfs` | Unscheduled (VFS.md non-goal today; no longer M-D work, ADR-0026) | W5 |
 
 | Stage | Work | Exit criterion |
 |---|---|---|
@@ -466,7 +466,7 @@ diagnostic for `nt.frame` and never a gate.
 | **W2** | Loader, threads, exceptions, virtual memory rules, files and case, named pipes, completion ports, process creation, reflection | The non-graphical conformance suite passes; a multi-process, multi-threaded stress program runs clean |
 | **W3** | `win32u` over Wayland, input, the session service, `vulkan-1` thunks | A Vulkan test program of ours, built for Windows against `ntdll`, `win32u`, and `vulkan-1` alone (no Win32 libraries above them), draws in a Sway window on Venus in QEMU and answers keyboard and pointer |
 | **W4** | The Win32 libraries chosen at W0 (`kernel32`, `user32`, and what the corpus imports), DXVK, the audio endpoint and FAudio, controllers | Stock `vkcube` built for Windows runs; the first corpus titles reach their scripted frame with sound, on the X870E with RADV; `nt.*` components measured against FreeBSD's Wine |
-| **W5** | Bundles, title manifests, layers and snapshots, sessions in jails, the desktop's launcher integration | F3, F4, and F6 tests pass; installing, updating, and rolling back a title needs no manual step |
+| **W5** | Bundles, title manifests, layers and snapshots, sessions in jails, the desktop's launcher integration (`scoria-launch`, Game Focus rules) | F3, F4, and F6 tests pass; installing, updating, and rolling back a title needs no manual step |
 | **W6** | Per the decisions: 32-bit titles, x86-64 on `aarch64`, Direct3D 12, store clients | |
 
 ---

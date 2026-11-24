@@ -8,7 +8,7 @@
   work that makes that sequence short: timeline instrumentation from power-on, budgets per stage,
   and the known places where boots wait. Shutdown gets the same treatment in reverse (§5.6)
 - Inputs: [GRAPHICS.md](GRAPHICS.md) §7.5 and §7.6 (firmware handover, the kernel console),
-  [DESKTOP.md](DESKTOP.md) (the login window), [DRIVER-MODEL.md](DRIVER-MODEL.md) §6.4 (parallel
+  [DESKTOP.md](DESKTOP.md) (the login path, §14 question 7), [DRIVER-MODEL.md](DRIVER-MODEL.md) §6.4 (parallel
   attach), [MULTIUSER.md](MULTIUSER.md) §16 and [PERFORMANCE.md](PERFORMANCE.md) (the `boot`
   component), [ADR-0015](adr/0015-usb-input-vt.md) (the early console and `vt`)
 
@@ -447,7 +447,7 @@ original to AbyssBSD, BSD-licensed, with sources (SVG) in the tree and PNGs buil
 
 ## 11. Deferred
 
-- A graphical GELI passphrase prompt in the loader (DESKTOP.md's encrypted installs). The splash
+- A graphical GELI passphrase prompt in the loader (INSTALLER.md's encrypted installs). The splash
   would host it; the loader's GELI support comes first.
 - A boot chime (needs audio before `Ready`, which nothing has).
 - Multiple displays: GOP gives one. A native driver may later mirror the splash.

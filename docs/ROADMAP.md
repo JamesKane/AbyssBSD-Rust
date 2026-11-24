@@ -804,35 +804,38 @@ ports see it, implemented natively, and a step order for this milestone).
   style buffer sharing, sync files). Decide between FreeBSD/Linux DRM ioctl compatibility and a
   new interface. The decision drives which userland GPU stacks can be reused.
 - Drivers: GOP-backed simple KMS, then virtio-gpu (2D, then 3D/venus), then a native GPU: AMD
-  RDNA2, which the desktop's metal target and all three amd64 Tier 1 machines have
-  ([ADR-0018](adr/0018-desktop-architecture.md)).
+  RDNA2, which all three amd64 Tier 1 machines have
+  ([ADR-0018](adr/0018-desktop-architecture.md), [ADR-0025](adr/0025-graphics-abi-and-native-drivers.md)).
 - evdev-compatible input interface: done in the USB track.
 - Acceptance is **stock Wayland and Sway** from FreeBSD 15.1 packages, unmodified: on `gop-kms`
   with software rendering, then accelerated on virtio-gpu (Venus), then on the Orange Pi 6 Plus
   (`panthor`) and RDNA2. Each step exits with a `grim` screenshot of Sway showing a `foot` window
   running `fastfetch` and, in another window, glmark2's 3D jellyfish scene with its frame rate on
   screen ([GRAPHICS.md](GRAPHICS.md) §14).
-- The desktop (M-D) follows on the same kernel: its `undertow` compositor is M-D's acceptance, not
-  M-G's ([DESKTOP.md](DESKTOP.md) §4).
+- The desktop (M-D) follows on the same kernel: Scoria's `scoriad` is M-D's acceptance, not
+  M-G's ([DESKTOP.md](DESKTOP.md) §15).
 
 ### M-D: Desktop
 
-Plan: [DESKTOP.md](DESKTOP.md) under [ADR-0018](adr/0018-desktop-architecture.md).
+Plan: [DESKTOP.md](DESKTOP.md) under [ADR-0026](adr/0026-desktop-scoria.md), which
+supersedes [ADR-0018](adr/0018-desktop-architecture.md).
 
-- **The desktop is the AbyssBSD desktop** (`../AbyssBSD/desktop`, Rust since 2026-10-31): the `undertow`
-  compositor over wlroots, the Aqua toolkit and shell, portals, its applications, the login window,
-  application jails, and its installer. AbyssBSD designs no desktop of its own. It runs this one
-  as FreeBSD userland, installed from packages built for FreeBSD 15.1, unmodified.
-- The work here is the kernel beneath it. Most of what the desktop uses is P4–P6 ABI and is done.
-  Still to schedule: the MAC framework with `mac_priority`, `sound(4)` (OSS, `sndstat`,
-  `snd_dummy`, then HDA), ACPI sleep and buttons, and ZFS (M-Z) for the installer's default
-  layout and boot environments (DESKTOP.md §3.2).
-- The desktop's own harness becomes a conformance suite, each lane compared with FreeBSD 15.1 as
-  kyua is. Its headless lanes need no graphics, so **M-D.1 can start once P6 exits**, before
-  M-G, and does not gate Day 1. First light follows M-G.1, acceleration M-G.3, and metal M-G.6.
-- Changes the desktop itself needs (a 15.1 package build, a UFS install layout, arm64 packages)
-  are made in the monorepo's plan, not carried here (DESKTOP.md §8).
-- Prerequisites by step: P6 (headless), M-G (display), P7 (network panes, Firefox), audio, P11 power
+- **The desktop is Scoria**: a tiling Wayland desktop for gaming, ricing, and streaming,
+  written in Rust in this workspace (`desk/`). The `scoriad` compositor renders with Vulkan 1.3
+  only, `scoria-sup` supervises the session and owns its one libucl configuration, and components
+  talk over one typed protocol on `SOCK_SEQPACKET`. No D-Bus, udev daemon, logind, or PipeWire in
+  the core session. ADR-0026 amends ADR-0002 for `desk/` only: C libraries from FreeBSD packages
+  (libwayland, Mesa, libinput, libseat, libucl, …) through in-house FFI, and still no crates.
+- Scoria is ordinary FreeBSD 15.1 userland, shipped as one package that also installs on stock
+  FreeBSD 15.1. Its tests and its `desk` benchmarks run on both, compared as kyua and the perf
+  suites are.
+- Kernel work still to schedule: syncobj timelines with `SYNCOBJ_EVENTFD`, atomic asynchronous
+  flips and variable refresh, the MAC framework with `mac_priority`, `sound(4)` (OSS, then HDA),
+  game-controller drivers, battery and AC adapter drivers, `cuse` or AUDIO.md's taps for stream audio, ACPI sleep and buttons,
+  and ZFS (M-Z) for installs (DESKTOP.md §11.3).
+- The headless steps need no graphics, so **M-D.1 can start once P6 exits**, before M-G, and does
+  not gate Day 1. First light follows M-G.1, acceleration M-G.3, and metal M-G.6.
+- Prerequisites by step: P6 (headless), M-G (display), P7 (the network collector, Firefox), audio, P11 power
   management (sleep), M-Z (ZFS install), INSTALLER.md (the boot loader for installed systems).
 
 ### M-Z: OpenZFS
@@ -868,7 +871,7 @@ Plan: [DESKTOP.md](DESKTOP.md) under [ADR-0018](adr/0018-desktop-architecture.md
 | The X870E holds user data (Fedora NVMe, RAID array) | Catastrophic data loss | Non-designated disks attach read-only until P11. `xtask deploy` identifies the media NVMe by serial number. AbyssBSD never writes the Fedora ESP or boot entries |
 | No serial console on the X870E | Blind debugging of early hangs | Framebuffer console, persistent RAM log saved by the loader, FCH watchdog, an optional PCIe serial card or polled network log |
 | Bring-up on the Orange Pi 6 Plus costs power cycles | Slow iteration | QEMU first. Serial console from day one, the watchdog in P3. Capture the Linux/FreeBSD ground truth (ACPI dumps, register state) before the board is reimaged, and read it before experimenting |
-| The desktop is another project's plan, on FreeBSD `main` | M-D waits on changes made elsewhere; the desktop drifts toward 16-only interfaces | Its harness runs against FreeBSD 15.1 here, so drift shows as a failing lane. The asks are listed in DESKTOP.md §8 and tracked in the monorepo's plan |
+| The desktop is a large userland program written here | M-D competes with the kernel for time; C libraries widen what `desk/` depends on | Steps follow M-G, so no desktop work waits on graphics that is not there. The `desk/` inventory bounds the C libraries, and their parsers run only in the Capsicum worker (ADR-0026) |
 
 ## Open decisions
 
@@ -891,6 +894,6 @@ Decided items are struck through. Each decision is recorded as an ADR.
    with clean-room reverse engineering where none exist (observing the device and documenting it,
    never reading GPL driver source, per [ADR-0007](adr/0007-license-and-clean-implementation.md)).
    Support a limited set of hardware and expand organically, driven by the reference machines.
-8. ~~Desktop~~: decided. The AbyssBSD desktop (Rust), run as FreeBSD userland, with its packages
-   built for FreeBSD 15.1 ([ADR-0018](adr/0018-desktop-architecture.md)). 16-CURRENT follows once
-   the desktop is stable here.
+8. ~~Desktop~~: decided. Scoria, a Rust tiling Wayland desktop built in this workspace as FreeBSD
+   15.1 userland ([ADR-0026](adr/0026-desktop-scoria.md)), replacing the AbyssBSD
+   monorepo desktop of [ADR-0018](adr/0018-desktop-architecture.md).

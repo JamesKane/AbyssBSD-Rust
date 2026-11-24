@@ -44,8 +44,9 @@ system to rule out whole classes of kernel bugs.
     an interface FreeBSD itself has adopted (netlink, inotify, evdev), since it is then part of the
     ABI we implement. A Linuxulator, if it ever comes, stays a separate ABI personality.
     The rule governs the kernel's interfaces. The desktop (ROADMAP M-D) is FreeBSD userland: it is
-    built on kqueue, devd, Capsicum, jails, and `pdfork`, and the ports it uses (wlroots, libinput,
-    GTK) run here as they run on FreeBSD ([ADR-0018](adr/0018-desktop-architecture.md)).
+    built on kqueue, devd, Capsicum, `pdfork`, and `pam_xdg`, with no D-Bus, udev daemon, or logind
+    in its core, and the ports it uses (libwayland, libinput, libseat, Mesa) run here as they run on
+    FreeBSD ([ADR-0026](adr/0026-desktop-scoria.md)).
 
 ## Non-goals (Day 1)
 
@@ -84,9 +85,8 @@ FreeBSD-compatible userland interfaces:
 2. **Userland milestone**: gradually replace base components with new Rust implementations, while
    keeping FreeBSD binary compatibility as the contract.
 3. **Graphics milestone**: KMS/DRM-equivalent kernel interface, virtio-gpu, then native GPU drivers.
-4. **Desktop milestone**: the AbyssBSD desktop (an Aqua-style Wayland desktop with its own
-   compositor, toolkit, applications, and installer) running on this kernel as FreeBSD userland,
-   unmodified ([ADR-0018](adr/0018-desktop-architecture.md)).
+4. **Desktop milestone**: Scoria, a tiling Wayland desktop with a Vulkan compositor, written in
+   Rust here and shipped as FreeBSD 15.1 userland ([ADR-0026](adr/0026-desktop-scoria.md)).
 
 ## Success criteria for Day 1 (v1.0)
 

@@ -1,17 +1,18 @@
 # Audio
 
 - Status: **Draft**. A forward design for sound on AbyssBSD. Decisions here become an ADR when
-  audio enters the roadmap (its first step is M-D.1's sound lanes).
+  audio enters the roadmap (its first step, A1, comes before DESKTOP.md's M-D.3).
 - Date: 2026-11-23
 - Scope: the kernel's sound engine, its two user interfaces (FreeBSD's `sound(4)` and a native
   stream interface), the driver class, and the order of drivers. Video, codecs for compressed
   audio, Bluetooth, and effects hosting are out of scope (§1.2).
-- Inputs: [DESKTOP.md](DESKTOP.md) (§3.2, §9 question 4), [WINDOWS-GAMES.md](WINDOWS-GAMES.md)
+- Inputs: [DESKTOP.md](DESKTOP.md) (§11.3, §14 question 4), [WINDOWS-GAMES.md](WINDOWS-GAMES.md)
   (§7.5), [DRIVER-MODEL.md](DRIVER-MODEL.md), [USB.md](USB.md), [HARDWARE.md](HARDWARE.md),
   [ADR-0004](adr/0004-abi-target.md), [ADR-0007](adr/0007-license-and-clean-implementation.md),
   [ADR-0011](adr/0011-performance-parity.md),
-  [ADR-0014](adr/0014-performance-parity-per-component.md), the desktop's own findings
-  (`../AbyssBSD/desktop/docs/API-STUDY.md`, Phase 14), the clean-room specification
+  [ADR-0014](adr/0014-performance-parity-per-component.md), the monorepo desktop's findings
+  (`../AbyssBSD/desktop/docs/API-STUDY.md`, Phase 14; ADR-0026 has since replaced that
+  desktop), the clean-room specification
   `~/Projects/OS/chinese-wall/specs/sky1-audio`, and FreeBSD's `sound(4)` as the behavioral
   reference (`../freebsd-src/sys/dev/sound/`, `sys/sys/soundcard.h`, `usr.sbin/{mixer,sndctl}`,
   `lib/libmixer`).
@@ -33,8 +34,8 @@ same device graph, mixed once, so there is never a second authority over a devic
 
 | # | Goal | Why |
 |---|---|---|
-| G1 | **FreeBSD's sound userland runs unmodified**: `mixer(8)`, `sndctl(8)`, `beep(1)`, `cat /dev/sndstat`, and every port that speaks the Open Sound System interface (Firefox through cubeb, SDL, mpv, the sndio, PipeWire, PulseAudio, and JACK back ends) | The ABI target is FreeBSD userland ([ADR-0004](adr/0004-abi-target.md)); the desktop is built on it ([DESKTOP.md](DESKTOP.md) §3.2) |
-| G2 | **The capabilities of macOS's audio system** (§3), offered natively, without a sound server in user space | The request; and the desktop's study concluded that a server which mixes again "is a second authority, not a first" |
+| G1 | **FreeBSD's sound userland runs unmodified**: `mixer(8)`, `sndctl(8)`, `beep(1)`, `cat /dev/sndstat`, and every port that speaks the Open Sound System interface (Firefox through cubeb, SDL, mpv, the sndio, PipeWire, PulseAudio, and JACK back ends) | The ABI target is FreeBSD userland ([ADR-0004](adr/0004-abi-target.md)); the desktop is built on it ([DESKTOP.md](DESKTOP.md) §11.3) |
+| G2 | **The capabilities of macOS's audio system** (§3), offered natively, without a sound server in user space | The request; and the monorepo desktop's study concluded that a server which mixes again "is a second authority, not a first" |
 | G3 | **The I/O cycle cannot block or allocate, by construction** | A late cycle is an audible defect. This is audio's version of the fence rule in [GRAPHICS.md](GRAPHICS.md) G3 |
 | G4 | **Time is first class**: every device has a clock that relates sample position to system time, and every latency the system reports is the whole path's | Synchronization with video, aggregate devices, and honest latency all follow from it |
 | G5 | **Devices come and go**: unplugging a device, or changing the default, never kills a stream that could continue elsewhere, and never panics | [DRIVER-MODEL.md](DRIVER-MODEL.md) G2, G7 |
@@ -70,7 +71,7 @@ an extension of the same engine, not a layer over or under it.**
 
 | Alternative | Why not |
 |---|---|
-| `sound(4)` only | Meets G1. Fails G2: the desktop's study found that another program's volume cannot be set, that reported delay leaves out the mixing stage, and that small periods behave badly. Every desktop on FreeBSD works around these with a server |
+| `sound(4)` only | Meets G1. Fails G2: the monorepo desktop's study found that another program's volume cannot be set, that reported delay leaves out the mixing stage, and that small periods behave badly. Every desktop on FreeBSD works around these with a server |
 | A user-space server over raw devices, with an Open Sound System emulation on top (the macOS and Linux shape) | Reaches G2. Breaks G1's fidelity (emulated `/dev/dsp` needs `cuse` and never quite matches), adds a process whose death silences the machine, and puts mixing behind scheduling of an ordinary process |
 | Two engines, old and new, side by side | Two authorities over one device: which one owns the hardware, the volume, the default? |
 | **One engine, two faces** | A `/dev/dsp` channel and a native stream are the same object. FreeBSD already mixes in the kernel (virtual channels), so this is FreeBSD's own architecture, extended |
@@ -91,7 +92,7 @@ of `sound(4)` streams is off unless `hw.snd.follow_default` is set.
 | C1 | Every I/O cycle carries a timestamp relating sample time to host time | Position and delay requests, per call; no shared clock | A **device clock** per device: (sample position, system time, rate ratio) pairs taken at the hardware interrupt and published in a mapped page, read without a system call, like the timehands in `shared_page` (§4.3) | Host tests of the clock filter; in QEMU, recorded position against the capture file |
 | C2 | Shared-memory I/O, pulled by the device's cycle, at buffer sizes of a few milliseconds or less | `read`/`write` copies; `mmap` of a channel's buffer, with restrictions | **Native streams**: a ring mapped into the client, filled or drained by the engine in the cycle; the client is woken once per cycle (§6) | Loopback latency and missed-cycle counts under load (§10) |
 | C3 | Honest latency: device, safety offset, buffer, and stream latency reported separately | The delay request counts the program's channel buffer and not the mixing parent's | Latency is a property of each graph edge and is summed along the path (§4.3, §5.3) | Reported delay against measured loopback delay |
-| C4 | Another program (the system's sound panel) sees and sets each stream's volume and mute | Readable through `sndstat`; settable only by the stream's own process | Stream control through `/dev/sound`, with an ownership rule (§6.3) | A test client of ours; then the desktop's Sound pane, once the desktop adopts it (§6.4) |
+| C4 | Another program (the system's sound panel) sees and sets each stream's volume and mute | Readable through `sndstat`; settable only by the stream's own process | Stream control through `/dev/sound`, with an ownership rule (§6.3) | A test client of ours; then Scoria's mixer widget, once it adopts it (§6.4) |
 | C5 | Streams follow the default device; a device can be unplugged under a running stream | A channel is bound to its unit at open; a detached device fails its channels | **Rerouting**: the graph is replaced at a cycle boundary, with the stream's ring kept and a rate converter inserted if the rates differ (§4.4) | Unplug and default-change tests under continuous playback, checked for gaps in the capture |
 | C6 | Aggregate devices: several devices as one, with drift correction | None in the kernel | An **aggregate** node: one member is the clock; the others are resampled by the measured ratio of their clocks (§4.5) | Two emulated devices with a deliberate rate offset: no drift over an hour of simulated time on the host |
 | C7 | System and per-program capture ("taps"), with user consent | Loopback through `virtual_oss` | **Tap** edges in the graph, readable as capture streams, gated by a privilege (§6.3) | Tap capture equals the mix, sample for sample |
@@ -270,9 +271,9 @@ stable while things move.
 
 ### 6.4 Who uses it
 
-- **The desktop**: its Sound pane and menu item (C4, C5, C10) and its media framework. Adopting
-  `/dev/sound` is a change in the desktop's tree, so it is an ask of the desktop's plan in the
-  sense of [DESKTOP.md](DESKTOP.md) §8, not work here.
+- **The desktop**: Scoria's mixer widget, quick settings, and stream buses (C4, C5, C10).
+  Adopting `/dev/sound` is a change in `desk/`, weighed with [DESKTOP.md](DESKTOP.md) §14
+  question 4 (stream audio without `virtual_oss`).
 - **The Windows games runtime**: the audio endpoint of [WINDOWS-GAMES.md](WINDOWS-GAMES.md)
   §7.5 is a native stream. Its event-driven mode is the per-cycle wake, and its position and
   latency queries read the stream page. This answers the question that document left here.
@@ -304,7 +305,7 @@ Drivers are `forbid(unsafe)` and use the DMA layer's buffers for hardware rings.
 
 | Order | Driver | Hardware | Baseline | Why here |
 |---|---|---|---|---|
-| 1 | `snd-dummy` | None | FreeBSD 15.1 `snd_dummy` | The whole `sound(4)` face with no hardware; what M-D.1's lanes need |
+| 1 | `snd-dummy` | None | FreeBSD 15.1 `snd_dummy` | The whole `sound(4)` face with no hardware; what the kyua sound tests and the desktop's volume collector need first |
 | 2 | `hda` controller + generic codec (`lib/hda`) | QEMU `ich9-intel-hda` with `hda-duplex`, on both instruction sets; bhyve's `hda` | FreeBSD 15.1 `snd_hda` | The QEMU-first vehicle: QEMU writes what was played to a file, and bhyve gives the performance baseline. FreeBSD 15.1 has no virtio sound driver, so there is nothing to compare one with |
 | 3 | `hda` on metal: Realtek codecs, analog | X870E (`1022:15e3`), Z690-A (ALC897) | `snd_hda` on the same machine | The desktop's metal target |
 | 4 | Digital audio over DisplayPort and HDMI | The RDNA2 outputs: X870E (`1002:1640`), Z690-A (`1002:ab28`) | `snd_hda` with `drm-kmod` | Needs the display driver to hand over the monitor's audio capabilities; follows M-G.6. The X870E's NVIDIA card (`10de:22e9`) waits for a display driver, as GRAPHICS.md §13 question 1 defers it |
@@ -340,7 +341,7 @@ corrections as data. The device names, `dev.hdaa` trees, and `sndstat` lines mus
 | **Engine** | `sys/sound` runs on the host under a simulated device with a scripted clock: underruns, rerouting with no lost or repeated sample, aggregate drift, snapshot replacement under load |
 | **`sound(4)` face** | Differential against the recorded corpus (§5.2). FreeBSD's own tests through kyua, compared with 15.1's results as every suite is (16-CURRENT has `tests/sys/sound` with read and write, `mmap`, polling, `sndstat`, and hot unload; which of them 15.1 has is recorded at A0). Unmodified `mixer`, `sndctl`, and `beep` |
 | **End to end in QEMU** | Play known signals through the emulated controller with QEMU's file back end; check the file for level, frequency, channel order, and gaps. Capture content needs a back end that supplies a known signal (A2) |
-| **Ports** | `sox`, `mpv`, and Firefox's cubeb back end play in the desktop's lanes |
+| **Ports** | `sox`, `mpv`, and Firefox's cubeb back end play under the desktop in QEMU |
 | **Hot plug** | Detach and attach a device under playback in QEMU through the driver model (C5), and unplug a USB device once `uaudio` exists: no panic, no leaked buffers; the stream continues or fails according to `hw.snd.follow_default` |
 | **Robustness** | Request fuzzing on both faces; hostile codec responses in `lib/hda` |
 
@@ -385,14 +386,14 @@ question 7 arrives at.
 | Stage | Work | Exit criterion |
 |---|---|---|
 | **A0** | FreeBSD 15.1's behavior recorded (§5.2); the ADR with §12 questions 1 and 2 | The corpus exists; the ADR is accepted |
-| **A1** | `lib/pcm`, `sys/sound` (streams, graph, cycle, mixer, the device clock driven by `snd-dummy`'s timer), the `sound(4)` face, `snd-dummy` | M-D.1's sound lanes pass as on FreeBSD 15.1; `mixer`, `sndctl`, and `cat /dev/sndstat` match the corpus; FreeBSD's sound tests match 15.1 under kyua |
+| **A1** | `lib/pcm`, `sys/sound` (streams, graph, cycle, mixer, the device clock driven by `snd-dummy`'s timer), the `sound(4)` face, `snd-dummy` | `mixer`, `sndctl`, and `cat /dev/sndstat` match the corpus; FreeBSD's sound tests match 15.1 under kyua |
 | **A2** | `lib/hda`, the `hda` driver, clocks from hardware position | In QEMU on both instruction sets, a played signal arrives intact in the file QEMU writes; capture is opened, configured, and read (a known input signal needs a QEMU back end that supplies one, to find at A0; if none, capture content is first checked in bhyve or at A4); `snd.*` within the gate in bhyve |
 | **A3** | The native face: streams, the stream page, control, rerouting, taps | A native test client plays in QEMU with one wait and no other system call per cycle; a second test client sets the first one's gain and moves it; detaching the device under playback (a driver-model detach, since the tree has no PCI hot unplug) moves the stream to `snd-dummy`; a tap equals the mix |
 | **A4** | Metal: Realtek codecs, jack detection, idle power; digital outputs once M-G.6 has the RDNA2 driver | Analog sound on the X870E and the Z690-A, with `sndstat` and the mixer matching FreeBSD on the same machine: M-D.4's built-in audio. Sound over the RDNA2 DisplayPort output when M-G.6 is there |
 | **A5** | `uaudio`, the asynchronous converter, aggregates | A USB headset works and survives unplugging; an aggregate of two devices holds alignment |
 | **A6** | `sky1-audio`; raw MIDI | Sound from the Orange Pi 6 Plus's jack and over DisplayPort; a USB MIDI keyboard is readable as on FreeBSD |
 
-A1 is all that M-D.1 waits on. A3 is what [WINDOWS-GAMES.md](WINDOWS-GAMES.md) stage W4 uses,
+A1 is all that M-D.3 waits on. A3 is what [WINDOWS-GAMES.md](WINDOWS-GAMES.md) stage W4 uses,
 though the games runtime can start on the `sound(4)` face after A2.
 
 ---
@@ -416,4 +417,4 @@ though the games runtime can start on the `sound(4)` face after A2.
    a question for when a board needs it (the Q8B's audio appears to run through its processor;
    to confirm from `specs/qcom-sc8280xp`).
 8. **Per-jail devices.** Whether a jail sees the host's devices, a subset, or an aggregate made
-   for it, and how that fits the desktop's application jails.
+   for it, and how that fits jails such as the Windows games runtime's.

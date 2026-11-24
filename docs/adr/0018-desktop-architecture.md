@@ -1,6 +1,6 @@
 # ADR-0018: The desktop is the AbyssBSD desktop, run as FreeBSD userland
 
-- Status: Accepted
+- Status: Superseded by [ADR-0026](0026-desktop-scoria.md) (2026-11-23)
 - Date: 2026-10-29
 - Amended: 2026-10-30. Swift does not exist on FreeBSD riscv64, which blocks an rv64 desktop. The
   desktop's Swift implementation will be rewritten in Rust, in the monorepo (decision 7).

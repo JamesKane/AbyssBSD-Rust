@@ -6,9 +6,14 @@
   ([ADR-0018](adr/0018-desktop-architecture.md)); §5 lists what it needs from here
 - Date: 2026-10-28; revised 2026-10-29 for ADR-0018 (the Rust installer `sable-install` and its
   KDL plan were removed with the Sable desktop)
+- Note (2026-11-23): [ADR-0026](adr/0026-desktop-scoria.md) replaces the monorepo
+  desktop this plan was written around with Scoria. The monorepo's installer and medium recipe
+  stay in use until this document is revised for Scoria ([DESKTOP.md](DESKTOP.md) §14
+  question 7)
 - Inputs: [ADR-0006](adr/0006-uefi-acpi-only-own-loader-and-acpi.md),
   [ADR-0007](adr/0007-license-and-clean-implementation.md),
-  [ADR-0018](adr/0018-desktop-architecture.md), [DESKTOP.md](DESKTOP.md) (§3.2, §8, M-D.5),
+  [ADR-0018](adr/0018-desktop-architecture.md), [ADR-0026](adr/0026-desktop-scoria.md),
+  [DESKTOP.md](DESKTOP.md) (§2.4, §14 question 7, M-D.5),
   [GRAPHICS.md](GRAPHICS.md) (§7.5, §7.6), the desktop's installer (`desktop/docs/PHASE5.md`,
   `de/install`, `de/installrun`, `abyss/mk/live-image.sh` in `../AbyssBSD`)
 
@@ -198,7 +203,7 @@ in the session. AbyssBSD's medium is the same recipe with three substitutions:
 
 - this kernel for FreeBSD's `/boot/kernel`;
 - `loader-efi` on the ESP (`\EFI\BOOT\BOOTX64.EFI`, `BOOTAA64.EFI`) for FreeBSD's `loader.efi`;
-- FreeBSD 15.1's distribution sets, and the desktop's packages built for 15.1 (DESKTOP.md §2).
+- FreeBSD 15.1's distribution sets, and the desktop's package built for 15.1 (DESKTOP.md §2.4).
 
 `cargo xtask live-image --arch {x86_64,aarch64}` makes that medium for QEMU and for USB sticks on
 the reference machines, from the recipe in the monorepo, so the two cannot drift. The recipe
@@ -241,11 +246,12 @@ on FreeBSD 15.1, which the GEOM work checks differentially.
 
 ## 6. Asks of the desktop's plan
 
-In addition to DESKTOP.md §8:
+These are asks of the monorepo's installer and medium recipe, which stay in use until this
+document is revised for Scoria (ADR-0026):
 
 1. The medium recipe takes the kernel and the loader as inputs (§4).
 2. `abyss-install` installs `loader-efi` when the target runs AbyssBSD's kernel, and offers the UFS
-   layout (DESKTOP.md §8 ask 2) until M-Z.
+   layout until M-Z.
 3. Encrypted installs as §3.4 describes: GELI under the pool with the owner's password, automatic
    login for the owner when the loader unlocked the disk at boot, and `geli setkey` when the owner's
    password changes.
@@ -260,8 +266,8 @@ In addition to DESKTOP.md §8:
 |---|---|---|---|
 | **I.1** | `lib/loaderconf`, `lib/qoi`, `bootproto` v3; splash, silence, and the boot menu in `loader-efi`; the quiet console in `fb-console` and `sys/vt` | — | QEMU boots silently through the splash on both arches; a held `Space` opens the menu; FreeBSD 15.1's `loader.conf` from a P6 image is honored |
 | **I.2** | `lib/zfs-boot`, fuzzed against `zpool`-made images from the build server; GELI in `loader-efi` and the boot key buffer | M-Z's on-disk work, or images made on FreeBSD | `loader-efi` lists and boots `zroot/ROOT/*` from images FreeBSD wrote, including a GELI-encrypted one after one passphrase prompt |
-| **I.3** | `cargo xtask live-image` over the desktop's recipe | DESKTOP.md M-D.2 | The medium boots this kernel to the desktop's login window in QEMU |
-| **I.4** | The desktop's installer installs AbyssBSD (UFS, then ZFS, then encrypted ZFS) | I.3, §5's rows, M-Z for ZFS, `geom_eli` for encryption | DESKTOP.md M-D.5's exit: the install lanes pass as QEMU boots, and an install to the X870E's second NVMe boots to the desktop |
+| **I.3** | `cargo xtask live-image` over the desktop's recipe | DESKTOP.md M-D.2 | The medium boots this kernel to the desktop's login path (DESKTOP.md §14 question 7) in QEMU |
+| **I.4** | The desktop's installer installs AbyssBSD (UFS, then ZFS, then encrypted ZFS) | I.3, §5's rows, M-Z for ZFS, `geom_eli` for encryption | DESKTOP.md M-D.5's exit: installs pass as QEMU boots, and an install to the X870E's second NVMe boots to the desktop |
 
 ---
 

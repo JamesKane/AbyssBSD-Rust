@@ -35,8 +35,8 @@ hardware is an aggregate of drivers behind a KMS class.
 - **Linux interfaces outside DRM**: sysfs, udev, uevents, fdinfo, debugfs. Where Mesa or a
   compositor needs what they give on Linux, we provide FreeBSD's equivalent (sysctl, devd).
 - **fbdev** (`/dev/fb*`) for userland. The kernel console keeps its own path (§7.6).
-- **New userland graphics APIs.** M-D's compositor (the desktop's `undertow`, over wlroots) uses
-  the same DRM/KMS, GBM/EGL, and Vulkan interfaces as everything else.
+- **New userland graphics APIs.** M-D's compositor (Scoria's `scoriad`, on libdrm, GBM, and
+  Vulkan) uses the same interfaces as everything else.
 
 ## 2. The ABI decision
 
@@ -59,8 +59,8 @@ hardware is an aggregate of drivers behind a KMS class.
   build server, and reproduced byte for byte, as `devinfo` is.
 
 **Why not a new interface.** It would mean new Vulkan and GL drivers, or a translation layer in
-userland, for every GPU. That is several person-decades of Mesa. M-D's compositor runs on wlroots,
-libdrm, and Mesa from ports ([DESKTOP.md](DESKTOP.md) §3.3) and gains nothing from a new kernel
+userland, for every GPU. That is several person-decades of Mesa. M-D's compositor runs on libdrm,
+GBM, and Mesa's Vulkan drivers from ports ([DESKTOP.md](DESKTOP.md) §6) and gains nothing from a new kernel
 interface that DRM/KMS lacks.
 
 **Sources.** We may use DRM's user interface headers (`include/uapi/drm/*.h`, MIT), libdrm (MIT),
@@ -368,7 +368,7 @@ Backlights are FreeBSD's `backlight(9)` devices (`/dev/backlight/backlight<N>`,
 | 2 | `virtio-gpu` 2D, then 3D (Venus, virgl) | QEMU | The test vehicle for fences, syncobj, dma-buf, and submission. Venus needs host-visible blob memory |
 | 3 | Sky1 display: `linlondp` + DP-TX + combo PHY + eDP panel + backlight | Orange Pi 6 Plus | Specifications exist; the Tier 1 arm64 board's only display path |
 | 4 | `panthor` (Immortalis-G720) | Orange Pi 6 Plus | Specifications exist; the hardest test of firmware loading, device MMUs, and the scheduler |
-| 5 | amd64 native: RDNA2 (Radeon 610M iGPU, Navi 22) | X870E, Z690-A | §13 question 1; the desktop's metal target |
+| 5 | amd64 native: RDNA2 (Radeon 610M iGPU, Navi 22) | X870E, Z690-A | §13 question 1; the desktop's metal target (DESKTOP.md §13) |
 | Tier 2 | `msm` (Adreno 690 + DPU1) | Radxa Dragon Q8B | Specifications exist; depends on the PEP providers and the SMMUv2 backend |
 
 The ROADMAP's M-G entry names RDNA2 as the first native GPU. The X870E has no Intel GPU: its boot
@@ -418,9 +418,10 @@ those results are recorded and do not gate.
 
 ## 13. Open questions
 
-1. **The amd64 native GPU.** Decided in [ADR-0018](adr/0018-desktop-architecture.md): RDNA2
-   (amdgpu sources largely MIT, FreeBSD has `drm-kmod` amdgpu for a baseline). The desktop's metal
-   target is a Navi 22 card, the Z690-A has one, and the X870E and B650E have RDNA2 iGPUs. The
+1. **The amd64 native GPU.** Decided in [ADR-0018](adr/0018-desktop-architecture.md), which
+   [ADR-0026](adr/0026-desktop-scoria.md) keeps: RDNA2 (amdgpu sources largely MIT, FreeBSD has
+   `drm-kmod` amdgpu for a baseline). The Z690-A has a Navi 22 card, and the X870E and B650E have
+   RDNA2 iGPUs. The
    RTX 4070 (NVIDIA's open kernel modules are dual MIT/GPL, GSP firmware does most of the work,
    and FreeBSD's baseline is NVIDIA's own driver) comes later.
 2. **FreeBSD's discovery and policy details** (§2, §7.4, §8): sysctl names, devd strings, master
@@ -444,7 +445,7 @@ those results are recorded and do not gate.
 
 M-G is accepted on **stock Wayland and Sway**: FreeBSD 15.1 packages (`pkg install sway foot
 fastfetch glmark2 grim`), unmodified, with no AbyssBSD patches or settings beyond the renderer
-choice in `WLR_RENDERER`. The desktop's `undertow` is M-D's acceptance, not M-G's (DESKTOP.md §4).
+choice in `WLR_RENDERER`. Scoria's `scoriad` is M-D's acceptance, not M-G's (DESKTOP.md §15).
 
 Each step that puts a display up exits with the same **acceptance capture**: a `grim` screenshot of
 a Sway session, taken on the machine under test and kept with the run's results, showing two
