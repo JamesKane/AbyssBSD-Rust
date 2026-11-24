@@ -877,6 +877,64 @@ impl Amd {
         Ok(())
     }
 
+    /// Reads what a mode change at another pixel clock or size depends on
+    /// (08 section 3.7), writing nothing: the size holders, the locks, the
+    /// generator's state, the pixel-clock registers, and the first words of
+    /// the platform's copy of the video BIOS (in video memory, through the
+    /// register window).
+    pub(crate) fn mode_probe(&self) -> Result<(), abi::errno::Errno> {
+        use amdgpu::regs::{self, Window};
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        for (name, at) in [
+            ("HUBP0_DCHUBP_CNTL", 0xeacc),
+            ("HUBP0_DCSURF_PRI_VIEWPORT_START", 0xeaa4),
+            ("HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION", 0xeaa8),
+            ("DSCL0_SCL_MODE", 0x10700),
+            ("DSCL0_SCL_HORZ_FILTER_SCALE_RATIO", 0x10704),
+            ("DSCL0 0x10708", 0x10708),
+            ("DSCL0 0x1070c", 0x1070c),
+            ("DSCL0 0x10710", 0x10710),
+            ("DSCL0_OTG_H_BLANK", 0x1073c),
+            ("DSCL0_OTG_V_BLANK", 0x10740),
+            ("DSCL0_RECOUT_START", 0x10744),
+            ("DSCL0_RECOUT_SIZE", 0x10748),
+            ("DSCL0_MPC_SIZE", 0x1074c),
+            ("DPG0_DPG_CONTROL", 0x13450),
+            ("DPG0_DPG_DIMENSIONS", 0x13458),
+            ("OPPBUF0_OPPBUF_CONTROL", 0x13510),
+            ("ODM0_OPTC_DATA_SOURCE_SELECT", 0x13e2c),
+            ("ODM0_OPTC_WIDTH_CONTROL", 0x13e38),
+            ("ODM0_OPTC_MEMORY_CONFIG", 0x13e40),
+            ("OTG0_OTG_CONTROL", 0x14004),
+            ("OTG0_OTG_DOUBLE_BUFFER_CONTROL", 0x1406c),
+            ("OTG0_OTG_CLOCK_CONTROL", 0x14118),
+            ("OTG0_OTG_MASTER_UPDATE_LOCK", 0x1412c),
+            ("OTG0_OTG_GLOBAL_CONTROL0", 0x14140),
+            ("VTG0_CONTROL", 0xe7b4),
+            ("PHYPLLA_PIXCLK_RESYNC_CNTL", 0x00400),
+            ("OTG0_PIXEL_RATE_CNTL", 0x00500),
+            ("DIG0_DIG_BE_CNTL", 0x155c0),
+        ] {
+            self.log(format_args!(
+                "MODE: {name} @{at:#07x} = {:#010x}",
+                w.read32(at)
+            ));
+        }
+        // The platform's windows 3 to 6 (08 section 9.0.1) are at the top of
+        // video memory: read the first words of window 3, the video BIOS copy.
+        let base = 0x1fe2_0000u64;
+        let mut line = alloc::string::String::new();
+        for i in 0..8u64 {
+            use core::fmt::Write as _;
+            let _ = write!(line, "{:08x} ", regs::read_vram(&w, base + 4 * i));
+        }
+        self.log(format_args!(
+            "MODE: video memory {base:#x} (the platform's video BIOS copy): {line}"
+        ));
+        Ok(())
+    }
+
     /// Reads the DDC engine's and pins' registers, writing nothing    /// Reads the DDC engine's and pins' registers, writing nothing (stage
     /// R3.4: the EDID over the HDMI connector's DDC line).
     pub(crate) fn ddc_probe(&self) -> Result<(), abi::errno::Errno> {
@@ -1111,6 +1169,11 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             "hdmi",
             "Write 1 to switch the encoder to HDMI mode with the AVI info frame and enable audio; disturbs the picture briefly",
             Amd::hdmi_enable,
+        ),
+        (
+            "mode_probe",
+            "Write 1 to log the registers a mode change at another clock or size depends on (reads only)",
+            Amd::mode_probe,
         ),
         (
             "ddc_probe",
