@@ -415,6 +415,14 @@ impl DrmDriver for AmdKms {
     fn dumb(&self) -> Option<DumbLimits> {
         Some(DumbLimits::default())
     }
+
+    /// The display goes back to the console's surface at once: no lock
+    /// (the one that guards which surface is on show may be held by a
+    /// stopped processor), no wait for a flip, no flush. Two register
+    /// writes, which the display takes at its next update.
+    fn panic_restore(&self) {
+        self.screen.display.show(0);
+    }
 }
 
 #[cfg(test)]

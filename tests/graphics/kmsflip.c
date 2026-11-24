@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Sets the mode, flips between two buffers a few times, turns the controller off. */
+/* Sets the mode, flips between two buffers a few times, optionally holds the picture
+ * (second argument: seconds), turns the controller off. Usage: kmsflip [node [hold]] */
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <fcntl.h>
@@ -86,6 +87,10 @@ int main(int argc, char **argv) {
 		if (ioctl(fd, PFLIP, &f)) { perror("flip"); return 1; }
 		printf("flip %d: %.1f ms\n", i, (now() - t0) * 1e3);
 		sleep(1);
+	}
+	if (argc > 2) {
+		printf("holding %s s\n", argv[2]);
+		sleep(atoi(argv[2]));
 	}
 	struct crtc off = { .id = crtcs[0] };
 	ioctl(fd, SETCRTC, &off);

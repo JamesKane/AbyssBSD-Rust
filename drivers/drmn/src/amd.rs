@@ -409,11 +409,16 @@ impl Amd {
         *self.kms.lock() = Some((card, node));
     }
 
-    /// Takes the card away and shows the firmware's picture again.
-    pub(crate) fn unregister_kms(&self, s: &sched::Sleepable) {
+    /// Takes the card away. The firmware's picture is shown again unless
+    /// the machine is shutting down or the device is being reset: then the
+    /// last frame stays, as it does across a reboot, rather than flashing
+    /// the console.
+    pub(crate) fn unregister_kms(&self, s: &sched::Sleepable, restore: bool) {
         let held = self.kms.lock().take();
         if let Some((card, node)) = held {
-            card.restore();
+            if restore {
+                card.restore();
+            }
             node.unregister(s);
         }
     }
@@ -468,6 +473,16 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         "vram",
         "Write 1 to read a few words of VRAM through BAR0 and log them (read-only)",
         move || r.vram_probe(),
+    );
+    crate::control::trigger(
+        t,
+        node,
+        "panic_restore",
+        "Write 1 to run the kernel's panic hook for graphics cards (shows the console's surface), to test it",
+        || {
+            drm::panic_restore();
+            Ok(())
+        },
     );
     let r = Arc::clone(a);
     crate::control::trigger(

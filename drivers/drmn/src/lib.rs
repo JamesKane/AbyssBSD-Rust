@@ -254,9 +254,12 @@ impl Driver for Drmn {
         Ok(())
     }
 
-    fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
+    fn stop(&self, cx: &mut StopCx<'_>, why: StopReason) {
         if let Backend::Amd(a) = &self.backend {
-            a.unregister_kms(cx.sleepable());
+            a.unregister_kms(
+                cx.sleepable(),
+                !matches!(why, StopReason::Shutdown | StopReason::Reset),
+            );
         }
         if let Backend::Nvidia { identity, control } = &self.backend {
             let _ = identity;

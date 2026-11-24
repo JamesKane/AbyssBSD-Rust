@@ -304,6 +304,8 @@ ktest! {
         assert!(shows_at(&display, b, 2), "frame 2 is in surface B");
         assert!(shows_at(&display, a, 1), "surface A still holds frame 1, which was on show");
 
+        drm::panic_restore();
+        assert_eq!(display.shown.lock().last(), Some(&0), "a panic shows the console's surface");
         let off = DrmModeCrtc { crtc_id: crtc, fb_id: 0, ..Default::default() };
         f.set_crtc(&s, &off, &[]).expect("off");
         assert_eq!(display.shown.lock().last(), Some(&0), "off returns to the firmware's surface");
