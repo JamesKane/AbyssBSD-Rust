@@ -129,6 +129,27 @@ fn reset_selects_the_falcon_core_and_waits_for_it() {
 }
 
 #[test]
+fn a_register_that_stays_blocked_after_the_reset_stops_the_sequence() {
+    let m = Model::default();
+    m.regs
+        .borrow_mut()
+        .insert(GSP.base2 + BCR_CTRL, 0xbadf_5620);
+    // The model sets the valid bit on reads; the blocked pattern has it
+    // set too, as the real one does.
+    assert_eq!(
+        reset(&m, GSP, 0x1234),
+        Err(FalconError::Blocked("core selection"))
+    );
+    // The chip's identification was not recorded, and the core was not
+    // switched.
+    let w = m.writes();
+    assert!(
+        !w.iter()
+            .any(|&(o, _)| o == at(RM) || o == GSP.base2 + BCR_CTRL)
+    );
+}
+
+#[test]
 fn a_scrub_that_never_ends_is_an_error_not_a_hang() {
     let m = Model {
         never_scrubs: true,

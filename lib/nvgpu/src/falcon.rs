@@ -82,6 +82,9 @@ pub enum FalconError {
     /// A DMA address that is not 256-byte aligned, or a size or offset
     /// that does not fit.
     BadArgument(&'static str),
+    /// A register read as the hardware's "access blocked" pattern
+    /// (`0xbadf....`): the engine is still locked down.
+    Blocked(&'static str),
     /// The microcode halted with a nonzero status in `MAILBOX0`.
     Failed {
         /// The status.
@@ -158,8 +161,14 @@ pub fn reset<R: Registers + ?Sized>(r: &R, e: Engine, boot_0: u32) -> Result<(),
     r.write32(e.base + ENGINE, r.read32(e.base + ENGINE) & !1);
     let scrubbed = |r: &R| r.read32(e.base + HWCFG2) >> 12 & 1 == 0;
     wait(r, 20_000, 100, "memory scrubbing", scrubbed)?;
-    // The Falcon core, not the RISC-V one.
-    if r.read32(e.base2 + BCR_CTRL) >> 4 & 1 != 0 {
+    // The Falcon core, not the RISC-V one. A register that still reads as
+    // blocked after the reset means the lockdown was not lifted: go no
+    // further.
+    let bcr = r.read32(e.base2 + BCR_CTRL);
+    if bcr & 0xffff_0000 == 0xbadf_0000 {
+        return Err(FalconError::Blocked("core selection"));
+    }
+    if bcr >> 4 & 1 != 0 {
         r.write32(e.base2 + BCR_CTRL, 0);
         wait(r, 10_000, 100, "core switch", |r| {
             r.read32(e.base2 + BCR_CTRL) & 1 != 0
