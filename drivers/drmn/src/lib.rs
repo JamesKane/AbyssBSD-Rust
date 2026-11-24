@@ -27,6 +27,7 @@ extern crate alloc;
 
 mod amd;
 mod control;
+mod kms;
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -116,6 +117,19 @@ fn report_vbios(aperture: &Aperture, log: &dyn Fn(core::fmt::Arguments<'_>)) {
             }
         }
         Err(e) => log(format_args!("video BIOS not read: {e:?}")),
+    }
+}
+
+/// Whether a Radeon's display becomes a graphics card (`hw.drmn.kms`).
+static KMS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Takes the boot-time tunables (`TUNABLE_INT_FETCH`): `get` gives a
+/// name's integer value, if set. The kernel calls it before drivers
+/// attach.
+pub fn set_tunables(get: &dyn Fn(&str) -> Option<i32>) {
+    if let Some(v) = get("hw.drmn.kms") {
+        // Relaxed: a tunable, read at start.
+        KMS.store(v != 0, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -223,6 +237,11 @@ impl Driver for Drmn {
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
         let unit = cx.unit();
+        if let Backend::Amd(a) = &self.backend
+            && KMS.load(core::sync::atomic::Ordering::Relaxed)
+        {
+            a.register_kms(cx.sleepable());
+        }
         bus::manager().sysctl(cx.sleepable(), &mut |t| {
             let Some(node) = bus::device_node(t, Self::NAME, unit) else {
                 return;
@@ -235,7 +254,10 @@ impl Driver for Drmn {
         Ok(())
     }
 
-    fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {
+    fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
+        if let Backend::Amd(a) = &self.backend {
+            a.unregister_kms(cx.sleepable());
+        }
         if let Backend::Nvidia { identity, control } = &self.backend {
             let _ = identity;
             // The flush registers must not point at memory that is freed.

@@ -221,6 +221,12 @@ impl<B> MmioGrant<B> {
     pub fn sharing(&self) -> Sharing {
         self.sharing
     }
+
+    /// The physical address of the first byte of the range.
+    #[must_use]
+    pub fn phys(&self) -> u64 {
+        self.pa
+    }
 }
 
 impl<B> core::fmt::Debug for MmioGrant<B> {

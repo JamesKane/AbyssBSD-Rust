@@ -31,7 +31,7 @@ use sync::SpinLock;
 use vgapci::Aperture;
 
 /// The GPU's register window, for `amdgpu`'s sequences.
-struct Bar5<'a>(&'a Aperture);
+pub(crate) struct Bar5<'a>(pub(crate) &'a Aperture);
 
 impl regs::Window for Bar5<'_> {
     fn read32(&self, offset: usize) -> u32 {
@@ -61,6 +61,8 @@ pub(crate) struct Amd {
     table: SpinLock<Option<Discovery>>,
     /// Whether the host-data-path flush has been set up.
     hdp_ready: core::sync::atomic::AtomicBool,
+    /// The graphics card, once registered.
+    kms: SpinLock<Option<(Arc<amd_kms::AmdKms>, Arc<drm::Card>)>>,
 }
 
 impl core::fmt::Debug for Amd {
@@ -93,6 +95,7 @@ impl Amd {
             gpu,
             table: SpinLock::new(None),
             hdp_ready: core::sync::atomic::AtomicBool::new(false),
+            kms: SpinLock::new(None),
         }
     }
 
@@ -356,6 +359,63 @@ impl Amd {
             }
         }
         Ok(())
+    }
+
+    /// Makes the display the firmware left a graphics card, and takes over
+    /// from the firmware framebuffer's card, if this is the display the
+    /// console shows (docs/GRAPHICS.md §16.3). Logs why not otherwise.
+    pub(crate) fn register_kms(&self, s: &sched::Sleepable) {
+        if self.kms.lock().is_some() {
+            return;
+        }
+        let Ok(gpu) = self.gpu() else {
+            return;
+        };
+        if self.table.lock().is_none() && self.discover().is_err() {
+            return;
+        }
+        {
+            let cache = self.table.lock();
+            let Some(d) = cache.as_ref() else {
+                return;
+            };
+            if let Err(skip) = display::check(d) {
+                self.log(format_args!("no graphics card: {skip:?}"));
+                return;
+            }
+        }
+        let card = match crate::kms::card(&gpu) {
+            Ok(c) => c,
+            Err(e) => {
+                self.log(format_args!("no graphics card: {e:?}"));
+                return;
+            }
+        };
+        let node = match drm::register(card.clone()) {
+            Ok(n) => n,
+            Err(e) => {
+                self.log(format_args!("graphics card not registered: {e:?}"));
+                return;
+            }
+        };
+        self.log(format_args!(
+            "graphics card dri/card{} over the firmware's display",
+            node.unit()
+        ));
+        let gone = drm::retire_firmware_cards(s);
+        if gone > 0 {
+            self.log(format_args!("took over from the firmware framebuffer card"));
+        }
+        *self.kms.lock() = Some((card, node));
+    }
+
+    /// Takes the card away and shows the firmware's picture again.
+    pub(crate) fn unregister_kms(&self, s: &sched::Sleepable) {
+        let held = self.kms.lock().take();
+        if let Some((card, node)) = held {
+            card.restore();
+            node.unregister(s);
+        }
     }
 
     /// A one-line summary of the cached table, for a sysctl.

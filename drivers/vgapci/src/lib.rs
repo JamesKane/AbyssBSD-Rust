@@ -114,6 +114,13 @@ impl Aperture {
         true
     }
 
+    /// The physical address of the start of the VRAM aperture, if there is
+    /// one.
+    #[must_use]
+    pub fn vram_phys(&self) -> Option<u64> {
+        self.vram.as_ref().map(|(m, _)| m.phys())
+    }
+
     /// The size of the VRAM aperture, if there is one.
     #[must_use]
     pub fn vram_len(&self) -> Option<usize> {

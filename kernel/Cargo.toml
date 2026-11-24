@@ -30,6 +30,7 @@ bootproto = { path = "../boot/bootproto" }
 bus = { path = "../sys/bus" }
 drm = { path = "../sys/drm" }
 drm-fourcc = { path = "../lib/drm-fourcc" }
+amd-kms = { path = "../drivers/amd-kms" }
 gop-kms = { path = "../drivers/gop-kms" }
 evdev = { path = "../sys/evdev" }
 input = { path = "../sys/input" }
@@ -73,6 +74,7 @@ security = { path = "../sys/security" }
 smbios = { path = "../lib/smbios" }
 mbuf = { path = "../sys/mbuf" }
 net = { path = "../sys/net" }
+drmn = { path = "../drivers/drmn" }
 nvme = { path = "../drivers/nvme" }
 socket = { path = "../sys/socket" }
 inet = { path = "../sys/inet" }

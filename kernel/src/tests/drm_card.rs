@@ -214,3 +214,99 @@ ktest! {
         assert_eq!(r.err(), Some(Errno::ENODEV));
     }
 }
+
+/// A display's video memory, sparse, and what it was told to show.
+struct HeapDisplay {
+    mem: SpinLock<alloc::collections::BTreeMap<usize, u8>>,
+    shown: SpinLock<Vec<usize>>,
+}
+
+impl amd_kms::Display for HeapDisplay {
+    fn write(&self, offset: usize, data: &[u8]) {
+        let mut m = self.mem.lock();
+        for (i, b) in data.iter().enumerate() {
+            m.insert(offset + i, *b);
+        }
+    }
+    fn flush(&self) {}
+    fn show(&self, offset: usize) {
+        self.shown.lock().push(offset);
+    }
+    fn pending(&self) -> bool {
+        false
+    }
+    fn delay_us(&self, _: u32) {}
+    fn usable(&self) -> usize {
+        256 << 20
+    }
+}
+
+fn shows_at(d: &HeapDisplay, base: usize, n: u32) -> bool {
+    let m = d.mem.lock();
+    (0..H).all(|y| {
+        (0..W).all(|x| {
+            let at = base + (y * W + x) * 4;
+            (0..4).all(|k| m.get(&(at + k)) == Some(&pixel(n, x, y).to_le_bytes()[k]))
+        })
+    })
+}
+
+ktest! {
+    /// The Radeon's card on the real kernel: a commit draws the buffer
+    /// into the back surface and flips to it, the next into the other,
+    /// and turning the controller off returns to the firmware's surface.
+    fn the_radeon_card_copies_into_the_back_surface_and_flips() {
+        let s = cx();
+        let display = Arc::new(HeapDisplay {
+            mem: SpinLock::new(alloc::collections::BTreeMap::new()),
+            shown: SpinLock::new(Vec::new()),
+        });
+        let driver = amd_kms::create(
+            amd_kms::Geometry { width: u32::try_from(W).unwrap(), height: u32::try_from(H).unwrap() },
+            display.clone(),
+        )
+        .expect("a card for the display");
+        let card = drm::register(driver).expect("the card registers");
+        let f = card.open_file().expect("an open file");
+        let kms = card.driver().kms().expect("a display");
+        let (crtc, conn) = (kms.crtc_ids()[0], kms.connector_ids()[0]);
+        let (fb1, _) = make_frame(&f, 1);
+        let (fb2, _) = make_frame(&f, 2);
+        assert!(display.shown.lock().is_empty(), "nothing is shown before it is asked for");
+
+        let mode = DrmModeModeinfo {
+            clock: u32::try_from(W * H * 60 / 1000).unwrap(),
+            hdisplay: u16::try_from(W).unwrap(),
+            hsync_start: u16::try_from(W).unwrap(),
+            hsync_end: u16::try_from(W).unwrap(),
+            htotal: u16::try_from(W).unwrap(),
+            vdisplay: u16::try_from(H).unwrap(),
+            vsync_start: u16::try_from(H).unwrap(),
+            vsync_end: u16::try_from(H).unwrap(),
+            vtotal: u16::try_from(H).unwrap(),
+            vrefresh: 60,
+            flags: DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC,
+            ..Default::default()
+        };
+        let set = DrmModeCrtc { crtc_id: crtc, fb_id: fb1, mode_valid: 1, mode, ..Default::default() };
+        f.set_crtc(&s, &set, &[conn]).expect("the controller is set");
+        let (a, b) = (16 << 20, 32 << 20);
+        assert_eq!(*display.shown.lock(), alloc::vec![a], "the first picture is drawn on surface A and shown");
+        assert!(shows_at(&display, a, 1), "frame 1 is in surface A, opaque");
+
+        ctl(
+            &f,
+            DRM_IOCTL_MODE_PAGE_FLIP,
+            &DrmModeCrtcPageFlip { crtc_id: crtc, fb_id: fb2, flags: 0, reserved: 0, user_data: 0 },
+        )
+        .expect("a flip");
+        assert_eq!(*display.shown.lock(), alloc::vec![a, b], "the next picture goes to the other surface");
+        assert!(shows_at(&display, b, 2), "frame 2 is in surface B");
+        assert!(shows_at(&display, a, 1), "surface A still holds frame 1, which was on show");
+
+        let off = DrmModeCrtc { crtc_id: crtc, fb_id: 0, ..Default::default() };
+        f.set_crtc(&s, &off, &[]).expect("off");
+        assert_eq!(display.shown.lock().last(), Some(&0), "off returns to the firmware's surface");
+        card.unregister(&s);
+    }
+}

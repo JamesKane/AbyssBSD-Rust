@@ -497,6 +497,13 @@ impl Manager {
         self.platform.sysctl(s, f);
     }
 
+    /// The physical range of the loader's framebuffer the kernel's console
+    /// draws on, if there is one.
+    #[must_use]
+    pub fn console_framebuffer(&self) -> Option<(u64, u64)> {
+        self.platform.console_framebuffer()
+    }
+
     pub(crate) fn platform(&self) -> &'static dyn Platform {
         self.platform
     }

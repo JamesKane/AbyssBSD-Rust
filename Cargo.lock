@@ -76,6 +76,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "amd-kms"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "drm",
+ "drm-fourcc",
+ "gop-kms",
+ "kms-check",
+ "sync",
+]
+
+[[package]]
 name = "amdgpu"
 version = "0.0.0"
 
@@ -380,9 +392,12 @@ name = "drmn"
 version = "0.0.0"
 dependencies = [
  "abi",
+ "amd-kms",
  "amdgpu",
  "bus",
+ "drm",
  "nvgpu",
+ "sched",
  "sync",
  "sysctl",
  "vgapci",
@@ -712,6 +727,7 @@ dependencies = [
  "acpi-tables",
  "addr",
  "aio",
+ "amd-kms",
  "aml",
  "arch-aarch64",
  "arch-x86_64",
@@ -727,6 +743,7 @@ dependencies = [
  "driver-table",
  "drm",
  "drm-fourcc",
+ "drmn",
  "efi",
  "elf",
  "evdev",
