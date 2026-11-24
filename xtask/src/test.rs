@@ -369,6 +369,9 @@ struct BootCase {
     /// on which the kernel's `page_cache_larger_than_memory` test writes
     /// more file data than there is memory.
     lowmem: bool,
+    /// QEMU: an Intel HD Audio controller (`ich9-intel-hda`) with a duplex
+    /// codec on a null audio back end (docs/AUDIO.md section 7.2).
+    audio: bool,
 }
 
 /// The low-memory cases' RAM.
@@ -390,6 +393,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect: None,
         expect_saved: None,
         lowmem: false,
+        audio: false,
     },
     BootCase {
         name: "aarch64",
@@ -403,6 +407,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect: None,
         expect_saved: None,
         lowmem: false,
+        audio: false,
     },
     BootCase {
         name: "aarch64-el2",
@@ -418,6 +423,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect: Some("power: off (PSCI SYSTEM_OFF)"),
         expect_saved: None,
         lowmem: false,
+        audio: false,
     },
     BootCase {
         name: "aarch64-smmu",
@@ -435,6 +441,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect: Some("smmu0: <ARM System Memory Management Unit> on acpi0"),
         expect_saved: None,
         lowmem: false,
+        audio: false,
     },
     BootCase {
         name: "aarch64-warm-reset",
@@ -450,6 +457,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect: None,
         expect_saved: None,
         lowmem: false,
+        audio: false,
     },
     BootCase {
         name: "aarch64-smmu-warm-reset",
@@ -467,6 +475,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect: Some("smmu0: <ARM System Memory Management Unit> on acpi0"),
         expect_saved: Some("logring: devices shut down before the reset"),
         lowmem: false,
+        audio: false,
     },
     BootCase {
         name: "x86_64-warm-reset",
@@ -481,6 +490,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect: Some("power: off (ACPI S5)"),
         expect_saved: None,
         lowmem: false,
+        audio: false,
     },
     BootCase {
         name: "aarch64-panic-reset",
@@ -498,6 +508,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect: None,
         expect_saved: Some("Automatic reboot in 1 seconds"),
         lowmem: false,
+        audio: false,
     },
     BootCase {
         name: "x86_64-panic-reset",
@@ -513,6 +524,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect: None,
         expect_saved: Some("Automatic reboot in 1 seconds"),
         lowmem: false,
+        audio: false,
     },
     BootCase {
         name: "x86_64-watchdog",
@@ -529,6 +541,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect: None,
         expect_saved: Some("watchdog: patting stopped (watchdogd killed)"),
         lowmem: false,
+        audio: false,
     },
     BootCase {
         name: "x86_64-bhyve",
@@ -543,6 +556,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect: Some("power: off (ACPI S5)"),
         expect_saved: None,
         lowmem: false,
+        audio: false,
     },
     BootCase {
         name: "aarch64-lowmem",
@@ -558,6 +572,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect: Some("lowmem: read back:"),
         expect_saved: None,
         lowmem: true,
+        audio: false,
     },
     BootCase {
         name: "x86_64-lowmem",
@@ -571,6 +586,37 @@ const BOOT_CASES: &[BootCase] = &[
         expect: Some("lowmem: read back:"),
         expect_saved: None,
         lowmem: true,
+        audio: false,
+    },
+    BootCase {
+        name: "x86_64-audio",
+        vmm: Vmm::Qemu,
+        arch: Arch::X86_64,
+        el2: false,
+        iommu: false,
+        warm_reset: false,
+        // The controller, its codec, and the codec's audio function group
+        // are in the tree (the kernel test looks for them).
+        cmdline: "abyss.test.audio=1",
+        pass_status: 33,
+        expect: None,
+        expect_saved: None,
+        lowmem: false,
+        audio: true,
+    },
+    BootCase {
+        name: "aarch64-audio",
+        vmm: Vmm::Qemu,
+        arch: Arch::Aarch64,
+        el2: false,
+        iommu: false,
+        warm_reset: false,
+        cmdline: "abyss.test.audio=1",
+        pass_status: 0,
+        expect: None,
+        expect_saved: None,
+        lowmem: false,
+        audio: true,
     },
 ];
 
@@ -1176,6 +1222,16 @@ fn boot(
                 "virtio-blk-pci,drive=fat0".into(),
             ]),
         }
+    }
+    if case.audio && case.vmm == Vmm::Qemu {
+        devices.extend([
+            "-audiodev".into(),
+            "none,id=snd0".into(),
+            "-device".into(),
+            "ich9-intel-hda".into(),
+            "-device".into(),
+            "hda-duplex,audiodev=snd0".into(),
+        ]);
     }
     let vm = Vm {
         el2: case.el2,

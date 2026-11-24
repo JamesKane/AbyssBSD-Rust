@@ -4785,6 +4785,40 @@ ktest! {
 }
 
 ktest! {
+    /// The audio cases (`abyss.test.audio`) boot QEMU's Intel HD Audio
+    /// controller with a duplex codec: as on FreeBSD, `hdac0` has `hdacc0`
+    /// under it and that has `hdaa0`, each attached, with FreeBSD's
+    /// descriptions.
+    fn hda_controller_codec_and_function_group() {
+        if !crate::boot::flag("abyss.test.audio") {
+            return;
+        }
+        let s = cx();
+        let m = bus::manager();
+        let nexus = crate::devices::nexus();
+        let (_, hdac) = find_named(m, &s, nexus, "hdac0").expect("hdac0");
+        let (p, hdacc) = find_named(m, &s, hdac, "hdacc0").expect("hdacc0 under hdac0");
+        assert_eq!(p, hdac);
+        let (p, hdaa) = find_named(m, &s, hdacc, "hdaa0").expect("hdaa0 under hdacc0");
+        assert_eq!(p, hdacc);
+        for (id, name) in [(hdac, "hdac0"), (hdacc, "hdacc0"), (hdaa, "hdaa0")] {
+            assert_eq!(m.state(id, &s), Some(bus::NodeState::Attached), "{name}");
+        }
+        let (ctlr, codec, group) = (
+            m.description(hdac, &s).unwrap_or_default(),
+            m.description(hdacc, &s).unwrap_or_default(),
+            m.description(hdaa, &s).unwrap_or_default(),
+        );
+        assert!(ctlr.ends_with(" HDA Controller"), "{ctlr:?}");
+        assert!(codec.ends_with(" HDA CODEC"), "{codec:?}");
+        // `hdaa_probe`: the codec's name, then ` Audio Function Group`.
+        let name = codec.strip_suffix(" HDA CODEC").unwrap_or(&codec);
+        assert_eq!(group, alloc::format!("{name} Audio Function Group"));
+        kprintln!("hdac0: <{ctlr}> hdacc0: <{codec}> hdaa0: <{group}>");
+    }
+}
+
+ktest! {
     fn random_is_seeded_and_fed() {
         let s = cx();
         assert!(random::seeded(), "seeded at boot (EFI_RNG, or the CPU's RNG)");

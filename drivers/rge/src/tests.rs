@@ -412,7 +412,45 @@ fn rtl8125d_revision() {
     assert!(m.supported() && m.is_r25d() && !m.is_r26());
     // The other RTL8125 revisions are identified, not programmed.
     assert!(!MacType::R25.supported() && !MacType::R25B.supported());
-    assert!(!MacType::R25D2.supported());
+    assert!(MacType::R25D2.supported() && MacType::R25D2.is_r25d());
+}
+
+/// The RTL8125D's second revision: the MAC breakpoint table on page 0
+/// (66 words, then zeros to 0xf9f6), its version on page 2, and its own
+/// final breakpoints.
+#[test]
+fn rtl8125d_2_mac_microcode() {
+    let mut c = Chip::new(Model::default(), MacType::R25D2);
+    c.chip_init().unwrap();
+    let ev = log(&c);
+    let words: Vec<(u16, u16)> = ev
+        .iter()
+        .filter_map(|e| match *e {
+            Ev::Mac(r, v) if (0xf800..0xfa00).contains(&r) => Some((r, v)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(words.len(), 3 * 256);
+    let page = |p: usize| &words[p * 256..(p + 1) * 256];
+    assert_eq!(page(0)[0], (0xf800, 0xe010));
+    assert_eq!(page(0)[65].0, 0xf882);
+    assert!(page(0)[66..252].iter().all(|w| w.1 == 0));
+    assert!(page(1).iter().all(|w| w.1 == 0));
+    assert_eq!(
+        page(2)[252..].iter().map(|w| w.1).collect::<Vec<_>>(),
+        [0x6938, 0x0a19, 0x030e, 0x0b2f]
+    );
+    let tail: Vec<(u16, u16)> = ev
+        .iter()
+        .filter_map(|e| match *e {
+            Ev::Mac(r, v) if matches!(r, 0xfc26 | 0xfc28 | 0xfc48) => Some((r, v)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        &tail[tail.len() - 3..],
+        [(0xfc26, 0x8000), (0xfc28, 0x2382), (0xfc48, 1)]
+    );
 }
 
 /// The RTL8125D's MAC microcode: page 0 holds the nine-word patch, the
@@ -511,6 +549,35 @@ fn rtl8125d_phy_microcode_and_config() {
     // Only 2.5 Gb/s is the PHY's to advertise: 5 Gb/s stays as it was.
     c.autoneg();
     assert_eq!(c.read_phy_ocp(0xa5d4) & 0x0180, 0x0080);
+}
+
+/// The RTL8125D's second revision loads its PHY microcode in two parts
+/// (1269 words, then the rest), the patch window reopened between them;
+/// the configuration follows, and the version is recorded.
+#[test]
+fn rtl8125d_2_phy_microcode_and_config() {
+    let mut c = Chip::new(Model::default(), MacType::R25D2);
+    c.phy_config().unwrap();
+    let ev = log(&c);
+    let mcu = generated::R25D_2_PHY_MCU;
+    let evs: Vec<(u16, u16)> = ev
+        .iter()
+        .filter_map(|e| match *e {
+            Ev::Phy(r, v) => Some((r, v)),
+            _ => None,
+        })
+        .collect();
+    let at = evs.iter().position(|&w| w == mcu[0]).unwrap();
+    assert_eq!(&evs[at..at + 1269], &mcu[..1269]);
+    let gap: Vec<u16> = evs[at + 1269..at + 1271].iter().map(|w| w.0).collect();
+    assert_eq!(gap, [0xb820, 0xb820], "release and reopen");
+    let rest = &mcu[1269..];
+    assert_eq!(&evs[at + 1271..at + 1271 + rest.len()], rest);
+    let s = c.regs.0.borrow();
+    assert_eq!(s.ind.get(&0x801e), Some(&0x0031), "version recorded");
+    // The configuration ran to its end, and EEE ended off.
+    assert_eq!(s.phy.get(&0xa442).copied().unwrap_or(0) & 0x0080, 0x0080);
+    assert_eq!(s.phy.get(&0xa432).copied().unwrap_or(0) & 0x0010, 0x0010);
 }
 
 /// The MAC setup the RTL8125D differs in (`rge_init_locked`).

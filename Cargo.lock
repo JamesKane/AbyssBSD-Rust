@@ -317,6 +317,7 @@ dependencies = [
  "devtree",
  "gpiobus",
  "hcons",
+ "hda-driver",
  "hidbus",
  "hkbd",
  "hms",
@@ -342,6 +343,7 @@ dependencies = [
  "uart",
  "umass",
  "usbus",
+ "vgapci",
  "virtio",
  "virtio-blk",
  "virtio-input",
@@ -489,6 +491,23 @@ dependencies = [
  "devtree",
  "hid",
  "hidbus",
+]
+
+[[package]]
+name = "hda"
+version = "0.0.0"
+
+[[package]]
+name = "hda-driver"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+ "hda",
+ "pci",
+ "regs",
+ "sched",
+ "vm",
 ]
 
 [[package]]
@@ -1246,6 +1265,14 @@ dependencies = [
  "sync",
  "ustar",
  "vm",
+]
+
+[[package]]
+name = "vgapci"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
 ]
 
 [[package]]

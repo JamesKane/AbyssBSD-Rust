@@ -23,6 +23,8 @@ pci = { path = "../../sys/pci" }
 rge = { path = "../../drivers/rge" }
 uart = { path = "../../drivers/uart" }
 umass = { path = "../../drivers/umass" }
+hda-driver = { path = "../../drivers/hda" }
+vgapci = { path = "../../drivers/vgapci" }
 usbus = { path = "../../sys/usb" }
 virtio = { path = "../../sys/virtio" }
 virtio-blk = { path = "../../drivers/virtio-blk" }

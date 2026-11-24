@@ -535,6 +535,14 @@ pub fn chips(rgereg_h: &str, microcode_h: &str, hw_c: &str) -> Result<Vec<Chip>,
         phy_mcu: pair_array(&micro, "mac_r25d_1_mcu")?,
         phy_config: program(&hw, "rge_phy_config_mac_r25d_1", &defs)?,
     });
+    // Its second revision: the MAC microcode is a table (page 0 only) and
+    // the PHY microcode loads in two parts.
+    out.push(Chip {
+        name: "R25D_2",
+        mac_bps: pair_array(&micro, "rtl8125d_2_mac_bps")?,
+        phy_mcu: pair_array(&micro, "mac_r25d_2_mcu")?,
+        phy_config: program(&hw, "rge_phy_config_mac_r25d_2", &defs)?,
+    });
     Ok(out)
 }
 
