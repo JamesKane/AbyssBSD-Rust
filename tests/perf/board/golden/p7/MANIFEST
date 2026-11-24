@@ -1,5 +1,5 @@
-suites p4 p5 p6
-inputs 8e11446b5f97b44a7967ea982840aff8
+suites p7
+inputs 56239f3c9fcaaa0dd5514a658975c5d3
 kernel GENERIC-HMP-IOMMU-NODEBUG 16.0-CURRENT
 date 2026-11-24
 runs 3

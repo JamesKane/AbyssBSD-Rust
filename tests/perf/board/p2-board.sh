@@ -12,6 +12,12 @@
 # --platform opi6p --dir WORKDIR` makes the report. Rerun with the same
 # WORKDIR to resume: runs with a complete log are kept.
 #
+# FreeBSD's side is a golden set (golden/p2/, its MANIFEST says what it was
+# made from), as perf-board.sh's: a run with a log there is copied into
+# WORKDIR instead of run, and the set is refused when kbench.ko or
+# kbench-run.sh changed on the board (ABYSS_GOLDEN=0 ignores it,
+# ABYSS_GOLDEN=refresh runs only FreeBSD's side and rewrites it).
+#
 # Usage: p2-board.sh WORKDIR RUNS
 #
 # AbyssBSD's command line (EFI/ABYSS/CMDLINE on its ESP, the Samsung's
@@ -29,6 +35,9 @@ CLASSES=${P2_CLASSES:-"big:2,0,1,10,11 mid:2,6,7,8,9 little:6,2,3,4,5 all:0,1,2,
 NCLASS=$(echo $CLASSES | wc -w)
 SSHOPT="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
 mkdir -p "$S"
+GOLDEN_DIR=$(cd "$(dirname "$0")" && pwd)/golden/p2
+GOLDEN=${ABYSS_GOLDEN:-1}
+INPUTS="kbench-run.sh kbench.ko"
 fb() { timeout "${T:-120}" ssh $SSHOPT jkane@$B "su root -c '$*' < /dev/null" 2>/dev/null; }
 # AbyssBSD's host key is kept apart from FreeBSD's, in WORKDIR/abyss_known_hosts.
 ab() { timeout "${T:-120}" ssh $SSHOPT -o UserKnownHostsFile=$S/abyss_known_hosts root@$B "$*" 2>/dev/null; }
@@ -78,6 +87,22 @@ restore() {
 }
 trap restore EXIT
 
+inputs_hash() {
+	to_freebsd
+	fb "df /mnt | grep -q kyuawork || { fsck_ffs -p /dev/gpt/kyuawork; mount /dev/gpt/kyuawork /mnt; }; cd /mnt/perf && sha256 -q $INPUTS | md5 -q"
+}
+golden_ok=
+if [ "$GOLDEN" = 1 ] && [ -f "$GOLDEN_DIR/MANIFEST" ]; then
+	want=$(sed -n 's/^inputs //p' "$GOLDEN_DIR/MANIFEST")
+	now=$(inputs_hash)
+	if [ "$now" = "$want" ]; then
+		golden_ok=1
+	else
+		log "golden set is stale: the inputs on the board are $now, it was made with $want (ABYSS_GOLDEN=refresh makes a new one, ABYSS_GOLDEN=0 ignores it)"
+		exit 1
+	fi
+fi
+
 complete() { [ -f "$1" ] && [ "$(grep -c '^kbench end p2$' "$1")" -eq "$NCLASS" ]; }
 
 for run in $(seq 0 $((RUNS - 1))); do
@@ -85,6 +110,13 @@ for run in $(seq 0 $((RUNS - 1))); do
 	for side in $order; do
 		out=$(printf '%s/%s-%02d.log' "$S" "$side" "$run")
 		complete "$out" && continue
+		[ "$GOLDEN" = refresh ] && [ "$side" = abyss ] && continue
+		g=$(printf '%s/freebsd-%02d.log' "$GOLDEN_DIR" "$run")
+		if [ "$side" = freebsd ] && [ -n "$golden_ok" ] && [ -f "$g" ]; then
+			log "run $((run + 1))/$RUNS: freebsd from the golden set"
+			cp "$g" "$out"
+			continue
+		fi
 		rm -f "$out.tmp"
 		start=$(date +%s)
 		for class in $CLASSES; do
@@ -139,6 +171,17 @@ for run in $(seq 0 $((RUNS - 1))); do
 			fi
 		done
 		mv "$out.tmp" "$out"
+		if [ "$GOLDEN" = refresh ] && [ "$side" = freebsd ]; then
+			mkdir -p "$GOLDEN_DIR"
+			cp "$out" "$GOLDEN_DIR/freebsd-$(printf %02d $run).log"
+			{
+				echo "suites p2"
+				echo "inputs $(inputs_hash)"
+				echo "kernel $(sed -n 's/^kbench env side=freebsd ident=//p' "$out" | head -1)"
+				echo "date $(date +%F)"
+				echo "runs $((run + 1))"
+			} > "$GOLDEN_DIR/MANIFEST"
+		fi
 		log "run $((run + 1)) on $side done in $(( $(date +%s) - start )) s"
 	done
 done
