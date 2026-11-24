@@ -234,7 +234,7 @@ fn tls_header(val: &[u8]) -> Result<TlsEnable, Errno> {
 fn tls_key(addr: u64, len: i32) -> Result<Vec<u8>, Errno> {
     let mut k = alloc::vec![0; usize::try_from(len).unwrap_or(0)];
     if !k.is_empty() {
-        uaccess::copy_in(&mut k, addr).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_in(&mut k, addr)?;
     }
     Ok(k)
 }
@@ -558,7 +558,7 @@ pub(super) fn recvit(
     {
         let from = from.encode();
         let k = (len as usize).min(from.len());
-        uaccess::copy_out(addr, &from[..k]).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_out(addr, &from[..k])?;
         namelen = u32::try_from(k).unwrap_or(0);
         crate::ktrace::sockaddr(s, &from);
     }
@@ -575,7 +575,7 @@ pub(super) fn recvit(
                 outflags |= abi::socket::MSG_CTRUNC;
                 break;
             }
-            uaccess::copy_out(addr + at as u64, m).map_err(|_| Errno::EFAULT)?;
+            uaccess::copy_out(addr + at as u64, m)?;
             at += m.len();
             left -= m.len();
         }

@@ -75,9 +75,7 @@ impl UserIo {
         // as `read`'s is (FreeBSD's `UIO_SMALLIOV` keeps a few on the
         // stack).
         if n == 1 {
-            let e = UserPtr::<Iovec>::new(iov)
-                .read()
-                .map_err(|_| Errno::EFAULT)?;
+            let e = UserPtr::<Iovec>::new(iov).read()?;
             return Self::one(e.iov_base, e.iov_len);
         }
         let mut v = Vec::new();
@@ -85,9 +83,7 @@ impl UserIo {
         let mut resid: usize = 0;
         for i in 0..n {
             let at = iov + (i * size_of::<Iovec>()) as u64;
-            let e = UserPtr::<Iovec>::new(at)
-                .read()
-                .map_err(|_| Errno::EFAULT)?;
+            let e = UserPtr::<Iovec>::new(at).read()?;
             resid = usize::try_from(e.iov_len)
                 .ok()
                 .and_then(|l| resid.checked_add(l))

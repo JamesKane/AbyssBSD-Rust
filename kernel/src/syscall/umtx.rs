@@ -102,7 +102,7 @@ impl Abi {
     fn timeout(self, at: u64) -> Result<Timespec, Errno> {
         let mut b = [0u8; 16];
         let b = &mut b[..self.timespec()];
-        copy_in(b, at).map_err(|_| Errno::EFAULT)?;
+        copy_in(b, at)?;
         valid(self.decode_timespec(b))
     }
 
@@ -119,7 +119,7 @@ impl Abi {
         }
         let mut b = [0u8; 24];
         let b = &mut b[..self.umtx_time_size()];
-        copy_in(b, at).map_err(|_| Errno::EFAULT)?;
+        copy_in(b, at)?;
         let n = self.timespec();
         let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap_or_default());
         let (flags, clock) = (u32_at(n), u32_at(n + 4));
@@ -243,7 +243,7 @@ pub(super) fn umtx_op(
             while left > 0 {
                 let n = left.min(BATCH);
                 let mut raw = [0u8; BATCH * 8];
-                copy_in(&mut raw[..n * width], at).map_err(|_| Errno::EFAULT)?;
+                copy_in(&mut raw[..n * width], at)?;
                 let mut addrs = [0u64; BATCH];
                 for (i, a) in addrs[..n].iter_mut().enumerate() {
                     let b = &raw[i * width..(i + 1) * width];
@@ -276,7 +276,7 @@ pub(super) fn umtx_op(
         UMTX_OP_SET_CEILING => {
             let old = u.set_ceiling(&cx, obj, int(val).cast_unsigned())?;
             if uaddr != 0 {
-                uaccess::store_u32(uaddr, old).map_err(|_| Errno::EFAULT)?;
+                uaccess::store_u32(uaddr, old)?;
             }
             Ok(0)
         }
@@ -323,8 +323,7 @@ pub(super) fn umtx_op(
                 let mut b = [0u8; 16];
                 let b = &mut b[..abi.timespec()];
                 abi.encode_timespec(&t.time, b);
-                copy_out(uaddr2.wrapping_add(abi.umtx_time_size() as u64), b)
-                    .map_err(|_| Errno::EFAULT)?;
+                copy_out(uaddr2.wrapping_add(abi.umtx_time_size() as u64), b)?;
             }
             ok(r)
         }
@@ -337,7 +336,7 @@ pub(super) fn umtx_op(
                 return Err(Errno::EINVAL);
             }
             let mut b = [0u8; 24];
-            copy_in(&mut b[..size], uaddr).map_err(|_| Errno::EFAULT)?;
+            copy_in(&mut b[..size], uaddr)?;
             let field = |i: usize| {
                 let b = &b[i * width..(i + 1) * width];
                 if width == 4 {

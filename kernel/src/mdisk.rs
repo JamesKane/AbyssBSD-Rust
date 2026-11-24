@@ -331,10 +331,7 @@ fn open_backing(
 ) -> Result<(Backing, Vec<u8>, alloc::string::String), Errno> {
     let at = offset_of!(MdIoctl, md_file);
     let ptr = u64::from_ne_bytes(arg[at..at + 8].try_into().map_err(|_| Errno::EINVAL)?);
-    let path = crate::uaccess::copy_in_str_vec(ptr, abi::fcntl::PATH_MAX).map_err(|e| match e {
-        crate::uaccess::StrError::Fault => Errno::EFAULT,
-        crate::uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
-    })?;
+    let path = crate::uaccess::copy_in_str_vec(ptr, abi::fcntl::PATH_MAX)?;
     let p = crate::proc::Process::current().ok_or(Errno::EINVAL)?;
     let v = crate::fs::lookup(s, &p, crate::fs::At::Cwd, &path, crate::fs::Walk::FOLLOW)?;
     let write = options & MD_READONLY == 0;
@@ -448,7 +445,7 @@ fn query(arg: &mut [u8]) -> Result<(), Errno> {
         if ptr != 0 {
             let mut out = path.clone();
             out.push(0);
-            crate::uaccess::copy_out(ptr, &out).map_err(|_| Errno::EFAULT)?;
+            crate::uaccess::copy_out(ptr, &out)?;
         }
     }
     Ok(())

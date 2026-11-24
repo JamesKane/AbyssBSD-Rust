@@ -489,7 +489,7 @@ pub(crate) fn user(s: &Sleepable, addr: u64, len: usize) -> Result<(), Errno> {
         return Err(Errno::EINVAL);
     }
     let mut data = alloc::vec![0u8; len];
-    crate::uaccess::copy_in(&mut data, addr).map_err(|_| Errno::EFAULT)?;
+    crate::uaccess::copy_in(&mut data, addr)?;
     let Some(e) = Entered::new() else {
         return Ok(());
     };

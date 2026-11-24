@@ -116,14 +116,14 @@ pub(crate) fn kenv(what: u64, name: u64, value: u64, len: u64) -> crate::syscall
         KENV_UNSET => current()?.priv_check(Priv::KenvUnset)?,
         _ => {}
     }
-    let name = uaccess::copy_in_str_vec(name, MNAMELEN + 1).map_err(str_errno)?;
+    let name = uaccess::copy_in_str_vec(name, MNAMELEN + 1)?;
     match what {
         KENV_GET => {
             let v = get(&name).ok_or(Errno::ENOENT)?;
             let n = (v.len() + 1).min(usize::try_from(len).unwrap_or(0));
             let mut out = v;
             out.push(0);
-            uaccess::copy_out(value, &out[..n]).map_err(|_| Errno::EFAULT)?;
+            uaccess::copy_out(value, &out[..n])?;
             Ok(n as u64)
         }
         KENV_SET => {
@@ -131,7 +131,7 @@ pub(crate) fn kenv(what: u64, name: u64, value: u64, len: u64) -> crate::syscall
                 return Err(Errno::EINVAL);
             }
             let max = usize::try_from(len).unwrap_or(0).min(MVALLEN + 1);
-            let v = uaccess::copy_in_str_vec(value, max).map_err(str_errno)?;
+            let v = uaccess::copy_in_str_vec(value, max)?;
             set(&name, &v);
             Ok(0)
         }
@@ -162,21 +162,13 @@ fn dump(value: u64, len: i32) -> crate::syscall::SysResult {
         }
     }
     if value != 0 && len > 0 {
-        uaccess::copy_out(value, &out).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_out(value, &out)?;
     }
     Ok(if out.len() == needed {
         0
     } else {
         needed as u64
     })
-}
-
-/// `copyinstr`'s errors.
-fn str_errno(e: uaccess::StrError) -> Errno {
-    match e {
-        uaccess::StrError::Fault => Errno::EFAULT,
-        uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
-    }
 }
 
 /// The calling process.

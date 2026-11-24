@@ -264,7 +264,7 @@ impl BpfOpen {
                     if l.bfl_len < 1 {
                         return Err(Errno::ENOMEM);
                     }
-                    uaccess::copy_out(l.bfl_list, &dlt.to_ne_bytes()).map_err(|_| Errno::EFAULT)?;
+                    uaccess::copy_out(l.bfl_list, &dlt.to_ne_bytes())?;
                 }
                 l.bfl_len = 1;
                 put_u32(arg, l.bfl_len);

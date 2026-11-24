@@ -84,9 +84,7 @@ pub(super) fn clock_gettime(id: u64, tp: u64) -> SysResult {
         read(id)?
     };
     let ts = timespec(ns);
-    UserPtr::<Timespec>::new(tp)
-        .write(&ts)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<Timespec>::new(tp).write(&ts)?;
     Ok(0)
 }
 
@@ -95,9 +93,7 @@ pub(super) fn clock_getres(id: u64, tp: u64) -> SysResult {
     read(id)?;
     if tp != 0 {
         let res = 1_000_000_000 / crate::time::frequency().clamp(1, NANOS);
-        UserPtr::<Timespec>::new(tp)
-            .write(&timespec(res.max(1)))
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<Timespec>::new(tp).write(&timespec(res.max(1)))?;
     }
     Ok(0)
 }
@@ -110,15 +106,11 @@ pub(super) fn gettimeofday(tp: u64, tzp: u64) -> SysResult {
             tv_sec: i64::try_from(us / 1_000_000).unwrap_or(i64::MAX),
             tv_usec: i64::try_from(us % 1_000_000).unwrap_or(0),
         };
-        UserPtr::<Timeval>::new(tp)
-            .write(&tv)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<Timeval>::new(tp).write(&tv)?;
     }
     if tzp != 0 {
         // struct timezone: UTC.
-        UserPtr::<[i32; 2]>::new(tzp)
-            .write(&[0, 0])
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<[i32; 2]>::new(tzp).write(&[0, 0])?;
     }
     Ok(0)
 }
@@ -133,9 +125,7 @@ fn limit_index(which: u64) -> Result<usize, Errno> {
 /// `getrlimit(which, rlp)`.
 pub(super) fn getrlimit(which: u64, rlp: u64) -> SysResult {
     let l = process()?.limits.lock()[limit_index(which)?];
-    UserPtr::<Rlimit>::new(rlp)
-        .write(&l)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<Rlimit>::new(rlp).write(&l)?;
     Ok(0)
 }
 
@@ -163,9 +153,7 @@ pub(super) fn getrlimitusage(s: &Sleepable, which: u64, flags: u64, res: u64) ->
         c.ruid
     };
     let v = crate::kinfo::misc::usage_of(s, &p, which, uid).ok_or(Errno::ENXIO)?;
-    UserPtr::<u64>::new(res)
-        .write(&v)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<u64>::new(res).write(&v)?;
     Ok(0)
 }
 
@@ -178,9 +166,7 @@ pub(super) fn setrlimit(s: &Sleepable, which: u64, rlp: u64) -> SysResult {
     let i = limit_index(which)?;
     // In range: `limit_index` took it.
     let which = u32::try_from(which).unwrap_or(u32::MAX);
-    let mut l = UserPtr::<Rlimit>::new(rlp)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let mut l = UserPtr::<Rlimit>::new(rlp).read()?;
     for v in [&mut l.rlim_cur, &mut l.rlim_max] {
         if v.cast_signed() < 0 {
             *v = abi::resource::RLIM_INFINITY;

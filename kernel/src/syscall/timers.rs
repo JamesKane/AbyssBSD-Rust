@@ -80,9 +80,7 @@ pub(super) fn getitimer(s: &Sleepable, which: u64, itv: u64) -> SysResult {
         it_value: ns_tv(value),
     };
     crate::ktrace::structure_of(s, "itimerval", &it);
-    UserPtr::<Itimerval>::new(itv)
-        .write(&it)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<Itimerval>::new(itv).write(&it)?;
     Ok(0)
 }
 
@@ -91,9 +89,7 @@ pub(super) fn setitimer(s: &Sleepable, which: u64, itv: u64, oitv: u64) -> SysRe
     if itv == 0 {
         return getitimer(s, which, oitv);
     }
-    let it = UserPtr::<Itimerval>::new(itv)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let it = UserPtr::<Itimerval>::new(itv).read()?;
     let which = u32::try_from(which).map_err(|_| Errno::EINVAL)?;
     if which > ITIMER_PROF {
         return Err(Errno::EINVAL);
@@ -119,9 +115,7 @@ pub(super) fn setitimer(s: &Sleepable, which: u64, itv: u64, oitv: u64) -> SysRe
     };
     crate::ktrace::structure_of(s, "itimerval", &old);
     if oitv != 0 {
-        UserPtr::<Itimerval>::new(oitv)
-            .write(&old)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<Itimerval>::new(oitv).write(&old)?;
     }
     Ok(0)
 }
@@ -131,9 +125,7 @@ pub(super) fn ktimer_create(clock_id: u64, evp: u64, timerid: u64) -> SysResult 
     let sigev = if evp == 0 {
         None
     } else {
-        let e = UserPtr::<Sigevent>::new(evp)
-            .read()
-            .map_err(|_| Errno::EFAULT)?;
+        let e = UserPtr::<Sigevent>::new(evp).read()?;
         Some(Sigev {
             notify: e.sigev_notify,
             signo: e.sigev_signo.cast_unsigned(),
@@ -162,16 +154,12 @@ pub(super) fn ktimer_delete(timerid: u64) -> SysResult {
 
 /// `ktimer_settime(timerid, flags, value, ovalue)`.
 pub(super) fn ktimer_settime(timerid: u64, flags: u64, value: u64, ovalue: u64) -> SysResult {
-    let val = UserPtr::<Itimerspec>::new(value)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let val = UserPtr::<Itimerspec>::new(value).read()?;
     let old = process()?
         .timers()
         .settime(int(timerid), int(flags).cast_unsigned(), &val)?;
     if ovalue != 0 {
-        UserPtr::<Itimerspec>::new(ovalue)
-            .write(&old)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<Itimerspec>::new(ovalue).write(&old)?;
     }
     Ok(0)
 }
@@ -179,9 +167,7 @@ pub(super) fn ktimer_settime(timerid: u64, flags: u64, value: u64, ovalue: u64) 
 /// `ktimer_gettime(timerid, value)`.
 pub(super) fn ktimer_gettime(timerid: u64, value: u64) -> SysResult {
     let v = process()?.timers().gettime(int(timerid))?;
-    UserPtr::<Itimerspec>::new(value)
-        .write(&v)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<Itimerspec>::new(value).write(&v)?;
     Ok(0)
 }
 
@@ -243,17 +229,13 @@ fn timerfd_of(
 /// `timerfd_gettime(fd, curr_value)`.
 pub(super) fn timerfd_gettime(s: &Sleepable, fd: u64, curr: u64) -> SysResult {
     let (_f, t) = timerfd_of(s, fd, &crate::capsicum::rights::READ)?;
-    UserPtr::<Itimerspec>::new(curr)
-        .write(&t.gettime())
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<Itimerspec>::new(curr).write(&t.gettime())?;
     Ok(0)
 }
 
 /// `timerfd_settime(fd, flags, new_value, old_value)`.
 pub(super) fn timerfd_settime(s: &Sleepable, fd: u64, flags: u64, new: u64, old: u64) -> SysResult {
-    let new = UserPtr::<Itimerspec>::new(new)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let new = UserPtr::<Itimerspec>::new(new).read()?;
     let flags = int(flags).cast_unsigned();
     // The flags and values are checked before the descriptor.
     if flags & !(abi::event::TFD_TIMER_ABSTIME | abi::event::TFD_TIMER_CANCEL_ON_SET) != 0 {
@@ -264,9 +246,7 @@ pub(super) fn timerfd_settime(s: &Sleepable, fd: u64, flags: u64, new: u64, old:
     let (_f, t) = timerfd_of(s, fd, &crate::capsicum::rights::WRITE)?;
     let prev = t.settime(flags, &new)?;
     if old != 0 {
-        UserPtr::<Itimerspec>::new(old)
-            .write(&prev)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<Itimerspec>::new(old).write(&prev)?;
     }
     Ok(0)
 }
@@ -278,9 +258,7 @@ pub(super) fn specialfd(s: &Sleepable, ty: u64, req: u64, len: u64) -> SysResult
             if len != size_of::<SpecialfdEventfd>() as u64 {
                 return Err(Errno::EINVAL);
             }
-            let ae = UserPtr::<SpecialfdEventfd>::new(req)
-                .read()
-                .map_err(|_| Errno::EFAULT)?;
+            let ae = UserPtr::<SpecialfdEventfd>::new(req).read()?;
             let flags = ae.flags.cast_unsigned();
             if flags & !(EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE) != 0 {
                 return Err(Errno::EINVAL);
@@ -300,9 +278,7 @@ pub(super) fn specialfd(s: &Sleepable, ty: u64, req: u64, len: u64) -> SysResult
             if len != size_of::<SpecialfdInotify>() as u64 {
                 return Err(Errno::EINVAL);
             }
-            let ai = UserPtr::<SpecialfdInotify>::new(req)
-                .read()
-                .map_err(|_| Errno::EFAULT)?;
+            let ai = UserPtr::<SpecialfdInotify>::new(req).read()?;
             let flags = ai.flags.cast_unsigned();
             if flags & !(IN_NONBLOCK | IN_CLOEXEC) != 0 {
                 return Err(Errno::EINVAL);
@@ -353,9 +329,7 @@ fn user_clock_nanosleep(
     rqtp: u64,
     rmtp: u64,
 ) -> Result<(), Errno> {
-    let rq = UserPtr::<Timespec>::new(rqtp)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let rq = UserPtr::<Timespec>::new(rqtp).read()?;
     match kern_clock_nanosleep(s, id, flags, &rq) {
         Err((e, left)) => {
             if e == Errno::EINTR
@@ -363,9 +337,7 @@ fn user_clock_nanosleep(
                 && rmtp != 0
                 && let Some(left) = left
             {
-                UserPtr::<Timespec>::new(rmtp)
-                    .write(&ns_ts(left))
-                    .map_err(|_| Errno::EFAULT)?;
+                UserPtr::<Timespec>::new(rmtp).write(&ns_ts(left))?;
             }
             Err(e)
         }
@@ -451,9 +423,7 @@ fn kern_clock_nanosleep(
 /// `clock_settime(clock_id, tp)`: only the real-time clock, and only by
 /// the superuser.
 pub(super) fn clock_settime(id: u64, tp: u64) -> SysResult {
-    let ts = UserPtr::<Timespec>::new(tp)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let ts = UserPtr::<Timespec>::new(tp).read()?;
     process()?.priv_check(Priv::ClockSettime)?;
     if int(id).cast_unsigned() != clock::REALTIME {
         return Err(Errno::EINVAL);
@@ -470,16 +440,10 @@ pub(super) fn settimeofday(tv: u64, tzp: u64) -> SysResult {
     let t = if tv == 0 {
         None
     } else {
-        Some(
-            UserPtr::<Timeval>::new(tv)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        )
+        Some(UserPtr::<Timeval>::new(tv).read()?)
     };
     if tzp != 0 {
-        UserPtr::<[i32; 2]>::new(tzp)
-            .read()
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<[i32; 2]>::new(tzp).read()?;
     }
     process()?.priv_check(Priv::Settimeofday)?;
     if let Some(t) = t {
@@ -553,20 +517,14 @@ pub(super) fn adjtime(delta: u64, olddelta: u64) -> SysResult {
     let d = if delta == 0 {
         None
     } else {
-        Some(
-            UserPtr::<Timeval>::new(delta)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        )
+        Some(UserPtr::<Timeval>::new(delta).read()?)
     };
     if d.is_some() {
         process()?.priv_check(Priv::Adjtime)?;
     }
     let old = crate::ntp::adjtime(d.as_ref());
     if olddelta != 0 {
-        UserPtr::<Timeval>::new(olddelta)
-            .write(&old)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<Timeval>::new(olddelta).write(&old)?;
     }
     Ok(0)
 }
@@ -576,12 +534,12 @@ pub(super) fn adjtime(delta: u64, olddelta: u64) -> SysResult {
 /// result is the clock state (`TIME_ERROR` while unsynchronized).
 pub(super) fn ntp_adjtime(tp: u64) -> SysResult {
     let p = UserPtr::<abi::timex::Timex>::new(tp);
-    let mut tx = p.read().map_err(|_| Errno::EFAULT)?;
+    let mut tx = p.read()?;
     if tx.modes != 0 {
         process()?.priv_check(Priv::NtpAdjtime)?;
     }
     let state = crate::ntp::adjtime_ntp(&mut tx);
-    p.write(&tx).map_err(|_| Errno::EFAULT)?;
+    p.write(&tx)?;
     Ok(u64::from(state.cast_unsigned()))
 }
 
@@ -589,9 +547,7 @@ pub(super) fn ntp_adjtime(tp: u64) -> SysResult {
 /// offset, and the clock state, which is also the result.
 pub(super) fn ntp_gettime(ntvp: u64) -> SysResult {
     let ntv = crate::ntp::gettime();
-    UserPtr::<abi::timex::Ntptimeval>::new(ntvp)
-        .write(&ntv)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<abi::timex::Ntptimeval>::new(ntvp).write(&ntv)?;
     Ok(u64::from(ntv.time_state.cast_unsigned()))
 }
 
@@ -618,8 +574,6 @@ pub(super) fn clock_getcpuclockid2(id: u64, which: u64, clock_id: u64) -> SysRes
         }
         _ => return Err(Errno::EINVAL),
     };
-    UserPtr::<u32>::new(clock_id)
-        .write(&cid)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<u32>::new(clock_id).write(&cid)?;
     Ok(0)
 }

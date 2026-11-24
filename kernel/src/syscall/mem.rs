@@ -494,7 +494,7 @@ pub(super) fn mincore(s: &Sleepable, addr: u64, len: u64, vec: u64) -> SysResult
             *b = space.mapping(va).map_or(0, mincore_bits);
         }
         let out = vec + (at - first) / PAGE_SIZE;
-        crate::uaccess::copy_out(out, &chunk[..n]).map_err(|_| Errno::EFAULT)?;
+        crate::uaccess::copy_out(out, &chunk[..n])?;
         at += n as u64 * PAGE_SIZE;
     }
     Ok(0)

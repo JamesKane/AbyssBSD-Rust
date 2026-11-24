@@ -203,17 +203,10 @@ fn get_usize(arg: &[u8], at: usize) -> usize {
         .map_or(0, usize::from_ne_bytes)
 }
 
-fn str_errno(e: crate::uaccess::StrError) -> Errno {
-    match e {
-        crate::uaccess::StrError::Fault => Errno::EFAULT,
-        crate::uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
-    }
-}
-
 /// A string the caller passes by address, of at most `max` bytes with its
 /// NUL (`copyinstr`). One that is not UTF-8 names nothing here.
 fn user_str(addr: usize, max: usize) -> Result<alloc::string::String, Errno> {
-    let b = crate::uaccess::copy_in_str_vec(addr as u64, max).map_err(str_errno)?;
+    let b = crate::uaccess::copy_in_str_vec(addr as u64, max)?;
     alloc::string::String::from_utf8(b).map_err(|_| Errno::ENOENT)
 }
 

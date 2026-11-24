@@ -93,9 +93,7 @@ pub(super) fn pdfork(s: &Sleepable, frame: &mut TrapFrame, fdp: u64, flags: u64)
         frame.rdx = 0;
     }
     // The child runs already; a bad pointer only fails the call.
-    UserPtr::<i32>::new(fdp)
-        .write(&fd)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<i32>::new(fdp).write(&fd)?;
     Ok(u64::from(pid.unsigned_abs()))
 }
 
@@ -148,9 +146,7 @@ pub(super) fn pdrfork(
     }
     // As `pdfork`: the child runs already; a bad pointer only fails the
     // call.
-    UserPtr::<i32>::new(fdp)
-        .write(&fd)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<i32>::new(fdp).write(&fd)?;
     Ok(u64::from(pid.unsigned_abs()))
 }
 
@@ -171,9 +167,7 @@ fn described(
 /// `pdgetpid(fd, pidp)`.
 pub(super) fn pdgetpid(s: &Sleepable, fd: u64, pidp: u64) -> SysResult {
     let pid = described(s, fd, &crate::capsicum::rights::PDGETPID)?.pid();
-    UserPtr::<i32>::new(pidp)
-        .write(&pid)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<i32>::new(pidp).write(&pid)?;
     Ok(0)
 }
 
@@ -199,10 +193,7 @@ pub(super) fn pdkill(s: &Sleepable, fd: u64, signum: u64) -> SysResult {
 
 fn path(addr: u64) -> Result<Vec<u8>, Errno> {
     let mut buf = alloc::vec![0u8; MAXPATHLEN];
-    let n = uaccess::copy_in_str(addr, &mut buf).map_err(|e| match e {
-        uaccess::StrError::Fault => Errno::EFAULT,
-        uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
-    })?;
+    let n = uaccess::copy_in_str(addr, &mut buf)?;
     buf.truncate(n);
     Ok(buf)
 }
@@ -234,9 +225,7 @@ fn strings(addr: u64, budget: &mut usize) -> Result<Vec<Vec<u8>>, Errno> {
         return Ok(out);
     }
     for i in 0.. {
-        let p = UserPtr::<u64>::new(addr + i * 8)
-            .read()
-            .map_err(|_| Errno::EFAULT)?;
+        let p = UserPtr::<u64>::new(addr + i * 8).read()?;
         if p == 0 {
             break;
         }
@@ -312,9 +301,7 @@ pub(super) fn fexecve(
 pub(super) fn getrusage(s: &Sleepable, who: u64, rusage: u64) -> SysResult {
     let t = UserThread::current().ok_or(Errno::ESRCH)?;
     let ru = crate::kinfo::getrusage(s, t.process(), &t, int(who))?;
-    UserPtr::<Rusage>::new(rusage)
-        .write(&ru)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<Rusage>::new(rusage).write(&ru)?;
     Ok(0)
 }
 
@@ -330,17 +317,13 @@ pub(super) fn wait4(s: &Sleepable, pid: u64, status: u64, options: u64, rusage: 
     };
     let (child, st) = (w.pid, w.status);
     if status != 0 {
-        UserPtr::<i32>::new(status)
-            .write(&st)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<i32>::new(status).write(&st)?;
     }
     if rusage != 0 {
         let ru = w
             .usage
             .map_or_else(Rusage::default, |(own, _)| own.rusage());
-        UserPtr::<Rusage>::new(rusage)
-            .write(&ru)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<Rusage>::new(rusage).write(&ru)?;
     }
     Ok(u64::from(child.unsigned_abs()))
 }
@@ -374,9 +357,7 @@ pub(super) fn wait6(
     };
     let Some(w) = process()?.wait_child(s, pid, options)? else {
         if info != 0 {
-            UserPtr::<abi::signal::Siginfo>::new(info)
-                .write(&abi::signal::Siginfo::default())
-                .map_err(|_| Errno::EFAULT)?;
+            UserPtr::<abi::signal::Siginfo>::new(info).write(&abi::signal::Siginfo::default())?;
         }
         return Ok(0);
     };
@@ -432,18 +413,14 @@ fn report(w: crate::proc::Waited, status: u64, wrusage: u64, info: u64) -> Resul
     };
     let (child, st) = (w.pid, w.status);
     if status != 0 {
-        UserPtr::<i32>::new(status)
-            .write(&st)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<i32>::new(status).write(&st)?;
     }
     if wrusage != 0 {
         // `struct __wrusage`: the child's and its children's.
         let ru = w.usage.map_or([Rusage::default(); 2], |(own, children)| {
             [own.rusage(), children.rusage()]
         });
-        UserPtr::<[Rusage; 2]>::new(wrusage)
-            .write(&ru)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<[Rusage; 2]>::new(wrusage).write(&ru)?;
     }
     if info != 0 {
         let (code, value) = if st & 0x7f == 0 {
@@ -466,9 +443,7 @@ fn report(w: crate::proc::Waited, status: u64, wrusage: u64, info: u64) -> Resul
             si_status: value,
             ..abi::signal::Siginfo::default()
         };
-        UserPtr::<abi::signal::Siginfo>::new(info)
-            .write(&si)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<abi::signal::Siginfo>::new(info).write(&si)?;
     }
     Ok(())
 }
@@ -530,7 +505,7 @@ pub(super) fn getgroups(len: u64, set: u64) -> SysResult {
         0 => Ok(n),
         l if usize::try_from(l).is_ok_and(|l| l >= groups.len()) => {
             let bytes: Vec<u8> = groups.iter().flat_map(|g| g.to_ne_bytes()).collect();
-            uaccess::copy_out(set, &bytes).map_err(|_| Errno::EFAULT)?;
+            uaccess::copy_out(set, &bytes)?;
             Ok(n)
         }
         _ => Err(Errno::EINVAL),
@@ -544,7 +519,7 @@ pub(super) fn setgroups(len: u64, set: u64) -> SysResult {
         return Err(Errno::EINVAL);
     }
     let mut raw = alloc::vec![0u8; n * 4];
-    uaccess::copy_in(&mut raw, set).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_in(&mut raw, set)?;
     let groups = crate::cred::groups_from(&raw);
     process()?.change_cred(|c| c.setgroups(&groups))?;
     Ok(0)
@@ -719,7 +694,7 @@ pub(super) fn getlogin(buf: u64, len: u64) -> SysResult {
         return Err(Errno::ERANGE);
     }
     name.push(0);
-    uaccess::copy_out(buf, &name).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(buf, &name)?;
     Ok(0)
 }
 
@@ -751,7 +726,7 @@ pub(super) fn getloginclass(buf: u64, len: u64) -> SysResult {
     if usize::try_from(len).is_ok_and(|l| name.len() > l) {
         return Err(Errno::ERANGE);
     }
-    uaccess::copy_out(buf, &name).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(buf, &name)?;
     Ok(0)
 }
 
@@ -760,10 +735,7 @@ pub(super) fn getloginclass(buf: u64, len: u64) -> SysResult {
 pub(super) fn setloginclass(name: u64) -> SysResult {
     let p = process()?;
     p.priv_check(Priv::ProcSetloginclass)?;
-    let name = login_name(name).map_err(|e| match e {
-        uaccess::StrError::Fault => Errno::EFAULT,
-        uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
-    })?;
+    let name = login_name(name)?;
     if name.is_empty() {
         return Err(Errno::EINVAL);
     }
@@ -802,9 +774,7 @@ pub(super) fn setcred(flags: u64, wcred: u64, size: u64) -> SysResult {
     if size != size_of::<abi::ucred::Setcred>() as u64 {
         return Err(Errno::EINVAL);
     }
-    let w = UserPtr::<abi::ucred::Setcred>::new(wcred)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let w = UserPtr::<abi::ucred::Setcred>::new(wcred).read()?;
     if flags & !f::MASK != 0 {
         return Err(Errno::EINVAL);
     }
@@ -814,7 +784,7 @@ pub(super) fn setcred(flags: u64, wcred: u64, size: u64) -> SysResult {
             return Err(Errno::EINVAL);
         }
         let mut raw = alloc::vec![0u8; n * 4];
-        uaccess::copy_in(&mut raw, w.sc_supp_groups).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_in(&mut raw, w.sc_supp_groups)?;
         Some(crate::cred::groups_from(&raw))
     } else {
         None

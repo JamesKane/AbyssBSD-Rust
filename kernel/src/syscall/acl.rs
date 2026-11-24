@@ -40,14 +40,14 @@ fn word(b: &[u8], at: usize) -> u32 {
 fn copy_in(addr: u64, t: u32) -> Result<Acl, Errno> {
     if is_old(t) {
         let mut b = alloc::vec![0u8; acl::OLDACL_SIZE];
-        uaccess::copy_in(&mut b, addr).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_in(&mut b, addr)?;
         return match Acl::decode(&b) {
             Err(Errno::EPERM) => Err(Errno::EINVAL),
             r => r,
         };
     }
     let mut b = alloc::vec![0u8; ACL_SIZE];
-    uaccess::copy_in(&mut b, addr).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_in(&mut b, addr)?;
     if word(&b, 0) != ACL_MAX_COUNT {
         return Err(Errno::EINVAL);
     }
@@ -80,7 +80,7 @@ fn copy_out(addr: u64, t: u32, a: &Acl) -> Result<(), Errno> {
         return uaccess::copy_out(addr, &b).map_err(|_| Errno::EFAULT);
     }
     let mut max = [0u8; 4];
-    uaccess::copy_in(&mut max, addr).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_in(&mut max, addr)?;
     if u32::from_ne_bytes(max) != ACL_MAX_COUNT {
         return Err(Errno::EINVAL);
     }

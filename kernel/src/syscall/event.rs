@@ -143,19 +143,13 @@ pub(super) fn ppoll(s: &Sleepable, fds: u64, nfds: u64, ts: u64, set: u64) -> Sy
     let ns = if ts == 0 {
         None
     } else {
-        let t = UserPtr::<Timespec>::new(ts)
-            .read()
-            .map_err(|_| Errno::EFAULT)?;
+        let t = UserPtr::<Timespec>::new(ts).read()?;
         Some(t)
     };
     let mask = if set == 0 {
         None
     } else {
-        Some(
-            UserPtr::<Sigset>::new(set)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        )
+        Some(UserPtr::<Sigset>::new(set).read()?)
     };
     let ns = match ns {
         None => None,
@@ -187,7 +181,7 @@ fn kern_poll(
                 nfds * size_of::<Pollfd>(),
             )
         };
-        uaccess::copy_in(bytes, ufds).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_in(bytes, ufds)?;
     }
     if let Some(m) = mask {
         crate::signal::swap_mask(&*thread()?, m);
@@ -222,7 +216,7 @@ fn kern_poll(
             let bytes = unsafe {
                 core::slice::from_raw_parts(kfds.as_ptr().cast::<u8>(), nfds * size_of::<Pollfd>())
             };
-            uaccess::copy_out(ufds, bytes).map_err(|_| Errno::EFAULT)?;
+            uaccess::copy_out(ufds, bytes)?;
         }
         Ok(n)
     });
@@ -244,11 +238,7 @@ pub(super) fn select(s: &Sleepable, nd: u64, sets: [u64; 3], tv: u64) -> SysResu
     let tv = if tv == 0 {
         None
     } else {
-        Some(
-            UserPtr::<Timeval>::new(tv)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        )
+        Some(UserPtr::<Timeval>::new(tv).read()?)
     };
     kern_select(s, int(nd), sets, tv, None)
 }
@@ -258,9 +248,7 @@ pub(super) fn pselect(s: &Sleepable, nd: u64, sets: [u64; 3], ts: u64, sm: u64) 
     let tv = if ts == 0 {
         None
     } else {
-        let t = UserPtr::<Timespec>::new(ts)
-            .read()
-            .map_err(|_| Errno::EFAULT)?;
+        let t = UserPtr::<Timespec>::new(ts).read()?;
         // `TIMESPEC_TO_TIMEVAL`.
         Some(Timeval {
             tv_sec: t.tv_sec,
@@ -270,11 +258,7 @@ pub(super) fn pselect(s: &Sleepable, nd: u64, sets: [u64; 3], ts: u64, sm: u64) 
     let mask = if sm == 0 {
         None
     } else {
-        Some(
-            UserPtr::<Sigset>::new(sm)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        )
+        Some(UserPtr::<Sigset>::new(sm).read()?)
     };
     kern_select(s, int(nd), sets, tv, mask)
 }
@@ -299,7 +283,7 @@ fn kern_select(
         }
         let (lo, hi) = (nd / 8, ndu.div_ceil(8));
         let mut b = vec![0u8; hi - lo];
-        uaccess::copy_in(&mut b, set + lo as u64).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_in(&mut b, set + lo as u64)?;
         for fd in nd..ndu {
             if b[fd / 8 - lo] & (1 << (fd % 8)) != 0 {
                 return Err(Errno::EBADF);
@@ -318,7 +302,7 @@ fn kern_select(
             let bytes = unsafe {
                 core::slice::from_raw_parts_mut(ibits[k].as_mut_ptr().cast::<u8>(), words * 8)
             };
-            uaccess::copy_in(bytes, set).map_err(|_| Errno::EFAULT)?;
+            uaccess::copy_in(bytes, set)?;
         }
     }
     let ns = match tv {
@@ -378,7 +362,7 @@ fn kern_select(
                 let bytes = unsafe {
                     core::slice::from_raw_parts(obits[k].as_ptr().cast::<u8>(), words * 8)
                 };
-                uaccess::copy_out(set, bytes).map_err(|_| Errno::EFAULT)?;
+                uaccess::copy_out(set, bytes)?;
             }
         }
         Ok(n)
@@ -430,11 +414,7 @@ pub(super) fn kevent(
     let timeout = if timeout == 0 {
         None
     } else {
-        Some(
-            UserPtr::<Timespec>::new(timeout)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        )
+        Some(UserPtr::<Timespec>::new(timeout).read()?)
     };
     // The changes as given and the events as returned
     // (`kern_kevent_generic`).
@@ -499,7 +479,7 @@ fn kern_kevent(
         let bytes = unsafe {
             core::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), n * size_of::<Kevent>())
         };
-        uaccess::copy_in(bytes, at).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_in(bytes, at)?;
         for kev in &mut buf[..n] {
             if kev.filter == 0 {
                 continue;
@@ -512,9 +492,7 @@ fn kern_kevent(
                 }
                 kev.flags = EV_ERROR;
                 kev.data = r.err().map_or(0, |e| i64::from(e.get()));
-                UserPtr::<Kevent>::new(out)
-                    .write(kev)
-                    .map_err(|_| Errno::EFAULT)?;
+                UserPtr::<Kevent>::new(out).write(kev)?;
                 out += size_of::<Kevent>() as u64;
                 nevents -= 1;
                 nerrors += 1;
@@ -574,7 +552,7 @@ fn scan(
                     core::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n * size_of::<Kevent>())
                 };
                 let at = out + (total * size_of::<Kevent>()) as u64;
-                uaccess::copy_out(at, bytes).map_err(|_| Errno::EFAULT)?;
+                uaccess::copy_out(at, bytes)?;
             }
             total += n;
             if n < room {

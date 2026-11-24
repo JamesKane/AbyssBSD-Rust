@@ -770,18 +770,14 @@ fn request(
                 return Err(Errno::EINVAL);
             }
             let ev = p.trace.lock().events;
-            UserPtr::<u32>::new(addr)
-                .write(&ev)
-                .map_err(|_| Errno::EFAULT)?;
+            UserPtr::<u32>::new(addr).write(&ev)?;
             Ok(0)
         }
         PT_SET_EVENT_MASK => {
             if usize::try_from(data).ok() != Some(size_of::<i32>()) {
                 return Err(Errno::EINVAL);
             }
-            let ev = UserPtr::<u32>::new(addr)
-                .read()
-                .map_err(|_| Errno::EFAULT)?;
+            let ev = UserPtr::<u32>::new(addr).read()?;
             let all =
                 PTRACE_EXEC | PTRACE_SCE | PTRACE_SCX | PTRACE_FORK | PTRACE_LWP | PTRACE_VFORK;
             if ev & !all != 0 {
@@ -812,7 +808,7 @@ fn request(
             let len = usize::try_from(data)
                 .unwrap_or(0)
                 .min(size_of::<[u64; 8]>());
-            uaccess::copy_out(addr, &uaccess::bytes_of(&args)[..len]).map_err(|_| Errno::EFAULT)?;
+            uaccess::copy_out(addr, &uaccess::bytes_of(&args)[..len])?;
             Ok(0)
         }
         PT_GET_SC_RET => {
@@ -831,7 +827,7 @@ fn request(
             let len = usize::try_from(data)
                 .unwrap_or(0)
                 .min(size_of::<PtraceScRet>());
-            uaccess::copy_out(addr, &uaccess::bytes_of(&r)[..len]).map_err(|_| Errno::EFAULT)?;
+            uaccess::copy_out(addr, &uaccess::bytes_of(&r)[..len])?;
             Ok(0)
         }
         PT_STEP | PT_CONTINUE | PT_TO_SCE | PT_TO_SCX | PT_SYSCALL | PT_DETACH => {
@@ -881,45 +877,33 @@ fn request(
         PT_IO => io(s, p, td2, addr),
         PT_GETREGS => {
             let r = read_regs(td2)?;
-            UserPtr::<Reg>::new(addr)
-                .write(&r)
-                .map_err(|_| Errno::EFAULT)?;
+            UserPtr::<Reg>::new(addr).write(&r)?;
             Ok(0)
         }
         PT_SETREGS => {
-            let r = UserPtr::<Reg>::new(addr)
-                .read()
-                .map_err(|_| Errno::EFAULT)?;
+            let r = UserPtr::<Reg>::new(addr).read()?;
             td2.dbg.set(tdb::USERWR);
             write_regs(td2, &r)?;
             Ok(0)
         }
         PT_GETFPREGS => {
             let r = read_fpregs(td2)?;
-            UserPtr::<Fpreg>::new(addr)
-                .write(&r)
-                .map_err(|_| Errno::EFAULT)?;
+            UserPtr::<Fpreg>::new(addr).write(&r)?;
             Ok(0)
         }
         PT_SETFPREGS => {
-            let r = UserPtr::<Fpreg>::new(addr)
-                .read()
-                .map_err(|_| Errno::EFAULT)?;
+            let r = UserPtr::<Fpreg>::new(addr).read()?;
             td2.dbg.set(tdb::USERWR);
             write_fpregs(td2, &r)?;
             Ok(0)
         }
         PT_GETDBREGS => {
             let r = read_dbregs();
-            UserPtr::<Dbreg>::new(addr)
-                .write(&r)
-                .map_err(|_| Errno::EFAULT)?;
+            UserPtr::<Dbreg>::new(addr).write(&r)?;
             Ok(0)
         }
         PT_SETDBREGS => {
-            let r = UserPtr::<Dbreg>::new(addr)
-                .read()
-                .map_err(|_| Errno::EFAULT)?;
+            let r = UserPtr::<Dbreg>::new(addr).read()?;
             td2.dbg.set(tdb::USERWR);
             write_dbregs(&r)?;
             Ok(0)
@@ -938,9 +922,7 @@ fn request(
                 .take(usize::try_from(data).unwrap_or(0))
                 .collect();
             for (i, tid) in tids.iter().enumerate() {
-                UserPtr::<i32>::new(addr + 4 * i as u64)
-                    .write(tid)
-                    .map_err(|_| Errno::EFAULT)?;
+                UserPtr::<i32>::new(addr + 4 * i as u64).write(tid)?;
             }
             Ok(tids.len() as u64)
         }
@@ -1065,7 +1047,7 @@ fn lwpinfo(t: &UserThread, addr: u64, data: i32) -> Result<u64, Errno> {
     let name = t.name();
     let name = name.as_bytes();
     pl.pl_tdname[..name.len()].copy_from_slice(name);
-    uaccess::copy_out(addr, &uaccess::bytes_of(&pl)[..len]).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(addr, &uaccess::bytes_of(&pl)[..len])?;
     Ok(0)
 }
 
@@ -1080,9 +1062,7 @@ fn rw_memory(s: &Sleepable, p: &Process, va: u64, buf: &mut [u8], write: bool) -
 /// `PT_IO`: a transfer between the debugger's buffer and `p`'s memory;
 /// `piod_len` comes back as how much moved.
 fn io(s: &Sleepable, p: &Process, td2: &UserThread, addr: u64) -> Result<u64, Errno> {
-    let mut d = UserPtr::<PtraceIoDesc>::new(addr)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let mut d = UserPtr::<PtraceIoDesc>::new(addr).read()?;
     if d.piod_len > i64::MAX as u64 {
         return Err(Errno::EINVAL);
     }
@@ -1127,18 +1107,14 @@ fn io(s: &Sleepable, p: &Process, td2: &UserThread, addr: u64) -> Result<u64, Er
     }
     d.piod_len = done as u64;
     error?;
-    UserPtr::<PtraceIoDesc>::new(addr)
-        .write(&d)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<PtraceIoDesc>::new(addr).write(&d)?;
     Ok(0)
 }
 
 /// `PT_VM_ENTRY`: the mapping at or after the one `pve_entry` names
 /// (0 for the first), with its file's path if it maps one.
 fn vm_entry(s: &Sleepable, p: &Process, addr: u64) -> Result<u64, Errno> {
-    let mut pve = UserPtr::<PtraceVmEntry>::new(addr)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let mut pve = UserPtr::<PtraceVmEntry>::new(addr).read()?;
     let space = p.space();
     if pve.pve_entry != 0 && pve.pve_timestamp != space.timestamp().cast_signed() {
         return Err(Errno::EINVAL);
@@ -1170,14 +1146,12 @@ fn vm_entry(s: &Sleepable, p: &Process, addr: u64) -> Result<u64, Errno> {
             let _ = UserPtr::<PtraceVmEntry>::new(addr).write(&pve);
             return Err(Errno::ENAMETOOLONG);
         }
-        uaccess::copy_out(pve.pve_path, &e.kve_path[..=path_len]).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_out(pve.pve_path, &e.kve_path[..=path_len])?;
         pve.pve_pathlen = u32::try_from(path_len + 1).unwrap_or(0);
     } else {
         pve.pve_pathlen = 0;
     }
-    UserPtr::<PtraceVmEntry>::new(addr)
-        .write(&pve)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<PtraceVmEntry>::new(addr).write(&pve)?;
     Ok(0)
 }
 
@@ -1194,17 +1168,13 @@ fn sc_remote(
     if usize::try_from(data).ok() != Some(size_of::<PtraceScRemote>()) {
         return Err(Errno::EINVAL);
     }
-    let mut r = UserPtr::<PtraceScRemote>::new(addr)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let mut r = UserPtr::<PtraceScRemote>::new(addr).read()?;
     if r.pscr_nargs > 8 {
         return Err(Errno::EINVAL);
     }
     let mut args = [0u64; 8];
     for (i, a) in args.iter_mut().take(r.pscr_nargs as usize).enumerate() {
-        *a = UserPtr::<u64>::new(r.pscr_args + 8 * i as u64)
-            .read()
-            .map_err(|_| Errno::EFAULT)?;
+        *a = UserPtr::<u64>::new(r.pscr_args + 8 * i as u64).read()?;
     }
     if !td2.dbg.has(tdb::BOUNDARY) {
         return Err(Errno::EBUSY);
@@ -1237,8 +1207,7 @@ fn sc_remote(
         .unwrap_or_default();
     r.pscr_ret = ret;
     let off = core::mem::offset_of!(PtraceScRemote, pscr_ret);
-    uaccess::copy_out(addr + off as u64, uaccess::bytes_of(&r.pscr_ret))
-        .map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(addr + off as u64, uaccess::bytes_of(&r.pscr_ret))?;
     Ok(0)
 }
 
@@ -1255,9 +1224,7 @@ fn coredump(
     if usize::try_from(data).ok() != Some(size_of::<PtraceCoredump>()) {
         return Err(Errno::EINVAL);
     }
-    let pc = UserPtr::<PtraceCoredump>::new(addr)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let pc = UserPtr::<PtraceCoredump>::new(addr).read()?;
     if pc.pc_flags & !(PC_COMPRESS | PC_ALL) != 0 {
         return Err(Errno::EINVAL);
     }
@@ -1436,16 +1403,14 @@ fn write_dbregs(r: &Dbreg) -> Result<(), Errno> {
 /// `PT_GETREGSET` and `PT_SETREGSET`: register set `note` through the
 /// `struct iovec` at `addr` (a null base asks the size).
 fn regset(t: &UserThread, set: bool, note: i32, addr: u64) -> Result<u64, Errno> {
-    let mut iov = UserPtr::<abi::uio::Iovec>::new(addr)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let mut iov = UserPtr::<abi::uio::Iovec>::new(addr).read()?;
     let bytes = machdep::regset_get(t, note)?;
     if set {
         if usize::try_from(iov.iov_len).ok() != Some(bytes.len()) {
             return Err(Errno::EINVAL);
         }
         let mut b = alloc::vec![0u8; bytes.len()];
-        uaccess::copy_in(&mut b, iov.iov_base).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_in(&mut b, iov.iov_base)?;
         t.dbg.set(tdb::USERWR);
         return machdep::regset_set(t, note, &b).map(|()| 0);
     }
@@ -1455,12 +1420,10 @@ fn regset(t: &UserThread, set: bool, note: i32, addr: u64) -> Result<u64, Errno>
         if usize::try_from(iov.iov_len).unwrap_or(usize::MAX) < bytes.len() {
             return Err(Errno::EINVAL);
         }
-        uaccess::copy_out(iov.iov_base, &bytes).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_out(iov.iov_base, &bytes)?;
         iov.iov_len = bytes.len() as u64;
     }
-    UserPtr::<abi::uio::Iovec>::new(addr)
-        .write(&iov)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<abi::uio::Iovec>::new(addr).write(&iov)?;
     Ok(0)
 }
 
@@ -1636,15 +1599,12 @@ mod machdep {
                     PT_GETGSBASE => super::user_tls(t, 1),
                     _ => t.tls_base().ok_or(Errno::ESRCH)?,
                 };
-                crate::uaccess::UserPtr::<u64>::new(addr)
-                    .write(&v)
-                    .map_err(|_| Errno::EFAULT)?;
+                crate::uaccess::UserPtr::<u64>::new(addr).write(&v)?;
                 Ok(0)
             }
             PT_GETXMMREGS => {
                 let r = super::read_fpregs(t)?;
-                crate::uaccess::copy_out(addr, crate::uaccess::bytes_of(&r))
-                    .map_err(|_| Errno::EFAULT)?;
+                crate::uaccess::copy_out(addr, crate::uaccess::bytes_of(&r))?;
                 Ok(0)
             }
             _ => Err(Errno::EINVAL),

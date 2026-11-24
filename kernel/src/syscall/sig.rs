@@ -50,11 +50,7 @@ pub(super) fn sigaction(sig: u64, act: u64, oact: u64) -> SysResult {
     let new = if act == 0 {
         None
     } else {
-        Some(
-            UserPtr::<Sigaction>::new(act)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        )
+        Some(UserPtr::<Sigaction>::new(act).read()?)
     };
     if let Some(n) = &new
         && (sig == SIGKILL || sig == SIGSTOP)
@@ -71,9 +67,7 @@ pub(super) fn sigaction(sig: u64, act: u64, oact: u64) -> SysResult {
         None => p.signals.lock().action(sig),
     };
     if oact != 0 {
-        UserPtr::<Sigaction>::new(oact)
-            .write(&old)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<Sigaction>::new(oact).write(&old)?;
     }
     Ok(0)
 }
@@ -93,9 +87,7 @@ pub(super) fn sigprocmask(how: u64, set: u64, oset: u64) -> SysResult {
         signal::set_mask(&t, mask);
     }
     if oset != 0 {
-        UserPtr::<Sigset>::new(oset)
-            .write(&old)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<Sigset>::new(oset).write(&old)?;
     }
     Ok(0)
 }
@@ -108,9 +100,7 @@ pub(super) fn sigpending(set: u64) -> SysResult {
         let st = t.process().signals.lock();
         st.pending().union(t.sig.lock().queue.pending())
     };
-    UserPtr::<Sigset>::new(set)
-        .write(&pending)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<Sigset>::new(set).write(&pending)?;
     Ok(0)
 }
 
@@ -134,9 +124,7 @@ pub(super) fn sigsuspend(s: &Sleepable, sigmask: u64) -> SysResult {
 /// saved (or any context user code built), checked first.
 pub(super) fn sigreturn(frame: &mut TrapFrame, ucp: u64) -> SysResult {
     let mut buf = core::mem::MaybeUninit::uninit();
-    let uc = UserPtr::<Ucontext<Mcontext>>::new(ucp)
-        .read_into(&mut buf)
-        .map_err(|_| Errno::EFAULT)?;
+    let uc = UserPtr::<Ucontext<Mcontext>>::new(ucp).read_into(&mut buf)?;
     // arm64's `sys_sigreturn` leaves the thread in no system call
     // (`td_sa.code = -1`), which its return then reports.
     if cfg!(target_arch = "aarch64")
@@ -170,18 +158,14 @@ fn get_context(frame: &TrapFrame, t: &UserThread) -> Result<Ucontext<Mcontext>, 
 pub(super) fn getcontext(frame: &TrapFrame, ucp: u64) -> SysResult {
     let t = thread()?;
     let uc = get_context(frame, &t)?;
-    UserPtr::<Ucontext<Mcontext>>::new(ucp)
-        .write(&uc)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<Ucontext<Mcontext>>::new(ucp).write(&uc)?;
     Ok(0)
 }
 
 /// `setcontext(ucp)`.
 pub(super) fn setcontext(frame: &mut TrapFrame, ucp: u64) -> SysResult {
     let mut buf = core::mem::MaybeUninit::uninit();
-    let uc = UserPtr::<Ucontext<Mcontext>>::new(ucp)
-        .read_into(&mut buf)
-        .map_err(|_| Errno::EFAULT)?;
+    let uc = UserPtr::<Ucontext<Mcontext>>::new(ucp).read_into(&mut buf)?;
     set_context(frame, uc)?;
     Err(Errno::EJUSTRETURN)
 }
@@ -194,12 +178,8 @@ pub(super) fn swapcontext(frame: &mut TrapFrame, oucp: u64, ucp: u64) -> SysResu
     let t = thread()?;
     let mut old = get_context(frame, &t)?;
     old.uc_flags |= UCF_SWAPPED;
-    UserPtr::<Ucontext<Mcontext>>::new(oucp)
-        .write(&old)
-        .map_err(|_| Errno::EFAULT)?;
-    let uc = UserPtr::<Ucontext<Mcontext>>::new(ucp)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<Ucontext<Mcontext>>::new(oucp).write(&old)?;
+    let uc = UserPtr::<Ucontext<Mcontext>>::new(ucp).read()?;
     set_context(frame, &uc)?;
     Err(Errno::EJUSTRETURN)
 }
@@ -234,11 +214,7 @@ pub(super) fn sigaltstack(frame: &TrapFrame, ss: u64, oss: u64) -> SysResult {
     let new = if ss == 0 {
         None
     } else {
-        Some(
-            UserPtr::<StackT>::new(ss)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        )
+        Some(UserPtr::<StackT>::new(ss).read()?)
     };
     let t = thread()?;
     let old = {
@@ -267,9 +243,7 @@ pub(super) fn sigaltstack(frame: &TrapFrame, ss: u64, oss: u64) -> SysResult {
         old
     };
     if oss != 0 {
-        UserPtr::<StackT>::new(oss)
-            .write(&old)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<StackT>::new(oss).write(&old)?;
     }
     Ok(0)
 }
@@ -502,9 +476,7 @@ fn wait_for(s: &Sleepable, set: Sigset, limit: Limit) -> Result<Siginfo, Errno> 
 
 fn write_info(info: u64, si: &Siginfo) -> Result<(), Errno> {
     if info != 0 {
-        UserPtr::<Siginfo>::new(info)
-            .write(si)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<Siginfo>::new(info).write(si)?;
     }
     Ok(())
 }
@@ -515,9 +487,7 @@ pub(super) fn sigtimedwait(s: &Sleepable, set: u64, info: u64, timeout: u64) -> 
     let limit = if timeout == 0 {
         Limit::Forever
     } else {
-        let t = UserPtr::<Timespec>::new(timeout)
-            .read()
-            .map_err(|_| Errno::EFAULT)?;
+        let t = UserPtr::<Timespec>::new(timeout).read()?;
         // `kern_sigtimedwait`: a negative time is already past, and one of
         // `INT32_MAX / 2` seconds or more is no limit.
         if !(0..1_000_000_000).contains(&t.tv_nsec) {
@@ -552,9 +522,7 @@ pub(super) fn sigwait(s: &Sleepable, set: u64, sig: u64) -> SysResult {
     let r = read_set(set).and_then(|set| wait_for(s, set, Limit::Forever));
     match r {
         Ok(si) => {
-            UserPtr::<i32>::new(sig)
-                .write(&si.si_signo)
-                .map_err(|_| Errno::EFAULT)?;
+            UserPtr::<i32>::new(sig).write(&si.si_signo)?;
             Ok(0)
         }
         // libc's sigwait loops on EINTR itself.
@@ -584,10 +552,10 @@ pub(super) fn sigfastblock(cmd: u64, ptr: u64) -> SysResult {
             }
             // Only a word holding nothing but the pending bit unblocks.
             let w = UserPtr::<u32>::new(at);
-            if w.read().map_err(|_| Errno::EFAULT)? != SIGFASTBLOCK_PEND {
+            if w.read()? != SIGFASTBLOCK_PEND {
                 return Err(Errno::EBUSY);
             }
-            w.write(&0).map_err(|_| Errno::EFAULT)?;
+            w.write(&0)?;
             sched::current().request_ast(AST_SIGNAL);
         }
         SIGFASTBLOCK_UNSETPTR => {

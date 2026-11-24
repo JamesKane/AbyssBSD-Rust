@@ -226,14 +226,13 @@ fn reply(value: &[u8], oldp: u64, oldlenp: u64) -> SysResult {
     }
     let lenp = UserPtr::<u64>::new(oldlenp);
     if oldp == 0 {
-        lenp.write(&(value.len() as u64))
-            .map_err(|_| Errno::EFAULT)?;
+        lenp.write(&(value.len() as u64))?;
         return Ok(0);
     }
-    let room = usize::try_from(lenp.read().map_err(|_| Errno::EFAULT)?).unwrap_or(usize::MAX);
+    let room = usize::try_from(lenp.read()?).unwrap_or(usize::MAX);
     let n = value.len().min(room);
-    uaccess::copy_out(oldp, &value[..n]).map_err(|_| Errno::EFAULT)?;
-    lenp.write(&(n as u64)).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(oldp, &value[..n])?;
+    lenp.write(&(n as u64))?;
     if n < value.len() {
         return Err(Errno::ENOMEM);
     }
@@ -249,7 +248,7 @@ fn new_value(newp: u64, newlen: u64) -> Result<Option<Vec<u8>>, Errno> {
         .filter(|&l| l <= 64 * 1024)
         .ok_or(Errno::EINVAL)?;
     let mut v = alloc::vec![0u8; len];
-    uaccess::copy_in(&mut v, newp).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_in(&mut v, newp)?;
     Ok(Some(v))
 }
 
@@ -269,8 +268,7 @@ pub(super) fn sysctl(
         .ok_or(Errno::EINVAL)?;
     let oid = (0..n)
         .map(|i| UserPtr::<i32>::new(name + 4 * i as u64).read())
-        .collect::<Result<Vec<i32>, _>>()
-        .map_err(|_| Errno::EFAULT)?;
+        .collect::<Result<Vec<i32>, _>>()?;
     trace(s, &oid);
     let new = new_value(newp, newlen)?;
     let (mut value, writer) = serve(s, &oid, new.as_deref(), oldp != 0)?;
@@ -299,7 +297,7 @@ pub(super) fn sysctlbyname(
         .filter(|&l| l <= 1024)
         .ok_or(Errno::ENAMETOOLONG)?;
     let mut buf = alloc::vec![0u8; len];
-    uaccess::copy_in(&mut buf, name).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_in(&mut buf, name)?;
     let name = buf.strip_suffix(&[0]).unwrap_or(&buf);
     let name = core::str::from_utf8(name).map_err(|_| Errno::ENOENT)?;
     let oid = crate::sysctl::read(s, |t| t.name2oid(name)).ok_or_else(|| {

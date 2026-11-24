@@ -49,7 +49,7 @@ pub(super) fn getrandom(buf: u64, len: u64, flags: u64) -> SysResult {
     while done < len {
         let n = (len - done).min(chunk.len());
         crate::random::fill(&mut chunk[..n]).map_err(|_| Errno::EAGAIN)?;
-        uaccess::copy_out(buf + done as u64, &chunk[..n]).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_out(buf + done as u64, &chunk[..n])?;
         done += n;
     }
     Ok(len as u64)
@@ -166,9 +166,7 @@ fn at_level(level: u32, set: i32) -> i32 {
 pub(super) fn cpuset(setid: u64) -> SysResult {
     let p = process()?;
     let id = crate::cpuset::create(&p)?;
-    uaccess::UserPtr::<i32>::new(setid)
-        .write(&id)
-        .map_err(|_| Errno::EFAULT)?;
+    uaccess::UserPtr::<i32>::new(setid).write(&id)?;
     Ok(0)
 }
 
@@ -209,9 +207,7 @@ pub(super) fn cpuset_getid(level: u64, which: u64, id: u64, setid: u64) -> SysRe
         return Err(Errno::EINVAL);
     }
     let set = at_level(level, set_of(which, id)?);
-    uaccess::UserPtr::<i32>::new(setid)
-        .write(&set)
-        .map_err(|_| Errno::EFAULT)?;
+    uaccess::UserPtr::<i32>::new(setid).write(&set)?;
     Ok(0)
 }
 
@@ -286,12 +282,12 @@ pub(super) fn cpuset_getaffinity(
     if crate::ktrace::point(abi::ktrace::KTR_STRUCT) {
         crate::ktrace::structure(s, "cpuset_t", &set[..n]);
     }
-    uaccess::copy_out(mask, &set[..n]).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(mask, &set[..n])?;
     let zeros = [0u8; CPUSET_BYTES];
     let mut at = n;
     while at < size {
         let k = (size - at).min(zeros.len());
-        uaccess::copy_out(mask.wrapping_add(at as u64), &zeros[..k]).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_out(mask.wrapping_add(at as u64), &zeros[..k])?;
         at += k;
     }
     Ok(0)
@@ -312,13 +308,12 @@ pub(super) fn cpuset_setaffinity(
     // (FreeBSD's `user_cpuset_setaffinity`).
     let mut set = [0u8; CPUSET_BYTES];
     let n = size.min(CPUSET_BYTES);
-    uaccess::copy_in(&mut set[..n], mask).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_in(&mut set[..n], mask)?;
     let mut at = n;
     while at < size {
         let mut chunk = [0u8; CPUSET_BYTES];
         let k = (size - at).min(chunk.len());
-        uaccess::copy_in(&mut chunk[..k], mask.wrapping_add(at as u64))
-            .map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_in(&mut chunk[..k], mask.wrapping_add(at as u64))?;
         if chunk[..k].iter().any(|&b| b != 0) {
             return Err(Errno::EINVAL);
         }
@@ -449,10 +444,8 @@ pub(super) fn cpuset_getdomain(
     };
     let mut set = [0u8; DOMAINSET_MAXSIZE as usize / 8];
     set[0] = 1;
-    uaccess::copy_out(mask, &set[..size]).map_err(|_| Errno::EFAULT)?;
-    uaccess::UserPtr::<i32>::new(policy)
-        .write(&i32::from(p))
-        .map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(mask, &set[..size])?;
+    uaccess::UserPtr::<i32>::new(policy).write(&i32::from(p))?;
     Ok(0)
 }
 
@@ -473,7 +466,7 @@ pub(super) fn cpuset_setdomain(
     check_capabilities(level, which, id)?;
     let size = domainset_size(size)?;
     let mut set = [0u8; DOMAINSET_MAXSIZE as usize / 8];
-    uaccess::copy_in(&mut set[..size], mask).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_in(&mut set[..size], mask)?;
     let policy = u32::try_from(super::int(policy)).map_err(|_| Errno::EINVAL)?;
     if policy == DOMAINSET_POLICY_INVALID || policy > DOMAINSET_POLICY_MAX {
         return Err(Errno::EINVAL);
@@ -533,9 +526,9 @@ pub(super) fn sysarch(op: u64, parms: u64) -> SysResult {
     let t = super::thread()?;
     let base = uaccess::UserPtr::<u64>::new(parms);
     match op {
-        amd64::GET_FSBASE => base.write(&hal::user::tls()).map_err(|_| Errno::EFAULT)?,
+        amd64::GET_FSBASE => base.write(&hal::user::tls())?,
         amd64::SET_FSBASE | amd64::SET_TLSBASE => {
-            let v = base.read().map_err(|_| Errno::EFAULT)?;
+            let v = base.read()?;
             if v >= crate::mm::space::USER_END {
                 return Err(Errno::EINVAL);
             }
@@ -546,9 +539,9 @@ pub(super) fn sysarch(op: u64, parms: u64) -> SysResult {
                 t.set_tls_base(Some(v));
             }
         }
-        amd64::GET_GSBASE => base.write(&hal::user::tls2()).map_err(|_| Errno::EFAULT)?,
+        amd64::GET_GSBASE => base.write(&hal::user::tls2())?,
         amd64::SET_GSBASE => {
-            let v = base.read().map_err(|_| Errno::EFAULT)?;
+            let v = base.read()?;
             if v >= crate::mm::space::USER_END {
                 return Err(Errno::EINVAL);
             }
@@ -558,13 +551,11 @@ pub(super) fn sysarch(op: u64, parms: u64) -> SysResult {
         }
         amd64::GET_TLSBASE => {
             let v = t.tls_base().ok_or(Errno::ESRCH)?;
-            base.write(&v).map_err(|_| Errno::EFAULT)?;
+            base.write(&v)?;
         }
         amd64::DISABLE_TLSBASE => t.set_tls_base(None),
         amd64::GET_XFPUSTATE => {
-            let req = uaccess::UserPtr::<amd64::GetXfpustate>::new(parms)
-                .read()
-                .map_err(|_| Errno::EFAULT)?;
+            let req = uaccess::UserPtr::<amd64::GetXfpustate>::new(parms).read()?;
             // What follows the 512-byte legacy region: the XSAVE header and
             // the extended state.
             let fpu = crate::signal::FpuImage::saved().ok_or(Errno::ENOMEM)?;
@@ -573,7 +564,7 @@ pub(super) fn sysarch(op: u64, parms: u64) -> SysResult {
             if len > ext.len() {
                 return Err(Errno::EINVAL);
             }
-            uaccess::copy_out(req.addr, &ext[..len]).map_err(|_| Errno::EFAULT)?;
+            uaccess::copy_out(req.addr, &ext[..len])?;
         }
         _ => {
             // Only the thread-state requests in capability mode.
@@ -781,7 +772,7 @@ pub(super) fn kldstat(fileid: u64, stat: u64) -> SysResult {
     if id != KERNEL_FILE && !hidraw {
         return Err(Errno::ENOENT);
     }
-    let version = uaccess::load_u32(stat).map_err(|_| Errno::EFAULT)?;
+    let version = uaccess::load_u32(stat)?;
     let version = usize::try_from(version).unwrap_or(usize::MAX);
     if version != KLD_FILE_STAT_1_SIZE && version != size_of::<KldFileStat>() {
         return Err(Errno::EINVAL);
@@ -800,7 +791,7 @@ pub(super) fn kldstat(fileid: u64, stat: u64) -> SysResult {
         };
         st.name[..9].copy_from_slice(b"hidraw.ko");
         st.pathname[..22].copy_from_slice(b"/boot/kernel/hidraw.ko");
-        uaccess::copy_out(stat, &uaccess::bytes_of(&st)[..version]).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_out(stat, &uaccess::bytes_of(&st)[..version])?;
         return Ok(0);
     }
     let k = crate::boot::info().kernel;
@@ -816,7 +807,7 @@ pub(super) fn kldstat(fileid: u64, stat: u64) -> SysResult {
     };
     st.name[..6].copy_from_slice(b"kernel");
     st.pathname[..19].copy_from_slice(b"/boot/kernel/kernel");
-    uaccess::copy_out(stat, &uaccess::bytes_of(&st)[..version]).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(stat, &uaccess::bytes_of(&st)[..version])?;
     Ok(0)
 }
 
@@ -871,7 +862,7 @@ pub(super) fn modstat(modid: u64, stat: u64) -> SysResult {
         buf[..n].copy_from_slice(&name[..n]);
     }
     let (id, name) = module(super::int(modid))?;
-    let version = uaccess::load_u32(stat).map_err(|_| Errno::EFAULT)?;
+    let version = uaccess::load_u32(stat)?;
     let version = usize::try_from(version).unwrap_or(usize::MAX);
     let record = if version == size_of::<ModuleStat>() {
         let mut st = ModuleStat {
@@ -899,16 +890,13 @@ pub(super) fn modstat(modid: u64, stat: u64) -> SysResult {
         return Err(Errno::EINVAL);
     };
     // `version` is not written back.
-    uaccess::copy_out(stat + 4, &record[4..version]).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(stat + 4, &record[4..version])?;
     Ok(0)
 }
 
 /// `modfind(name)`: the id of the module `name`.
 pub(super) fn modfind(name: u64) -> SysResult {
-    let name = uaccess::copy_in_str_vec(name, abi::linker::MAXMODNAME).map_err(|e| match e {
-        uaccess::StrError::Fault => Errno::EFAULT,
-        uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
-    })?;
+    let name = uaccess::copy_in_str_vec(name, abi::linker::MAXMODNAME)?;
     if name.as_slice() == HIDRAW_MODULE
         && let Some(m) = hidraw_module()
     {
@@ -932,7 +920,7 @@ pub(super) fn uuidgen(store: u64, count: u64) -> SysResult {
     out.try_reserve_exact(count).map_err(|_| Errno::ENOMEM)?;
     out.resize(count, [0u8; 16]);
     crate::uuid::generate(&mut out);
-    uaccess::copy_out(store, out.as_flattened()).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(store, out.as_flattened())?;
     Ok(0)
 }
 

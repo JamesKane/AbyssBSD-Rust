@@ -22,6 +22,13 @@ use crate::mm::space::USER_END;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Fault;
 
+impl From<Fault> for abi::errno::Errno {
+    #[inline]
+    fn from(_: Fault) -> Self {
+        Self::EFAULT
+    }
+}
+
 /// Types whose every bit pattern is a valid value and which have no
 /// padding, so they can be copied in from, and out to, user memory.
 ///
@@ -127,6 +134,16 @@ pub(crate) enum StrError {
     Fault,
     /// No NUL within the buffer (`ENAMETOOLONG`).
     TooLong,
+}
+
+impl From<StrError> for abi::errno::Errno {
+    #[inline]
+    fn from(e: StrError) -> Self {
+        match e {
+            StrError::Fault => Self::EFAULT,
+            StrError::TooLong => Self::ENAMETOOLONG,
+        }
+    }
 }
 
 /// The first NUL in `b`, looked for eight bytes at a time (a word with a

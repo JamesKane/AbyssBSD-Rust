@@ -280,9 +280,7 @@ fn sve_context(mut ptr: u64) -> Result<Option<u64>, Errno> {
         if !ptr.is_multiple_of(4) {
             return Err(Errno::EINVAL);
         }
-        let [id, size] = UserPtr::<[u32; 2]>::new(ptr)
-            .read()
-            .map_err(|_| Errno::EFAULT)?;
+        let [id, size] = UserPtr::<[u32; 2]>::new(ptr).read()?;
         match id {
             CTX_END => return Ok(sve),
             CTX_SVE => {

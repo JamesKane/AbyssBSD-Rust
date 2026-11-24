@@ -162,7 +162,7 @@ pub(super) fn recvit(
     {
         let sa = nl.nl.name(true);
         let k = (len as usize).min(sa.len());
-        uaccess::copy_out(addr, &sa[..k]).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_out(addr, &sa[..k])?;
         namelen = u32::try_from(k).unwrap_or(0);
     }
     Ok((n, namelen, 0, flags | rflags))

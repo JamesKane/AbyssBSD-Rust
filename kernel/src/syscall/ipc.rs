@@ -114,19 +114,13 @@ pub(super) fn shmctl(id: u64, cmd: u64, buf: u64) -> SysResult {
         return Err(Errno::EINVAL);
     }
     let set = if cmd == IPC_SET {
-        Some(
-            UserPtr::<ShmidDs>::new(buf)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        )
+        Some(UserPtr::<ShmidDs>::new(buf).read()?)
     } else {
         None
     };
     let p = process()?;
     if let Some(ds) = sysv::shmctl(int(id), cmd, set.as_ref(), &p.cred())? {
-        UserPtr::<ShmidDs>::new(buf)
-            .write(&ds)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<ShmidDs>::new(buf).write(&ds)?;
     }
     Ok(0)
 }
@@ -145,7 +139,7 @@ pub(super) fn semop(s: &Sleepable, id: u64, sops: u64, nsops: u64) -> SysResult 
         return Err(Errno::E2BIG);
     }
     let mut raw = alloc::vec![0u8; n * 6];
-    copy_in(&mut raw, sops).map_err(|_| Errno::EFAULT)?;
+    copy_in(&mut raw, sops)?;
     let ops: Vec<Sembuf> = raw
         .as_chunks::<6>()
         .0
@@ -169,7 +163,7 @@ pub(super) fn semctl(id: u64, num: u64, cmd: u64, arg: u64) -> SysResult {
         cmd,
         SEM_STAT | IPC_SET | IPC_STAT | GETALL | SETVAL | SETALL
     ) {
-        UserPtr::<u64>::new(arg).read().map_err(|_| Errno::EFAULT)?
+        UserPtr::<u64>::new(arg).read()?
     } else {
         0
     };
@@ -181,28 +175,24 @@ pub(super) fn semctl(id: u64, num: u64, cmd: u64, arg: u64) -> SysResult {
             let r = sysv::semctl(id, num, cmd, sysv::SemArg::Ds(&mut ds), &cred)?;
             // The kernel's own pointer is nobody else's business.
             ds.sem_base = 0;
-            UserPtr::<SemidDs>::new(semun)
-                .write(&ds)
-                .map_err(|_| Errno::EFAULT)?;
+            UserPtr::<SemidDs>::new(semun).write(&ds)?;
             r
         }
         IPC_SET => {
-            let mut ds = UserPtr::<SemidDs>::new(semun)
-                .read()
-                .map_err(|_| Errno::EFAULT)?;
+            let mut ds = UserPtr::<SemidDs>::new(semun).read()?;
             sysv::semctl(id, num, cmd, sysv::SemArg::Ds(&mut ds), &cred)?
         }
         GETALL => {
             let mut vals = Vec::new();
             sysv::semctl(id, num, cmd, sysv::SemArg::Array(&mut vals), &cred)?;
             let bytes: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
-            copy_out(semun, &bytes).map_err(|_| Errno::EFAULT)?;
+            copy_out(semun, &bytes)?;
             0
         }
         SETALL => {
             let n = sysv::sem_count(id).ok_or(Errno::EINVAL)?;
             let mut raw = alloc::vec![0u8; n * 2];
-            copy_in(&mut raw, semun).map_err(|_| Errno::EFAULT)?;
+            copy_in(&mut raw, semun)?;
             let mut vals: Vec<u16> = raw
                 .as_chunks::<2>()
                 .0
@@ -232,15 +222,13 @@ pub(super) fn msgget(k: u64, flg: u64) -> SysResult {
 /// `msgsnd(msqid, msgp, msgsz, msgflg)`: `msgp` is a `long` type and the
 /// text.
 pub(super) fn msgsnd(s: &Sleepable, id: u64, msgp: u64, size: u64, flg: u64) -> SysResult {
-    let mtype = UserPtr::<i64>::new(msgp)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let mtype = UserPtr::<i64>::new(msgp).read()?;
     let n = usize::try_from(size).map_err(|_| Errno::EINVAL)?;
     if n > sysv::limits::MSGMAX {
         return Err(Errno::EINVAL);
     }
     let mut text = alloc::vec![0u8; n];
-    copy_in(&mut text, msgp.wrapping_add(8)).map_err(|_| Errno::EFAULT)?;
+    copy_in(&mut text, msgp.wrapping_add(8))?;
     let p = process()?;
     sysv::msgsnd(
         s,
@@ -274,10 +262,8 @@ pub(super) fn msgrcv(
         &p.cred(),
         p.pid(),
     )?;
-    copy_out(msgp.wrapping_add(8), &text).map_err(|_| Errno::EFAULT)?;
-    UserPtr::<i64>::new(msgp)
-        .write(&mtype)
-        .map_err(|_| Errno::EFAULT)?;
+    copy_out(msgp.wrapping_add(8), &text)?;
+    UserPtr::<i64>::new(msgp).write(&mtype)?;
     Ok(text.len() as u64)
 }
 
@@ -285,19 +271,13 @@ pub(super) fn msgrcv(
 pub(super) fn msgctl(id: u64, cmd: u64, buf: u64) -> SysResult {
     let cmd = int(cmd).cast_unsigned();
     let set = if cmd == IPC_SET {
-        Some(
-            UserPtr::<MsqidDs>::new(buf)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        )
+        Some(UserPtr::<MsqidDs>::new(buf).read()?)
     } else {
         None
     };
     let p = process()?;
     if let Some(ds) = sysv::msgctl(int(id), cmd, set.as_ref(), &p.cred())? {
-        UserPtr::<MsqidDs>::new(buf)
-            .write(&ds)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<MsqidDs>::new(buf).write(&ds)?;
     }
     Ok(0)
 }

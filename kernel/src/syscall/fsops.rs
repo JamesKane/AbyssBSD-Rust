@@ -459,9 +459,7 @@ fn times_of(ptr: u64) -> Result<(SetAttr, bool), Errno> {
             true,
         ));
     }
-    let ts = UserPtr::<[Timespec; 2]>::new(ptr)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let ts = UserPtr::<[Timespec; 2]>::new(ptr).read()?;
     let mut a = SetAttr::default();
     let mut all_now = true;
     for (i, t) in ts.iter().enumerate() {
@@ -518,9 +516,7 @@ fn timevals(ptr: u64) -> Result<(SetAttr, bool), Errno> {
     if ptr == 0 {
         return times_of(0);
     }
-    let tv = UserPtr::<[[i64; 2]; 2]>::new(ptr)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let tv = UserPtr::<[[i64; 2]; 2]>::new(ptr).read()?;
     let mut a = SetAttr::default();
     for (i, [sec, usec]) in tv.iter().enumerate() {
         if !(0..1_000_000).contains(usec) {
@@ -685,16 +681,14 @@ fn options(iov: u64, iovcnt: u64) -> Result<Vec<MountOption>, Errno> {
     for i in (0..n).step_by(2) {
         let read = |j: usize| -> Result<Vec<u8>, Errno> {
             let at = iov + (j * size_of::<abi::uio::Iovec>()) as u64;
-            let e = UserPtr::<abi::uio::Iovec>::new(at)
-                .read()
-                .map_err(|_| Errno::EFAULT)?;
+            let e = UserPtr::<abi::uio::Iovec>::new(at).read()?;
             let len = usize::try_from(e.iov_len).map_err(|_| Errno::EINVAL)?;
             if len > 1024 {
                 return Err(Errno::EINVAL);
             }
             let mut b = alloc::vec![0u8; len];
             if len > 0 {
-                crate::uaccess::copy_in(&mut b, e.iov_base).map_err(|_| Errno::EFAULT)?;
+                crate::uaccess::copy_in(&mut b, e.iov_base)?;
             }
             // Strings carry their NUL.
             if b.last() == Some(&0) {
@@ -776,10 +770,7 @@ const MOUNT_TYPES: &[(&[u8], bool)] = &[
 /// A string from user memory, as a mount option (`mount_argsu`): up to
 /// `max` bytes with its NUL.
 fn user_option(name: &[u8], at: u64, max: usize) -> Result<MountOption, Errno> {
-    let v = crate::uaccess::copy_in_str_vec(at, max).map_err(|e| match e {
-        crate::uaccess::StrError::Fault => Errno::EFAULT,
-        crate::uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
-    })?;
+    let v = crate::uaccess::copy_in_str_vec(at, max)?;
     Ok((name.to_vec(), v))
 }
 
@@ -839,9 +830,7 @@ pub(super) fn mount(s: &Sleepable, ty: u64, path: u64, flags: u64, data: u64) ->
         use abi::mount::{
             MSDOSFSMNT_KICONV, MSDOSFSMNT_LONGNAME, MSDOSFSMNT_NOWIN95, MSDOSFSMNT_SHORTNAME,
         };
-        let a = UserPtr::<abi::mount::MsdosfsArgs>::new(data)
-            .read()
-            .map_err(|_| Errno::EFAULT)?;
+        let a = UserPtr::<abi::mount::MsdosfsArgs>::new(data).read()?;
         push_common(&mut opts, fspath?, flags);
         opts.push(user_option(b"from", a.fspec, path_max)?);
         opts.push((b"export".to_vec(), Vec::new()));
@@ -870,9 +859,7 @@ pub(super) fn mount(s: &Sleepable, ty: u64, path: u64, flags: u64, data: u64) ->
             }
         }
     } else {
-        let a = UserPtr::<abi::mount::UfsArgs>::new(data)
-            .read()
-            .map_err(|_| Errno::EFAULT)?;
+        let a = UserPtr::<abi::mount::UfsArgs>::new(data).read()?;
         push_common(&mut opts, fspath?, flags);
         opts.push(user_option(b"from", a.fspec, path_max)?);
         opts.push((b"export".to_vec(), Vec::new()));

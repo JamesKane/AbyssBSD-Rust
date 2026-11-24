@@ -81,7 +81,7 @@ impl Opts {
                 return Err(Errno::EINVAL);
             }
             let mut name = alloc::vec![0u8; nlen];
-            uaccess::copy_in(&mut name, ne.iov_base).map_err(|_| Errno::EFAULT)?;
+            uaccess::copy_in(&mut name, ne.iov_base)?;
             if name.pop() != Some(0) || name.contains(&0) {
                 return Err(Errno::EINVAL);
             }
@@ -94,7 +94,7 @@ impl Opts {
                 None
             } else {
                 let mut v = alloc::vec![0u8; len];
-                uaccess::copy_in(&mut v, ve.iov_base).map_err(|_| Errno::EFAULT)?;
+                uaccess::copy_in(&mut v, ve.iov_base)?;
                 Some(v)
             };
             out.push(Opt {
@@ -828,9 +828,7 @@ fn meta_get(opts: &Opts, which: &str, v: &[u8]) -> Result<(), Errno> {
         let Some(a) = answer else {
             // A key that is not there comes back with no value
             // (`kern_jail_get`: "Communicate back a missing key").
-            UserPtr::<u64>::new(o.len_at)
-                .write(&0)
-                .map_err(|_| Errno::EFAULT)?;
+            UserPtr::<u64>::new(o.len_at).write(&0)?;
             continue;
         };
         if o.addr == 0 {
@@ -841,7 +839,7 @@ fn meta_get(opts: &Opts, which: &str, v: &[u8]) -> Result<(), Errno> {
         }
         let mut z = a;
         z.push(0);
-        uaccess::copy_out(o.addr, &z).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_out(o.addr, &z)?;
     }
     Ok(())
 }
@@ -1171,13 +1169,11 @@ unsafe impl crate::uaccess::Plain for abi::jail::Jail {}
 /// `jail(jail)` (`kern_jail`): creates a jail with the old structure's
 /// path, hostname, and name, and enters it. No addresses.
 pub(super) fn jail(s: &Sleepable, ptr: u64) -> SysResult {
-    let version = UserPtr::<u32>::new(ptr).read().map_err(|_| Errno::EFAULT)?;
+    let version = UserPtr::<u32>::new(ptr).read()?;
     if version != abi::jail::JAIL_API_VERSION {
         return Err(Errno::EINVAL);
     }
-    let j = UserPtr::<abi::jail::Jail>::new(ptr)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let j = UserPtr::<abi::jail::Jail>::new(ptr).read()?;
     if j.ip4s > 0 || j.ip6s > 0 {
         return Err(Errno::EINVAL);
     }
@@ -1192,7 +1188,7 @@ pub(super) fn jail(s: &Sleepable, ptr: u64) -> SysResult {
         if a == 0 {
             return Ok(None);
         }
-        let v = uaccess::copy_in_str_vec(a, max).map_err(|_| Errno::EFAULT)?;
+        let v = uaccess::copy_in_str_vec(a, max)?;
         Ok(Some(String::from_utf8_lossy(&v).into_owned()))
     };
     let path = string(j.path, prison::MAXPATHLEN)?.ok_or(Errno::EFAULT)?;

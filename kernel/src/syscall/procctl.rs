@@ -128,16 +128,8 @@ pub(super) fn procctl(idtype: u64, id: u64, com: u64, data: u64) -> SysResult {
         | PROC_NO_NEW_PRIVS_CTL
         | PROC_WXMAP_CTL
         | PROC_LOGSIGEXIT_CTL => Arg::Int(read_int()?),
-        PROC_REAP_GETPIDS => Arg::Pids(
-            UserPtr::<ReaperPids>::new(data)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        ),
-        PROC_REAP_KILL => Arg::Kill(
-            UserPtr::<ReaperKill>::new(data)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        ),
+        PROC_REAP_GETPIDS => Arg::Pids(UserPtr::<ReaperPids>::new(data).read()?),
+        PROC_REAP_KILL => Arg::Kill(UserPtr::<ReaperKill>::new(data).read()?),
         _ if i.no_data && data != 0 => return Err(Errno::EINVAL),
         _ => Arg::None,
     };
@@ -156,7 +148,7 @@ pub(super) fn procctl(idtype: u64, id: u64, com: u64, data: u64) -> SysResult {
         Out::Kill(k) => UserPtr::<ReaperKill>::new(data).write(k),
     };
     r?;
-    copy.map_err(|_| Errno::EFAULT)?;
+    copy?;
     Ok(0)
 }
 

@@ -100,9 +100,7 @@ pub(super) fn sched_rr_get_interval(pid: u64, interval: u64) -> SysResult {
         tv_sec: 0,
         tv_nsec: i64::try_from(1_000_000_000 / hz * ticks).unwrap_or(0),
     };
-    UserPtr::<Timespec>::new(interval)
-        .write(&ts)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<Timespec>::new(interval).write(&ts)?;
     Ok(0)
 }
 
@@ -140,9 +138,7 @@ pub(super) fn sched_getparam(pid: u64, param: u64) -> SysResult {
     } else {
         RTP_PRIO_NORMAL_MAX.saturating_sub(r.prio)
     };
-    UserPtr::<i32>::new(param)
-        .write(&i32::from(prio))
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<i32>::new(param).write(&i32::from(prio))?;
     Ok(0)
 }
 
@@ -170,9 +166,7 @@ fn set_policy(t: &UserThread, policy: i32, prio: i32) -> Result<(), Errno> {
 /// `sched_setscheduler(pid, policy, param)`: only the superuser picks a
 /// policy (`PRIV_SCHED_SETPOLICY`).
 pub(super) fn sched_setscheduler(pid: u64, policy: u64, param: u64) -> SysResult {
-    let prio = UserPtr::<i32>::new(param)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let prio = UserPtr::<i32>::new(param).read()?;
     let t = sched_target(pid)?;
     process()?.priv_check(Priv::SchedSetpolicy)?;
     set_policy(&t, int(policy), prio)?;
@@ -181,9 +175,7 @@ pub(super) fn sched_setscheduler(pid: u64, policy: u64, param: u64) -> SysResult
 
 /// `sched_setparam(pid, param)`: the priority, in the current policy.
 pub(super) fn sched_setparam(pid: u64, param: u64) -> SysResult {
-    let prio = UserPtr::<i32>::new(param)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let prio = UserPtr::<i32>::new(param).read()?;
     let t = sched_target(pid)?;
     set_policy(&t, policy_of(t.rtprio()), prio)?;
     Ok(0)
@@ -280,9 +272,7 @@ fn upcall(f: &mut TrapFrame, entry: u64, arg: u64, base: u64, size: u64) -> Resu
         f.rbp = 0;
         f.rsp = top.wrapping_sub(8);
         f.rip = entry;
-        UserPtr::<u64>::new(f.rsp)
-            .write(&0)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<u64>::new(f.rsp).write(&0)?;
         f.rdi = arg;
     }
     #[cfg(target_arch = "aarch64")]
@@ -310,18 +300,14 @@ pub(super) fn thr_new(s: &sched::Sleepable, frame: &TrapFrame, param: u64, size:
             size_of::<ThrParam>(),
         )
     };
-    crate::uaccess::copy_in(&mut bytes[..size], param).map_err(|_| Errno::EFAULT)?;
+    crate::uaccess::copy_in(&mut bytes[..size], param)?;
     if tp.flags & !(THR_SUSPENDED | THR_SYSTEM_SCOPE | THR_C_RUNTIME) != 0 {
         return Err(Errno::EINVAL);
     }
     let rtp = if tp.rtp == 0 {
         None
     } else {
-        Some(
-            UserPtr::<Rtprio>::new(tp.rtp)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        )
+        Some(UserPtr::<Rtprio>::new(tp.rtp).read()?)
     };
     crate::ktrace::structure_of(s, "thrparam", &tp);
     if tp.tls_base >= crate::mm::space::USER_END {
@@ -348,9 +334,7 @@ pub(super) fn thr_new(s: &sched::Sleepable, frame: &TrapFrame, param: u64, size:
 
 /// `thr_create(ctx, id, flags)`: a new thread running the context `ctx`.
 pub(super) fn thr_create(frame: &TrapFrame, ctx: u64, id: u64, _flags: u64) -> SysResult {
-    let uc = UserPtr::<Ucontext<Mcontext>>::new(ctx)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let uc = UserPtr::<Ucontext<Mcontext>>::new(ctx).read()?;
     let mut f = *frame;
     let ready = crate::signal::prepare_context(&mut f, &uc.uc_mcontext)?;
     let tls = [
@@ -410,9 +394,7 @@ pub(super) fn thr_suspend(s: &Sleepable, timeout: u64) -> SysResult {
     let limit = if timeout == 0 {
         None
     } else {
-        let ts = UserPtr::<Timespec>::new(timeout)
-            .read()
-            .map_err(|_| Errno::EFAULT)?;
+        let ts = UserPtr::<Timespec>::new(timeout).read()?;
         if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
             return Err(Errno::EINVAL);
         }
@@ -498,13 +480,11 @@ pub(super) fn rtprio_thread(function: u64, lwpid: u64, rtp: u64) -> SysResult {
     };
     match function {
         RTP_LOOKUP => {
-            p.write(&t.rtprio()).map_err(|_| Errno::EFAULT)?;
+            p.write(&t.rtprio())?;
             Ok(0)
         }
         RTP_SET => {
-            let r = wanted
-                .unwrap_or(Err(crate::uaccess::Fault))
-                .map_err(|_| Errno::EFAULT)?;
+            let r = wanted.unwrap_or(Err(crate::uaccess::Fault))?;
             check_class(t.process(), r)?;
             set_class(&t, r)?;
             Ok(0)
@@ -572,14 +552,12 @@ pub(super) fn rtprio(function: u64, pid: u64, rtp: u64) -> SysResult {
                 }
                 best
             };
-            p.write(&r).map_err(|_| Errno::EFAULT)?;
+            p.write(&r)?;
             Ok(0)
         }
         RTP_SET => {
             me.can_sched(&target)?;
-            let r = wanted
-                .unwrap_or(Err(crate::uaccess::Fault))
-                .map_err(|_| Errno::EFAULT)?;
+            let r = wanted.unwrap_or(Err(crate::uaccess::Fault))?;
             check_class(&me, r)?;
             if pid == 0 {
                 set_class(&*thread()?, r)?;

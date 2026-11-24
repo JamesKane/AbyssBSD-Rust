@@ -68,9 +68,7 @@ pub(crate) fn cap_enter() -> Result<u64, Errno> {
 /// `cap_getmode(modep)`: 1 in capability mode, else 0.
 pub(crate) fn cap_getmode(modep: u64) -> Result<u64, Errno> {
     let mode = u32::from(in_capability_mode());
-    crate::uaccess::UserPtr::<u32>::new(modep)
-        .write(&mode)
-        .map_err(|_| Errno::EFAULT)?;
+    crate::uaccess::UserPtr::<u32>::new(modep).write(&mode)?;
     Ok(0)
 }
 
@@ -207,9 +205,7 @@ fn me() -> Result<alloc::sync::Arc<Process>, Errno> {
 /// `cap_rights_limit(fd, rightsp)`: only version 0, valid rights, and no
 /// more than the descriptor holds (`ENOTCAPABLE`).
 pub(crate) fn cap_rights_limit(s: &Sleepable, fd: u64, rightsp: u64) -> Result<u64, Errno> {
-    let rights = UserPtr::<CapRights>::new(rightsp)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let rights = UserPtr::<CapRights>::new(rightsp).read()?;
     if rights.version() != CAP_RIGHTS_VERSION {
         return Err(Errno::EINVAL);
     }
@@ -234,9 +230,7 @@ pub(crate) fn cap_rights_get(
     }
     let fd = i32::try_from(fd as i64).map_err(|_| Errno::EBADF)?;
     let rights = me()?.files.lock(s).slot(fd)?.caps().rights;
-    UserPtr::<CapRights>::new(rightsp)
-        .write(&rights)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<CapRights>::new(rightsp).write(&rights)?;
     crate::ktrace::structure_of(s, "caprights", &rights);
     Ok(0)
 }
@@ -255,7 +249,7 @@ pub(crate) fn cap_ioctls_limit(
     }
     let mut raw = alloc::vec![0u8; n * 8];
     if n > 0 {
-        uaccess::copy_in(&mut raw, cmds).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_in(&mut raw, cmds)?;
     }
     let list = raw
         .as_chunks::<8>()
@@ -286,7 +280,7 @@ pub(crate) fn cap_ioctls_get(
             .len()
             .min(usize::try_from(maxcmds).unwrap_or(usize::MAX));
         let bytes: alloc::vec::Vec<u8> = list[..n].iter().flat_map(|c| c.to_ne_bytes()).collect();
-        uaccess::copy_out(cmds, &bytes).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_out(cmds, &bytes)?;
     }
     Ok(list.len() as u64)
 }
@@ -306,8 +300,6 @@ pub(crate) fn cap_fcntls_limit(s: &Sleepable, fd: u64, mask: u64) -> Result<u64,
 pub(crate) fn cap_fcntls_get(s: &Sleepable, fd: u64, maskp: u64) -> Result<u64, Errno> {
     let fd = i32::try_from(fd as i64).map_err(|_| Errno::EBADF)?;
     let mask = me()?.files.lock(s).slot(fd)?.caps().fcntls;
-    UserPtr::<u32>::new(maskp)
-        .write(&mask)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<u32>::new(maskp).write(&mask)?;
     Ok(0)
 }

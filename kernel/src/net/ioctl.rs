@@ -238,7 +238,7 @@ fn rename(arg: &[u8]) -> Result<usize, Errno> {
     priv_check(Priv::NetSetifname)?;
     let ptr = u64::from_ne_bytes(arg[IFRU..IFRU + 8].try_into().unwrap_or([0; 8]));
     let mut new = [0u8; IFNAMSIZ];
-    uaccess::copy_in(&mut new, ptr).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_in(&mut new, ptr)?;
     // `copyinstr` of at most `IFNAMSIZ` bytes, the NUL among them.
     let end = new
         .iter()
@@ -312,7 +312,7 @@ fn cloners(arg: &mut [u8]) -> Result<usize, Errno> {
         for (i, c) in all.iter().take(n).enumerate() {
             out[i * IFNAMSIZ..i * IFNAMSIZ + c.len()].copy_from_slice(c.as_bytes());
         }
-        crate::uaccess::copy_out(buf, &out).map_err(|_| Errno::EFAULT)?;
+        crate::uaccess::copy_out(buf, &out)?;
     }
     Ok(0)
 }
@@ -346,7 +346,7 @@ fn media(arg: &mut [u8]) -> Result<usize, Errno> {
         arg[at..at + 4].copy_from_slice(&v.to_ne_bytes());
     }
     if count > 0 {
-        crate::uaccess::copy_out(ulist, &m.supported.to_ne_bytes()).map_err(|_| Errno::EFAULT)?;
+        crate::uaccess::copy_out(ulist, &m.supported.to_ne_bytes())?;
     }
     Ok(0)
 }
@@ -390,14 +390,14 @@ fn get(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
                 wr32(arg, IFRU, u32::try_from(out.len()).unwrap_or(0));
                 return Err(Errno::ENAMETOOLONG);
             }
-            uaccess::copy_out(ptr, &out).map_err(|_| Errno::EFAULT)?;
+            uaccess::copy_out(ptr, &out)?;
             wr32(arg, IFRU, u32::try_from(out.len()).unwrap_or(0));
         }
         sio::SIOCGIFDATA => {
             let d = inet::rtmsg::if_data(i);
             drop(n);
             let ptr = u64::from_ne_bytes(arg[IFRU..IFRU + 8].try_into().unwrap_or([0; 8]));
-            uaccess::copy_out(ptr, crate::uaccess::bytes_of(&d)).map_err(|_| Errno::EFAULT)?;
+            uaccess::copy_out(ptr, crate::uaccess::bytes_of(&d))?;
         }
         sio::SIOCGIFGROUP => {
             // `struct ifgroupreq`: a length, and a user array of
@@ -419,7 +419,7 @@ fn get(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
                 let mut r = [0u8; IFNAMSIZ];
                 let b = g.as_bytes();
                 r[..b.len().min(IFNAMSIZ - 1)].copy_from_slice(&b[..b.len().min(IFNAMSIZ - 1)]);
-                uaccess::copy_out(ptr + at as u64, &r).map_err(|_| Errno::EFAULT)?;
+                uaccess::copy_out(ptr + at as u64, &r)?;
                 at += IFNAMSIZ;
             }
             wr32(arg, IFRU, u32::try_from(at).unwrap_or(0));
@@ -565,7 +565,7 @@ fn set(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
                 None
             } else {
                 let mut b = alloc::vec![0u8; len];
-                uaccess::copy_in(&mut b, ptr).map_err(|_| Errno::EFAULT)?;
+                uaccess::copy_in(&mut b, ptr)?;
                 let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
                 b.truncate(end);
                 Some(b)
@@ -621,7 +621,7 @@ fn ifconf(arg: &mut [u8]) -> Result<usize, Errno> {
     }
     let n = out.len().min(len);
     // Only whole records (`ifconf` stops at the first that does not fit).
-    uaccess::copy_out(ptr, &out[..n]).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(ptr, &out[..n])?;
     arg[0..4].copy_from_slice(&i32::try_from(n).unwrap_or(0).to_ne_bytes());
     Ok(0)
 }

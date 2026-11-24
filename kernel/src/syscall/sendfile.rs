@@ -70,9 +70,7 @@ pub(super) fn sendfile(
     }
     let (mut hdr, mut trl) = (None, None);
     if hdtr != 0 {
-        let h = UserPtr::<SfHdtr>::new(hdtr)
-            .read()
-            .map_err(|_| Errno::EFAULT)?;
+        let h = UserPtr::<SfHdtr>::new(hdtr).read()?;
         if h.headers != 0 {
             hdr = Some(UserIo::vector(
                 h.headers,

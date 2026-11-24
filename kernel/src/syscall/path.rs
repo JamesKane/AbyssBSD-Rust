@@ -50,10 +50,6 @@ impl core::ops::Deref for PathArg {
 /// and not copied there.
 #[inline(always)]
 pub(super) fn path(addr: u64) -> Result<PathArg, Errno> {
-    let errno = |e| match e {
-        uaccess::StrError::Fault => Errno::EFAULT,
-        uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
-    };
     // Copied straight into the argument returned, not moved there.
     let mut arg = PathArg::Short {
         len: 0,
@@ -69,8 +65,8 @@ pub(super) fn path(addr: u64) -> Result<PathArg, Errno> {
         }
         Err(uaccess::StrError::TooLong) => uaccess::copy_in_str_vec(addr, PATH_MAX)
             .map(PathArg::Long)
-            .map_err(errno),
-        Err(e) => Err(errno(e)),
+            .map_err(Errno::from),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -444,9 +440,7 @@ pub(super) fn fstatat(s: &Sleepable, fd: u64, path_ptr: u64, buf: u64, flag: u64
         match &st {
             Ok(st) => {
                 crate::ktrace::structure_of(s, "stat", st);
-                UserPtr::<Stat>::new(buf)
-                    .write(st)
-                    .map_err(|_| Errno::EFAULT)?;
+                UserPtr::<Stat>::new(buf).write(st)?;
             }
             Err(e) => return Err(*e),
         }
@@ -546,7 +540,7 @@ pub(super) fn getcwd(s: &Sleepable, buf: u64, buflen: u64) -> SysResult {
         return Err(Errno::ERANGE);
     }
     path.push(0);
-    uaccess::copy_out(buf, &path).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(buf, &path)?;
     Ok(0)
 }
 
@@ -597,7 +591,7 @@ pub(super) fn realpathat(
         return Err(Errno::ENOMEM);
     }
     full.push(0);
-    uaccess::copy_out(buf, &full).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(buf, &full)?;
     Ok(0)
 }
 
@@ -699,7 +693,7 @@ pub(super) fn readlinkat(
     let n = target
         .len()
         .min(usize::try_from(bufsize).unwrap_or(usize::MAX));
-    uaccess::copy_out(buf, &target[..n]).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(buf, &target[..n])?;
     Ok(n as u64)
 }
 
@@ -811,9 +805,7 @@ pub(super) fn statfs(s: &Sleepable, path_ptr: u64, buf: u64) -> SysResult {
     let path = path(path_ptr)?;
     let v = crate::fs::lookup(s, &p, At::Cwd, &path, Walk::FOLLOW)?;
     let st = statfs_of(s, &v)?;
-    UserPtr::<Statfs>::new(buf)
-        .write(&st)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<Statfs>::new(buf).write(&st)?;
     Ok(0)
 }
 
@@ -838,9 +830,7 @@ pub(super) fn getfsstat(s: &Sleepable, buf: u64, bufsize: u64, mode: u64) -> Sys
     for (i, m) in mounts.iter().take(n).enumerate() {
         let mut st = statfs_mount(s, m)?;
         enforce_statfs(m, &mut st);
-        UserPtr::<Statfs>::new(buf + (i * size_of::<Statfs>()) as u64)
-            .write(&st)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<Statfs>::new(buf + (i * size_of::<Statfs>()) as u64).write(&st)?;
     }
     Ok(n as u64)
 }

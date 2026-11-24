@@ -36,10 +36,7 @@ pub(super) enum By {
 /// The attribute name at `addr`: `ENAMETOOLONG` past `EXTATTR_MAXNAMELEN`.
 fn name(addr: u64) -> Result<Vec<u8>, Errno> {
     let mut buf = [0u8; MAXNAMELEN + 1];
-    let n = uaccess::copy_in_str(addr, &mut buf).map_err(|e| match e {
-        uaccess::StrError::Fault => Errno::EFAULT,
-        uaccess::StrError::TooLong => Errno::ENAMETOOLONG,
-    })?;
+    let n = uaccess::copy_in_str(addr, &mut buf)?;
     Ok(buf[..n].to_vec())
 }
 
@@ -91,7 +88,7 @@ pub(super) fn set(
     }
     let mut value = alloc::vec![0u8; len];
     if len > 0 {
-        uaccess::copy_in(&mut value, data).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_in(&mut value, data)?;
     }
     vfs::ops::set_extattr(s, &v, crate::fs::cred(s), ns(namespace), &name, &value)?;
     Ok(len as u64)
@@ -152,6 +149,6 @@ fn out(bytes: &[u8], data: u64, nbytes: u64) -> SysResult {
     let n = bytes
         .len()
         .min(usize::try_from(nbytes).unwrap_or(usize::MAX));
-    uaccess::copy_out(data, &bytes[..n]).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(data, &bytes[..n])?;
     Ok(n as u64)
 }

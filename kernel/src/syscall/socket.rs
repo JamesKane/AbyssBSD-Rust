@@ -206,7 +206,7 @@ fn sockaddr(addr: u64, len: u64) -> Result<Vec<u8>, Errno> {
         return Err(Errno::EINVAL);
     }
     let mut raw = alloc::vec![0u8; len];
-    uaccess::copy_in(&mut raw, addr).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_in(&mut raw, addr)?;
     raw[0] = u8::try_from(len).unwrap_or(u8::MAX);
     Ok(raw)
 }
@@ -382,14 +382,12 @@ pub(super) fn put_name(sa: &[u8], name: u64, lenp: u64, real: bool) -> Result<()
     if name == 0 || lenp == 0 {
         return Ok(());
     }
-    let len = UserPtr::<u32>::new(lenp)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let len = UserPtr::<u32>::new(lenp).read()?;
     if len.cast_signed() < 0 {
         return Err(Errno::EINVAL);
     }
     let n = (len as usize).min(sa.len());
-    uaccess::copy_out(name, &sa[..n]).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(name, &sa[..n])?;
     let out = if real { sa.len() } else { n };
     UserPtr::<u32>::new(lenp)
         .write(&u32::try_from(out).unwrap_or(u32::MAX))
@@ -413,9 +411,7 @@ pub(super) fn accept4(
     // `accept1` reads the length whenever there is a name, before waiting
     // (a NULL `anamelen` is EFAULT), and `kern_accept4` refuses a negative one.
     if name != 0 {
-        let len = UserPtr::<u32>::new(lenp)
-            .read()
-            .map_err(|_| Errno::EFAULT)?;
+        let len = UserPtr::<u32>::new(lenp).read()?;
         if len.cast_signed() < 0 {
             return Err(Errno::EINVAL);
         }
@@ -481,9 +477,7 @@ pub(super) fn shutdown(s: &Sleepable, sock_fd: u64, how: u64) -> SysResult {
 
 /// `getsockname(s, name, namelen)` and `getpeername(...)`.
 pub(super) fn getname(s: &Sleepable, sock_fd: u64, name: u64, lenp: u64, peer: bool) -> SysResult {
-    let len = UserPtr::<u32>::new(lenp)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let len = UserPtr::<u32>::new(lenp).read()?;
     if len.cast_signed() < 0 {
         return Err(Errno::EINVAL);
     }
@@ -525,7 +519,7 @@ pub(super) fn setsockopt(
     }
     let mut buf = alloc::vec![0u8; n.min(256)];
     if !buf.is_empty() {
-        uaccess::copy_in(&mut buf, val).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_in(&mut buf, val)?;
     }
     if int(level) == SOL_SOCKET && int(name) == SO_SPLICE {
         return splice(s, sock_fd, &f, &buf);
@@ -593,9 +587,7 @@ pub(super) fn getsockopt(
     let size = if avalsize == 0 {
         0
     } else {
-        UserPtr::<u32>::new(avalsize)
-            .read()
-            .map_err(|_| Errno::EFAULT)?
+        UserPtr::<u32>::new(avalsize).read()?
     };
     if size.cast_signed() < 0 {
         return Err(Errno::EINVAL);
@@ -614,12 +606,10 @@ pub(super) fn getsockopt(
     };
     let n = (size as usize).min(v.len());
     if val != 0 {
-        uaccess::copy_out(val, &v[..n]).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_out(val, &v[..n])?;
     }
     if avalsize != 0 {
-        UserPtr::<u32>::new(avalsize)
-            .write(&u32::try_from(n).unwrap_or(0))
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<u32>::new(avalsize).write(&u32::try_from(n).unwrap_or(0))?;
     }
     Ok(0)
 }
@@ -795,9 +785,7 @@ pub(super) fn sendto(
 
 /// `sendmsg(s, msg, flags)`.
 pub(super) fn sendmsg(s: &Sleepable, sock_fd: u64, msg: u64, flags: u64) -> SysResult {
-    let m = UserPtr::<Msghdr>::new(msg)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let m = UserPtr::<Msghdr>::new(msg).read()?;
     let mut uio =
         UserIo::vector(m.msg_iov, u64::from(m.msg_iovlen.cast_unsigned())).map_err(|e| {
             if e == Errno::EINVAL {
@@ -830,7 +818,7 @@ pub(super) fn sendmsg(s: &Sleepable, sock_fd: u64, msg: u64, flags: u64) -> SysR
             long.resize(n, 0);
             &mut long[..]
         };
-        uaccess::copy_in(raw, m.msg_control).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_in(raw, m.msg_control)?;
         Some(&*raw)
     };
     sendit(s, sock_fd, &mut uio, to, control, int(flags))
@@ -1075,7 +1063,7 @@ fn recvit(
         && len.cast_signed() > 0
     {
         let k = (len as usize).min(from.len());
-        uaccess::copy_out(addr, &from[..k]).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_out(addr, &from[..k])?;
         namelen = u32::try_from(k).unwrap_or(0);
         crate::ktrace::sockaddr(s, from);
     }
@@ -1116,29 +1104,20 @@ pub(super) fn recvfrom(
 ) -> SysResult {
     let mut uio = UserIo::one(buf, len)?;
     let name = if from != 0 && lenp != 0 {
-        Some((
-            from,
-            UserPtr::<u32>::new(lenp)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        ))
+        Some((from, UserPtr::<u32>::new(lenp).read()?))
     } else {
         None
     };
     let (n, namelen, _, _) = recvit(s, sock_fd, &mut uio, int(flags), name, None)?;
     if name.is_some() {
-        UserPtr::<u32>::new(lenp)
-            .write(&namelen)
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<u32>::new(lenp).write(&namelen)?;
     }
     Ok(n as u64)
 }
 
 /// `recvmsg(s, msg, flags)`.
 pub(super) fn recvmsg(s: &Sleepable, sock_fd: u64, msg: u64, flags: u64) -> SysResult {
-    let mut m = UserPtr::<Msghdr>::new(msg)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let mut m = UserPtr::<Msghdr>::new(msg).read()?;
     let mut uio =
         UserIo::vector(m.msg_iov, u64::from(m.msg_iovlen.cast_unsigned())).map_err(|e| {
             if e == Errno::EINVAL {
@@ -1155,8 +1134,6 @@ pub(super) fn recvmsg(s: &Sleepable, sock_fd: u64, msg: u64, flags: u64) -> SysR
     }
     m.msg_controllen = ctllen;
     m.msg_flags = outflags;
-    UserPtr::<Msghdr>::new(msg)
-        .write(&m)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<Msghdr>::new(msg).write(&m)?;
     Ok(n as u64)
 }

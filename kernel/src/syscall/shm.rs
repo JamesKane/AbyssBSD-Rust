@@ -28,15 +28,12 @@ use super::{SysResult, int, process};
 use crate::fs::fdtable::FdFlags;
 use crate::fs::file::{File, FileKind};
 use crate::fs::shm::{self, MAXPATHLEN, Shm};
-use crate::uaccess::{StrError, copy_in_str_vec};
+use crate::uaccess::copy_in_str_vec;
 use crate::uthread::UserThread;
 
 /// A path as `shm_copyin_path` takes it: starting with `/`.
 fn path(at: u64) -> Result<Vec<u8>, Errno> {
-    let p = copy_in_str_vec(at, MAXPATHLEN).map_err(|e| match e {
-        StrError::Fault => Errno::EFAULT,
-        StrError::TooLong => Errno::ENAMETOOLONG,
-    })?;
+    let p = copy_in_str_vec(at, MAXPATHLEN)?;
     if p.first() != Some(&b'/') {
         return Err(Errno::EINVAL);
     }
@@ -187,9 +184,7 @@ pub(super) fn fspacectl(
     if rqsr == 0 {
         return Err(Errno::EINVAL);
     }
-    let r = crate::uaccess::UserPtr::<[i64; 2]>::new(rqsr)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let r = crate::uaccess::UserPtr::<[i64; 2]>::new(rqsr).read()?;
     let put = |v: [i64; 2]| {
         if rmsr == 0 {
             return Ok(());

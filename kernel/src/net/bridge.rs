@@ -156,11 +156,11 @@ pub(crate) fn drvspec(set: bool, a: &mut [u8]) -> Result<usize, Errno> {
     }
     let mut buf = alloc::vec![0u8; size];
     if flags & IN != 0 {
-        uaccess::copy_in(&mut buf, ifd.ifd_data).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_in(&mut buf, ifd.ifd_data)?;
     }
     command(&vn, &b, ifd.ifd_cmd, &mut buf)?;
     if flags & OUT != 0 {
-        uaccess::copy_out(ifd.ifd_data, &buf).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_out(ifd.ifd_data, &buf)?;
     }
     Ok(0)
 }

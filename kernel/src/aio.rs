@@ -1237,9 +1237,7 @@ fn aqueue_inner(
     {
         return Err(Errno::EAGAIN);
     }
-    let mut cb = UserPtr::<Aiocb>::new(ujob)
-        .read()
-        .map_err(|_| Errno::EFAULT)?;
+    let mut cb = UserPtr::<Aiocb>::new(ujob).read()?;
     let vty = if ty == LIO_NOP { cb.aio_lio_opcode } else { ty };
     let vectored = if vty & LIO_VECTORED != 0 {
         Some(UserIo::vector(cb.aio_buf, cb.aio_nbytes)?)
@@ -1531,19 +1529,13 @@ pub(crate) fn suspend(s: &Sleepable, list: u64, nent: i32, timeout: u64) -> Resu
     let ns = if timeout == 0 {
         None
     } else {
-        let ts = UserPtr::<Timespec>::new(timeout)
-            .read()
-            .map_err(|_| Errno::EFAULT)?;
+        let ts = UserPtr::<Timespec>::new(timeout).read()?;
         Some(timeout_ns(&ts)?.max(1))
     };
     let mut jobs = Vec::new();
     jobs.try_reserve_exact(nent).map_err(|_| Errno::ENOMEM)?;
     for i in 0..nent {
-        jobs.push(
-            UserPtr::<u64>::new(list + 8 * i as u64)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        );
+        jobs.push(UserPtr::<u64>::new(list + 8 * i as u64).read()?);
     }
     let p = Process::current().ok_or(Errno::EINVAL)?;
     let k = kaio_of(&p).ok_or(Errno::EAGAIN)?;
@@ -1606,9 +1598,7 @@ pub(crate) fn waitcomplete(s: &Sleepable, ujobp: u64, timeout: u64) -> Result<u6
     let ns = if timeout == 0 {
         None
     } else {
-        let ts = UserPtr::<Timespec>::new(timeout)
-            .read()
-            .map_err(|_| Errno::EFAULT)?;
+        let ts = UserPtr::<Timespec>::new(timeout).read()?;
         if ts.tv_sec == 0 && ts.tv_nsec == 0 {
             Some(0)
         } else {
@@ -1656,22 +1646,14 @@ pub(crate) fn lio_listio(
         return Err(Errno::EINVAL);
     }
     let sev = if sig != 0 && mode == LIO_NOWAIT {
-        Some(
-            UserPtr::<Sigevent>::new(sig)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        )
+        Some(UserPtr::<Sigevent>::new(sig).read()?)
     } else {
         None
     };
     let mut jobs = Vec::new();
     jobs.try_reserve_exact(n).map_err(|_| Errno::ENOMEM)?;
     for i in 0..n {
-        jobs.push(
-            UserPtr::<u64>::new(list + 8 * i as u64)
-                .read()
-                .map_err(|_| Errno::EFAULT)?,
-        );
+        jobs.push(UserPtr::<u64>::new(list + 8 * i as u64).read()?);
     }
     let p = Process::current().ok_or(Errno::EINVAL)?;
     let k = kaio_init(&p);

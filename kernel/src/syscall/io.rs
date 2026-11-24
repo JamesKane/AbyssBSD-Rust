@@ -585,7 +585,7 @@ fn record_lock(s: &Sleepable, fd: i32, cmd: u32, arg: u64) -> SysResult {
     let f = file(s, &p, u64::from(fd.cast_unsigned()), &R::FLOCK)?;
     let v = f.vnode().ok_or(Errno::EBADF)?.clone();
     let ptr = UserPtr::<Flock>::new(arg);
-    let mut fl = ptr.read().map_err(|_| Errno::EFAULT)?;
+    let mut fl = ptr.read()?;
     let (start, end) = lock_range(s, &f, &fl)?;
     let owner = Owner::Process(p.pid());
     let ty = match fl.l_type {
@@ -619,7 +619,7 @@ fn record_lock(s: &Sleepable, fd: i32, cmd: u32, arg: u64) -> SysResult {
                 fl.l_sysid = 0;
             }
         }
-        ptr.write(&fl).map_err(|_| Errno::EFAULT)?;
+        ptr.write(&fl)?;
         return Ok(0);
     }
     match ty {
@@ -728,7 +728,7 @@ pub(super) fn ioctl(s: &Sleepable, fd: u64, com: u64, data: u64) -> SysResult {
     let copy_in = indirect.map_or(com & IOC_IN != 0, |i| i.copy_in);
     let copy_out = indirect.map_or(com & IOC_OUT != 0, |i| i.copy_out);
     if copy_in && len > 0 {
-        uaccess::copy_in(&mut arg, data).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_in(&mut arg, data)?;
     } else if indirect.is_none() && com & IOC_VOID != 0 && len == 4 {
         // An `int` passed by value.
         arg.copy_from_slice(&int(data).to_ne_bytes());
@@ -747,7 +747,7 @@ pub(super) fn ioctl(s: &Sleepable, fd: u64, com: u64, data: u64) -> SysResult {
         _ => f.ioctl(s, com, &mut arg)?,
     };
     if copy_out && len > 0 {
-        uaccess::copy_out(data, &arg).map_err(|_| Errno::EFAULT)?;
+        uaccess::copy_out(data, &arg)?;
     }
     Ok(u64::try_from(ret).unwrap_or(0))
 }
@@ -824,9 +824,7 @@ pub(super) fn fstat(s: &Sleepable, fd: u64, sb: u64) -> SysResult {
     let f = current_file(s, fd, &R::FSTAT)?;
     let st = f.stat(s)?;
     crate::ktrace::structure_of(s, "stat", &st);
-    UserPtr::<Stat>::new(sb)
-        .write(&st)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<Stat>::new(sb).write(&st)?;
     Ok(0)
 }
 
@@ -835,9 +833,7 @@ pub(super) fn fstatfs(s: &Sleepable, fd: u64, buf: u64) -> SysResult {
     let f = current_file(s, fd, &R::FSTATFS)?;
     let v = f.vnode().ok_or(Errno::EINVAL)?;
     let st = super::path::statfs_of(s, v)?;
-    UserPtr::<Statfs>::new(buf)
-        .write(&st)
-        .map_err(|_| Errno::EFAULT)?;
+    UserPtr::<Statfs>::new(buf).write(&st)?;
     Ok(0)
 }
 
@@ -868,13 +864,11 @@ pub(super) fn getdirentries(
     let mut off = f.offset(s);
     let base = *off;
     let next = vfs::ops::getdirentries(s, v, base, room, &mut out)?;
-    uaccess::copy_out(buf, &out).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(buf, &out)?;
     *off = next;
     drop(off);
     if basep != 0 {
-        UserPtr::<i64>::new(basep)
-            .write(&base.cast_signed())
-            .map_err(|_| Errno::EFAULT)?;
+        UserPtr::<i64>::new(basep).write(&base.cast_signed())?;
     }
     Ok(out.len() as u64)
 }
@@ -917,7 +911,7 @@ pub(super) fn copy_file_range(
     }
     let offset = |ptr: u64| -> Result<(), Errno> {
         if ptr != 0 {
-            let v = UserPtr::<i64>::new(ptr).read().map_err(|_| Errno::EFAULT)?;
+            let v = UserPtr::<i64>::new(ptr).read()?;
             if v < 0 {
                 return Err(Errno::EINVAL);
             }
@@ -991,13 +985,13 @@ pub(super) fn copy_file_range(
 /// caller having set its `kf_structsize` (`kern.proc.filedesc`'s record,
 /// without rights, as FreeBSD's).
 fn kinfo(s: &Sleepable, fd: i32, arg: u64) -> SysResult {
-    let size = UserPtr::<i32>::new(arg).read().map_err(|_| Errno::EFAULT)?;
+    let size = UserPtr::<i32>::new(arg).read()?;
     if usize::try_from(size).ok() != Some(abi::kinfo::KINFO_FILE_SIZE) {
         return Err(Errno::EINVAL);
     }
     let f = current_file(s, u64::from(fd.cast_unsigned()), &R::NO)?;
     let p = Process::current().ok_or(Errno::EINVAL)?;
     let kf = crate::kinfo::file::f_kinfo(s, &p, fd, &f)?;
-    uaccess::copy_out(arg, &kf).map_err(|_| Errno::EFAULT)?;
+    uaccess::copy_out(arg, &kf)?;
     Ok(0)
 }

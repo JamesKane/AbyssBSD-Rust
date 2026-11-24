@@ -1196,7 +1196,15 @@ fn suite_ctxpmu(s: &Sleepable) {
                 .collect();
             kprintln!(
                 "kbench ctxpmu.cpu{w} cycles {} ev{:#x} {} ev{:#x} {} ev{:#x} {} ev{:#x} {} (per 1000 handoffs)",
-                c[0], set[0], c[1], set[1], c[2], set[2], c[3], set[3], c[4]
+                c[0],
+                set[0],
+                c[1],
+                set[1],
+                c[2],
+                set[2],
+                c[3],
+                set[3],
+                c[4]
             );
         }
     }
