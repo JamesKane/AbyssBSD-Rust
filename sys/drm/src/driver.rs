@@ -62,6 +62,13 @@ pub trait DrmDriver: Send + Sync {
         false
     }
 
+    /// Shows the console again, because the kernel has panicked: puts the
+    /// display back on the surface the console draws on. Called with the
+    /// other processors stopped and interrupts off, so it must take no lock
+    /// and wait for nothing; a driver that scans out its own buffers
+    /// overrides it.
+    fn panic_restore(&self) {}
+
     /// Whether it publishes a display.
     fn has_kms(&self) -> bool {
         self.kms().is_some()

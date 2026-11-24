@@ -39,6 +39,8 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
         arch::cpu::halt_forever();
     }
     let stopped = crate::smp::stop_others(STOP_WAIT_NS);
+    // A display driver that shows its own buffers shows the console again.
+    drm::panic_restore();
     out!("\npanic: {info}\n");
     out!("cpuid = {}\n", hal::cpu_id().0);
     report_stop(stopped);
@@ -80,6 +82,7 @@ pub(crate) fn fatal_trap(report: &arch::TrapReport) -> ! {
         arch::cpu::halt_forever();
     }
     let stopped = crate::smp::stop_others(STOP_WAIT_NS);
+    drm::panic_restore();
     out!("\nfatal trap:\n{report}");
     out!("cpuid = {}\n", hal::cpu_id().0);
     report_stop(stopped);

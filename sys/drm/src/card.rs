@@ -101,6 +101,19 @@ pub fn register(driver: Arc<dyn DrmDriver>) -> Result<Arc<Card>, Errno> {
     Ok(card)
 }
 
+/// The kernel has panicked: every card's display goes back to the surface
+/// the console draws on ([`DrmDriver::panic_restore`]). Takes no lock it
+/// could wait for: if the list is held (by a processor that is stopped),
+/// nothing is restored.
+pub fn panic_restore() {
+    let Some(cards) = CARDS.try_lock() else {
+        return;
+    };
+    for c in cards.values().filter_map(alloc::sync::Weak::upgrade) {
+        c.driver.panic_restore();
+    }
+}
+
 /// Takes away every card whose driver is the firmware's framebuffer
 /// ([`DrmDriver::firmware_framebuffer`]), for a native driver that now
 /// shows the same screen (docs/GRAPHICS.md §7.5). Returns how many went.

@@ -169,3 +169,16 @@ fn restoring_shows_the_firmwares_surface_once_and_waits_for_a_pending_flip() {
     c.restore();
     assert_eq!(d.shown.lock().unwrap().len(), before);
 }
+
+#[test]
+fn a_panic_shows_the_console_at_once_without_a_lock_or_a_wait() {
+    let d = Fake::new();
+    let c = card(1920, 1080, &d).unwrap();
+    // Surface B is on show, its flip pending, and the lock that says so is
+    // held (by a processor that has been stopped).
+    *c.screen.front.lock() = Front::B;
+    *d.pending.lock().unwrap() = 1_000_000;
+    let _held = c.screen.front.lock();
+    c.panic_restore();
+    assert_eq!(*d.shown.lock().unwrap(), std::vec![0]);
+}

@@ -867,7 +867,13 @@ presents (`simpledrm`-like). Spec 09 lists what RADV expects; none of it is in R
   between a gradient and a bar pattern six times (3.2 ms each); the owner saw both on the screen. The card
   passes the same kind of QEMU kernel test as the firmware card (`drm_card.rs`) over a display in memory.
 - **Only the whole screen:** a plane smaller than the screen is refused, as the surface shown is drawn whole.
-- **Still to do in R1:** the panic path that shows the console (only `stop` flips back), a timer-versus-hardware
-  check of vblank, `hw.drmn.kms` on by default once the owner agrees, and the run of the Sway acceptance on it.
+- **The panic path (2026-11-24).** `DrmDriver::panic_restore` (default: nothing) is called for every registered
+  card by `drm::panic_restore()`, which the kernel's panic handler and fatal-trap report run after the other
+  processors are stopped and before anything is printed, so the console text (drawn on the firmware's surface)
+  can be seen. The Radeon card's takes no lock and waits for nothing: two register writes pointing the display at
+  the firmware's surface. A host test holds the card's lock and a pending flip and still gets the write; the QEMU
+  kernel test calls it on a card showing a client's buffer. On the board `dev.drmn.1.panic_restore` runs the same
+  hook: with `kmsflip` holding surface A (`0xf401000000`) the surface read `0xf400000000` a second later.
+- **Still to do in R1:** a timer-versus-hardware check of vblank, `hw.drmn.kms` on by default once the owner agrees, and the run of the Sway acceptance on it.
 - **Not yet read or done:** the decoding of the platform display firmware's window registers is in the
   specification's 08 section 9.0.1; stage R3 overwrites those windows, so R1 stays out of the top 2 MiB.

@@ -469,6 +469,16 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         "Write 1 to read a few words of VRAM through BAR0 and log them (read-only)",
         move || r.vram_probe(),
     );
+    crate::control::trigger(
+        t,
+        node,
+        "panic_restore",
+        "Write 1 to run the kernel's panic hook for graphics cards (shows the console's surface), to test it",
+        || {
+            drm::panic_restore();
+            Ok(())
+        },
+    );
     let r = Arc::clone(a);
     crate::control::trigger(
         t,

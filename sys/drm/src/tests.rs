@@ -2378,3 +2378,42 @@ fn retiring_firmware_cards_leaves_the_others() {
     assert_eq!(crate::retire_firmware_cards(&s()), 0);
     native.unregister(&s());
 }
+
+/// A card that counts the times a panic told it to show the console.
+struct PanicCard(core::sync::atomic::AtomicU32);
+
+impl DrmDriver for PanicCard {
+    fn info(&self) -> DriverInfo {
+        DriverInfo {
+            name: "panic-test",
+            desc: "Counts panics",
+            date: "20261124",
+            major: 0,
+            minor: 0,
+            patch: 0,
+        }
+    }
+    fn panic_restore(&self) {
+        self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A panic reaches every registered card, and a card that is gone is not
+/// asked.
+#[test]
+fn a_panic_tells_every_card_to_show_the_console() {
+    setup();
+    let a = Arc::new(PanicCard(core::sync::atomic::AtomicU32::new(0)));
+    let b = Arc::new(PanicCard(core::sync::atomic::AtomicU32::new(0)));
+    let ca = crate::register(a.clone()).unwrap();
+    let cb = crate::register(b.clone()).unwrap();
+    crate::panic_restore();
+    assert_eq!(a.0.load(core::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(b.0.load(core::sync::atomic::Ordering::Relaxed), 1);
+    cb.unregister(&s());
+    drop(cb);
+    crate::panic_restore();
+    assert_eq!(a.0.load(core::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(b.0.load(core::sync::atomic::Ordering::Relaxed), 1);
+    ca.unregister(&s());
+}
