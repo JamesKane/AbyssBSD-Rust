@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! Verbs and the parameters they read (specification section 7).
 
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "each cast takes one field of a 32-bit word"
+)]
+
 /// A response that never came, or came all ones (`HDA_INVALID`).
 pub const INVALID: u32 = 0xffff_ffff;
 

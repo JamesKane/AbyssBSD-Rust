@@ -116,6 +116,11 @@ where AbyssBSD differs, and why. A difference not listed here is a bug.
 | `GenericSerialBus` block reads | The count byte, then exactly that many bytes, by continuing the read (`IIC_M_NOSTART`) | The count and 32 bytes after it in one read, keeping the count's | The controller interface has no read whose length its first byte sets; 32 is the SMBus block limit |
 | `GeneralPurposeIo` pin indexes | The pin table is indexed unchecked | A field past the connection's pin table, or a pin past the controller's, fails the access | Firmware is untrusted input |
 | `hw.iicbus.enable_acpi_space_handler` | A tunable that keeps `acpi_iicbus` from installing its handler | Absent: the handler is always installed | No tunables for drivers yet |
+| `hdac`, `hdacc`, `hdaa` interrupts | `GCTL_UNSOL` and `INTCTL` (controller and global interrupt enables) are set; unsolicited responses (jack events) reach the codec drivers | `INTCTL` stays 0: commands are polled, as FreeBSD's `hdac_send_command` polls them, and unsolicited responses that arrive while one waits are counted and dropped | Nothing consumes jack events until the sound engine (docs/AUDIO.md, A2) |
+| `hdacc`, `hdaa` descriptions | Every codec and controller in `hdacc_codecs` and `hdac_devices` has its own name | The few this tree has met (Realtek ALC897 and ALC1220, Intel 82801I and Alder Lake, AMD Ryzen) have theirs; the rest take the vendor's name with the device (`Realtek (0x0269)`) or `Generic` | The full tables are to be generated from FreeBSD's sources as `rgegen` does |
+| `hdaa` children | `pcmN`, the mixer, and `dev.hdaa` sysctls | None: the widget graph is read and kept | The sound engine (A1) and the `pcm` devices (A2) come after the controller |
+| `hdaa` power | Every widget with a power capability is powered up; a function group with no driver is powered down | The function group is set to D0 | Widget power follows the graph's use, with the engine |
+
 
 ## System calls and process behavior
 

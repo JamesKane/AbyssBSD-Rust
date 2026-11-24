@@ -6,6 +6,11 @@
 //! start of its attach. Association parsing and the devices built from the
 //! graph come after.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "node numbers and widths are masked or checked first"
+)]
+
 use alloc::vec::Vec;
 
 use crate::verb::{self, INVALID};

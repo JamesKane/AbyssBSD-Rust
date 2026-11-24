@@ -2,6 +2,11 @@
 //! The controller's registers (specification section 3.3): byte offsets
 //! into the memory BAR, and the bit fields the driver uses.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "each cast takes one field of a register"
+)]
+
 /// Global capabilities (16 bits).
 pub const GCAP: usize = 0x00;
 /// Global control (32 bits).

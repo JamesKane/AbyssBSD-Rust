@@ -317,6 +317,7 @@ dependencies = [
  "devtree",
  "gpiobus",
  "hcons",
+ "hda-driver",
  "hidbus",
  "hkbd",
  "hms",
@@ -495,6 +496,19 @@ dependencies = [
 [[package]]
 name = "hda"
 version = "0.0.0"
+
+[[package]]
+name = "hda-driver"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+ "hda",
+ "pci",
+ "regs",
+ "sched",
+ "vm",
+]
 
 [[package]]
 name = "hid"
