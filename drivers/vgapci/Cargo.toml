@@ -8,6 +8,9 @@ publish.workspace = true
 [dependencies]
 bus = { path = "../../sys/bus" }
 devtree = { path = "../../lib/devtree" }
+pci = { path = "../../sys/pci" }
+regs = { path = "../../lib/regs" }
+vm = { path = "../../sys/vm" }
 
 [lints]
 workspace = true

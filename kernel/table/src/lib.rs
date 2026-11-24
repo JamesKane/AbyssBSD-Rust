@@ -49,6 +49,7 @@ macro_rules! drivers {
             ahci::AHCI,
             ahci::AHCICH,
             vgapci::DRIVER,
+            nova::DRIVER,
             hda_driver::HDAC,
             hda_driver::HDACC,
             hda_driver::HDAA,

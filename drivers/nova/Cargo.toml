@@ -1,0 +1,18 @@
+[package]
+name = "nova"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+bus = { path = "../../sys/bus" }
+nvgpu = { path = "../../lib/nvgpu" }
+sync = { path = "../../sys/sync" }
+sysctl = { path = "../../sys/sysctl" }
+vgapci = { path = "../vgapci" }
+vm = { path = "../../sys/vm" }
+
+[lints]
+workspace = true

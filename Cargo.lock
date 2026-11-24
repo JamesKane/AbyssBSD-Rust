@@ -326,6 +326,7 @@ dependencies = [
  "iicbus",
  "isa",
  "linlondp",
+ "nova",
  "nvme",
  "pci",
  "rge",
@@ -855,6 +856,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nova"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "bus",
+ "nvgpu",
+ "sync",
+ "sysctl",
+ "vgapci",
+ "vm",
+]
+
+[[package]]
+name = "nvgpu"
+version = "0.0.0"
+dependencies = [
+ "elf",
+]
+
+[[package]]
 name = "nvme"
 version = "0.0.0"
 dependencies = [
@@ -1273,6 +1294,9 @@ version = "0.0.0"
 dependencies = [
  "bus",
  "devtree",
+ "pci",
+ "regs",
+ "vm",
 ]
 
 [[package]]
