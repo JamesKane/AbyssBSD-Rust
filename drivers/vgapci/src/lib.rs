@@ -71,6 +71,8 @@ pub struct Aperture {
     len: usize,
     /// An AMD GPU's VRAM aperture (BAR0), when it could be mapped.
     vram: Option<(MmioGrant<Bytes>, usize)>,
+    /// Its doorbell aperture (BAR2), when it could be mapped.
+    doorbells: Option<(MmioGrant<Bytes>, usize)>,
     pci: Arc<PciChild>,
     tag: Option<DmaTag>,
     /// What the GPU driver does with the function's interrupt, set once.
@@ -164,6 +166,26 @@ impl Aperture {
         self.has_irq.load(Ordering::Acquire)
     }
 
+    /// Writes the 32-bit doorbell at byte `offset` of the doorbell aperture
+    /// (BAR2); `false` (and no write) if there is none or the offset is
+    /// unaligned or outside it.
+    pub fn doorbell_write32(&self, offset: usize, value: u32) -> bool {
+        let Some((map, len)) = self.doorbells.as_ref() else {
+            return false;
+        };
+        if !offset.is_multiple_of(4) || offset.checked_add(4).is_none_or(|e| e > *len) {
+            return false;
+        }
+        map.write32(offset, value);
+        true
+    }
+
+    /// The size of the doorbell aperture, if there is one.
+    #[must_use]
+    pub fn doorbell_len(&self) -> Option<usize> {
+        self.doorbells.as_ref().map(|(_, l)| *l)
+    }
+
     /// The size of the VRAM aperture, if there is one.
     #[must_use]
     pub fn vram_len(&self) -> Option<usize> {
@@ -250,6 +272,25 @@ fn amd_aperture(cx: &mut AttachCx<'_>, child: &Arc<PciChild>) -> Option<Arc<Aper
                 }
             }
         });
+    // The doorbell aperture is BAR2, a plain mapping (writes only).
+    let doorbells = child
+        .function
+        .bars
+        .iter()
+        .filter(|b| b.kind != BarKind::Io)
+        .position(|b| b.index == 2)
+        .and_then(|i| {
+            let size = child.function.bars.iter().find(|b| b.index == 2)?.size;
+            match cx.mmio_bytes(i) {
+                Ok(m) => Some((m, usize::try_from(size).ok()?)),
+                Err(e) => {
+                    log(&alloc::format!(
+                        "the doorbell aperture (BAR2) was refused: {e:?}"
+                    ));
+                    None
+                }
+            }
+        });
     // What the GPU reaches in system memory: 44 bits on an APU (the
     // reference's DMA mask), pages aligned. A tag the broker will not make
     // leaves the driver without system memory for the GPU, as before.
@@ -265,6 +306,7 @@ fn amd_aperture(cx: &mut AttachCx<'_>, child: &Arc<PciChild>) -> Option<Arc<Aper
             mmio,
             len: usize::try_from(len).unwrap_or(0),
             vram,
+            doorbells,
             pci: Arc::clone(child),
             tag,
             sink: Once::new(),
@@ -332,6 +374,7 @@ impl Driver for VgaPci {
                     mmio,
                     len: usize::try_from(NVIDIA_BAR0_LEN).unwrap_or(0),
                     vram: None,
+                    doorbells: None,
                     pci: Arc::clone(&child),
                     tag: Some(tag),
                     sink: Once::new(),

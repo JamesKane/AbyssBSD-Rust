@@ -1003,3 +1003,30 @@ are left out, as reading one takes the semaphore) on the X870E at the GOP's stat
   memory hub's identity-aperture registers are not in the specification's table and are left alone; context 1
   is not used.
 
+### 16.10 R2.4: doorbells, and R2 done (2026-11-24)
+
+- **Doorbells work.** `vgapci` maps BAR2 (the 2 MiB doorbell aperture); `lib/amdgpu/src/doorbell.rs` enables the
+  aperture (`RCC_DOORBELL_APER_EN`), programs the bus interface's interrupt handler range (dword `0x2f0`, two
+  dwords) behind the NBIF index/data pair (`RSMU_INDEX` `0x50`, `RSMU_DATA` `0x54`, byte `0x1403bc8`, the index put
+  back as found), and sets `IH_DOORBELL_RPTR`. `dev.drmn.1.doorbells` then makes the interrupt handler publish its
+  read pointer by doorbell (BAR2 byte `0xbc0`) instead of the register. On the X870E, with the interrupts at 60 a
+  second, `IH_RB_RPTR` reads back the driver's pointer (`0x26e0`, and `0x3d60` on a second run: they agree), and
+  `kmsflip` flips as before.
+- **R2 is done:** MSI vector and interrupt ring in video memory (R2.1), both translation hubs (R2.2, R2.3),
+  doorbells (R2.4), and the display's vertical blanking from the interrupt. The hubs and doorbells are set up
+  on request (`gmc`, `gmc_mm`, `doorbells`); they become automatic when the engines need them (R4).
+
+**R3 as the specification's author lays it out (05, 03; 2026-11-24).** Everything in R3's PSP part fits video
+memory addresses (the ring, command and fence buffers, the 1 MiB-aligned staging buffer, the image area, the trusted
+memory zone, each by its `0xF4_...` GPU address; the zone's separate physical address field is `0x18_4000_0000`
+plus the offset), so the GART is not needed. The secure OS is already running (`C2PMSG_81` nonzero): create the
+ring, load the TOC (`psp_13_0_5_toc.bin` from offset `0x100`, 1,536 bytes; command `0x20`; the response's size
+field is the zone's, `0xa00000`), set the zone up (`0x05`, flags `0x2`), then the images. **Loading the display
+microcontroller's image (type 51) is held back to the display's second stage:** the platform's firmware is
+driving the display, and the reference never loads it alone after the other images (untested). The engine images
+(SDMA0, CE, PFP, ME, MEC, the RLC lists and RLC_G, then "start RLC autoload", the ASD from the trusted
+applications file) are R4's graphics bring-up, not the display's; R3 for the display needs the ring, the TOC,
+the zone, and then the display microcontroller's load as one experiment. The files (decompressed from linux-firmware
+20261019, checked against 02 section 11) are: `psp_13_0_5_toc.bin`, `psp_13_0_5_ta.bin`, `sdma_5_2_6.bin`,
+`gc_10_3_6_{ce,pfp,me,mec,mec2,rlc}.bin`, `dcn_3_1_5_dmcub.bin`.
+

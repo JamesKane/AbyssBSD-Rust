@@ -9,6 +9,7 @@ use alloc::sync::{Arc, Weak};
 use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use amdgpu::doorbell;
 use amdgpu::flip;
 use amdgpu::ih;
 use amdgpu::regs::Window;
@@ -44,6 +45,9 @@ pub(crate) struct Irq {
     active: AtomicBool,
     /// The read pointer, a byte offset, as last given to the hardware.
     rptr: AtomicU32,
+    /// Whether the read pointer goes to the hardware through the doorbell
+    /// (stage R2.4) rather than the register.
+    doorbell: AtomicBool,
     /// Called for each frame-start event, in interrupt context.
     on_frame: sync::Once<alloc::boxed::Box<dyn Fn(u64) + Send + Sync>>,
     interrupts: AtomicU64,
@@ -67,6 +71,7 @@ impl Irq {
             gpu,
             active: AtomicBool::new(false),
             rptr: AtomicU32::new(0),
+            doorbell: AtomicBool::new(false),
             on_frame: sync::Once::new(),
             interrupts: AtomicU64::new(0),
             entries: AtomicU64::new(0),
@@ -166,6 +171,45 @@ impl Irq {
         Ok(())
     }
 
+    /// Moves the read pointer to the doorbell (stage R2.4): the aperture
+    /// enabled, the bus interface's range for the handler, and the handler's
+    /// doorbell register. Returns the read pointer the driver holds and the
+    /// one the register shows after a moment, which agree if the hardware
+    /// took the doorbell.
+    ///
+    /// # Errors
+    ///
+    /// `ENXIO` with no doorbell aperture, `EINVAL` if the interrupts are
+    /// not running.
+    pub(crate) fn use_doorbell(&self) -> Result<(u32, u32), abi::errno::Errno> {
+        use abi::errno::Errno;
+        let gpu = self.gpu.upgrade().ok_or(Errno::ENXIO)?;
+        if gpu
+            .doorbell_len()
+            .is_none_or(|l| l < (doorbell::IH_DOORBELL_DWORD as usize + 2) * 4)
+        {
+            return Err(Errno::ENXIO);
+        }
+        if !self.active() {
+            return Err(Errno::EINVAL);
+        }
+        let w = Bar5(&gpu);
+        doorbell::program_ih_range(&w);
+        w.write32(
+            ih::DOORBELL_RPTR,
+            doorbell::ih_doorbell_rptr(doorbell::IH_DOORBELL_DWORD),
+        );
+        self.doorbell.store(true, Ordering::Release);
+        // Publish the current pointer once through the doorbell, then give
+        // the hardware a moment (it is an inbound write) and read the
+        // register.
+        let held = self.rptr.load(Ordering::Acquire);
+        gpu.doorbell_write32((doorbell::IH_DOORBELL_DWORD * 4) as usize, held);
+        bus::manager().delay_us(2000);
+        let shown = w.read32(ih::RB_RPTR);
+        Ok((self.rptr.load(Ordering::Acquire), shown))
+    }
+
     /// Turns the display's event and the handler off.
     pub(crate) fn stop(&self) {
         if !self.active.swap(false, Ordering::AcqRel) {
@@ -217,7 +261,11 @@ impl Irq {
             w.write32(ih::RB_CNTL, c | ih::cntl::WPTR_OVERFLOW_CLEAR);
             w.write32(ih::RB_CNTL, c & !ih::cntl::WPTR_OVERFLOW_CLEAR);
         }
-        w.write32(ih::RB_RPTR, d.rptr);
+        if self.doorbell.load(Ordering::Acquire) {
+            gpu.doorbell_write32((doorbell::IH_DOORBELL_DWORD * 4) as usize, d.rptr);
+        } else {
+            w.write32(ih::RB_RPTR, d.rptr);
+        }
         if frame {
             // Acknowledge the event, keeping the interrupt enabled.
             w.write32(

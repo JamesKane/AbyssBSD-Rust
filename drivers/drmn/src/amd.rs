@@ -524,6 +524,24 @@ impl Amd {
         r
     }
 
+    /// Moves the interrupt handler's read pointer to the doorbell and checks
+    /// the register shows what was written (stage R2.4).
+    pub(crate) fn doorbells(&self) -> Result<(), abi::errno::Errno> {
+        match self.irq.use_doorbell() {
+            Ok((held, shown)) => {
+                self.log(format_args!(
+                    "doorbells: the interrupt handler's read pointer {held:#x}, its register {shown:#x} ({})",
+                    if held == shown { "agree" } else { "DIFFER" }
+                ));
+                Ok(())
+            }
+            Err(e) => {
+                self.log(format_args!("doorbells not started: {e:?}"));
+                Err(e)
+            }
+        }
+    }
+
     /// Turns the interrupts off.
     pub(crate) fn stop_interrupts(&self) {
         self.irq.stop();
@@ -701,6 +719,14 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         "gmc_mm",
         "Write 1 to set the memory hub up (the display's and the interrupt handler's): as `gmc`",
         move || r.gmc(amdgpu::gmc::Hub::Mm),
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "doorbells",
+        "Write 1 to enable the doorbell aperture and publish the interrupt handler's read pointer through its doorbell",
+        move || r.doorbells(),
     );
     let r = Arc::clone(a);
     crate::control::trigger(
