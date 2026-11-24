@@ -27,6 +27,28 @@ pub const FLIP_PENDING: u32 = 1 << 8;
 /// The immediate-flip bit of [`FLIP_CONTROL`].
 pub const FLIP_IMMEDIATE: u32 = 1 << 1;
 
+/// `OTG0_OTG_STATUS_FRAME_COUNT`: bits 23:0 count the frames the timing
+/// generator has sent.
+pub const OTG0_FRAME_COUNT: usize = 0x14030;
+
+/// The timing generator's frame count (24 bits, wrapping).
+pub fn frame_count<W: Window + ?Sized>(w: &W) -> u32 {
+    w.read32(OTG0_FRAME_COUNT) & 0x00ff_ffff
+}
+
+/// Frames between two counts of [`frame_count`], across a wrap.
+#[must_use]
+pub const fn frames_between(first: u32, second: u32) -> u32 {
+    second.wrapping_sub(first) & 0x00ff_ffff
+}
+
+/// The refresh rate in millihertz from `frames` counted over `micros`
+/// microseconds; `None` for no time.
+#[must_use]
+pub fn refresh_millihz(frames: u32, micros: u64) -> Option<u64> {
+    (u64::from(frames) * 1_000_000_000).checked_div(micros)
+}
+
 /// The host-data-path flush: write to this byte offset of BAR5 once it has
 /// been pointed there by [`HDP_MEM_FLUSH_REMAP`] (05 §7).
 pub const HDP_FLUSH_PAGE: usize = 0x7f000;
@@ -164,6 +186,19 @@ mod tests {
             self.log.borrow_mut().push((offset, value));
             self.regs.borrow_mut()[offset / 4] = value;
         }
+    }
+
+    #[test]
+    fn frames_are_counted_across_the_counters_wrap() {
+        assert_eq!(frames_between(10, 70), 60);
+        assert_eq!(frames_between(0x00ff_ffff - 5, 54), 60);
+        assert_eq!(frames_between(7, 7), 0);
+        // 180 frames in three seconds is 60 hertz; 1,000 microseconds of nothing is no rate.
+        assert_eq!(refresh_millihz(180, 3_000_000), Some(60_000));
+        assert_eq!(refresh_millihz(3, 0), None);
+        let m = Model::gop();
+        m.set(OTG0_FRAME_COUNT, 0xab00_0042);
+        assert_eq!(frame_count(&m), 0x42, "only the 24-bit count");
     }
 
     #[test]

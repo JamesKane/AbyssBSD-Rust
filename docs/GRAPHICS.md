@@ -879,6 +879,13 @@ presents (`simpledrm`-like). Spec 09 lists what RADV expects; none of it is in R
   screen, `vt` does not draw, so the console's surface shows what it last drew.
 - **Shutdown and reset keep the last frame.** `stop` flips back to the console's surface for every detach reason
   except `Shutdown` and `Reset`, across which the last frame stays rather than flashing the console.
-- **Still to do in R1:** a timer-versus-hardware check of vblank, `hw.drmn.kms` on by default once the owner agrees, and the run of the Sway acceptance on it.
+- **Vblank by timer is right (2026-11-24).** `dev.drmn.1.refresh` counts the timing generator's frames
+  (`OTG0_OTG_STATUS_FRAME_COUNT`, `0x14030`) over three seconds: 180 frames in 3.000053 s, 59.998 Hz, against the
+  mode's 60.000 Hz and the core's frame timer (which runs at the mode's rate while the card has no vertical
+  blanking interrupt). The 0.003% difference is under a frame in ten minutes; the interrupt comes with R2.
+- **On by default.** `hw.drmn.kms` is on unless set to 0; the card still registers only if the firmware's display
+  is running and is the console's, so it does nothing on a machine where the Radeon is not the boot display. The
+  board boots with no tunable and gets `dri/card1`.
+- **Still to do in R1:** the Sway acceptance on this card.
 - **Not yet read or done:** the decoding of the platform display firmware's window registers is in the
   specification's 08 section 9.0.1; stage R3 overwrites those windows, so R1 stays out of the top 2 MiB.

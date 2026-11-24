@@ -423,6 +423,33 @@ impl Amd {
         }
     }
 
+    /// Counts the timing generator's frames over three seconds and logs the
+    /// refresh rate they make, to compare with the mode's (the core's frame
+    /// timer runs at the mode's rate, since the card has no vertical
+    /// blanking interrupt yet).
+    pub(crate) fn refresh(&self) -> Result<(), abi::errno::Errno> {
+        use amdgpu::flip;
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        let first = flip::frame_count(&w);
+        let started = sched::now_ns();
+        for _ in 0..3000 {
+            bus::manager().delay_us(1000);
+        }
+        let second = flip::frame_count(&w);
+        let micros = sched::now_ns().saturating_sub(started) / 1000;
+        let frames = flip::frames_between(first, second);
+        match flip::refresh_millihz(frames, micros) {
+            Some(mhz) => self.log(format_args!(
+                "refresh: {frames} frames in {micros} us is {}.{:03} Hz (the mode says 60.000)",
+                mhz / 1000,
+                mhz % 1000
+            )),
+            None => self.log(format_args!("refresh: no time passed")),
+        }
+        Ok(())
+    }
+
     /// A one-line summary of the cached table, for a sysctl.
     pub(crate) fn summary(&self) -> String {
         match &*self.table.lock() {
@@ -473,6 +500,14 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         "vram",
         "Write 1 to read a few words of VRAM through BAR0 and log them (read-only)",
         move || r.vram_probe(),
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "refresh",
+        "Write 1 to count frames for three seconds and log the refresh rate they make (read-only)",
+        move || r.refresh(),
     );
     crate::control::trigger(
         t,
