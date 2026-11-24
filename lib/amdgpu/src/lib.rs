@@ -30,6 +30,7 @@ mod display_regs;
 pub mod doorbell;
 pub mod flip;
 pub mod gmc;
+pub mod hdmi;
 pub mod ih;
 pub mod memory;
 mod memory_regs;

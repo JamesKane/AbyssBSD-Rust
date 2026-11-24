@@ -70,6 +70,8 @@ pub(crate) struct Amd {
     dummy: SpinLock<Option<vm::dma::DmaCoherent<u8>>>,
     /// The security processor's ring, once made.
     psp: SpinLock<Option<crate::psp::Brought>>,
+    /// Whether the audio side of HDMI is prepared (stage R3.4).
+    hdmi_prepared: core::sync::atomic::AtomicBool,
 }
 
 /// Where the GART's page table is in video memory (BAR0 offset): past the
@@ -112,6 +114,7 @@ impl Amd {
             kms: SpinLock::new(None),
             dummy: SpinLock::new(None),
             psp: SpinLock::new(None),
+            hdmi_prepared: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -713,6 +716,91 @@ impl Amd {
         *self.psp.lock() = Some(brought);
     }
 
+    /// Logs the HDMI and audio registers worth watching, with the frame
+    /// count, under `what`.
+    fn hdmi_watch(&self, w: &Bar5<'_>, what: &str) {
+        use amdgpu::regs::Window;
+        use amdgpu::{flip, hdmi};
+        self.log(format_args!(
+            "HDMI: {what} (frames {}):",
+            flip::frame_count(w)
+        ));
+        for (name, at) in hdmi::WATCH {
+            self.log(format_args!("  {name} @{at:#07x} = {:#010x}", w.read32(*at)));
+        }
+        let ep = |i: u32| hdmi::endpoint_read(w, i);
+        self.log(format_args!(
+            "  endpoint 0: speakers {:#x}, descriptor 1 {:#x}, hot-plug {:#x}",
+            ep(hdmi::EP_CHANNEL_SPEAKER),
+            ep(hdmi::EP_AUDIO_DESCRIPTOR + 1),
+            ep(hdmi::EP_HOTPLUG)
+        ));
+    }
+
+    /// The audio side of HDMI (stage R3.4, steps 1 to 3 of 08 section 4.6):
+    /// the encoder's audio setup, the endpoint, the audio clock. The picture
+    /// is not touched.
+    pub(crate) fn hdmi_prepare(&self) -> Result<(), abi::errno::Errno> {
+        use amdgpu::hdmi;
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        self.hdmi_watch(&w, "before the audio preparation");
+        hdmi::audio_encoder(&w, 0);
+        self.log(format_args!("HDMI: encoder audio setup done"));
+        hdmi::endpoint_configure(&w);
+        self.log(format_args!("HDMI: endpoint 0 configured"));
+        hdmi::audio_clock(&w);
+        self.log(format_args!("HDMI: audio clock set (148.5 MHz)"));
+        self.hdmi_prepared
+            .store(true, core::sync::atomic::Ordering::Release);
+        self.hdmi_watch(&w, "after the audio preparation");
+        Ok(())
+    }
+
+    /// The video switch to HDMI mode, the AVI info frame, the packet
+    /// controls, the endpoint's enable and the unmute (steps 4 to 7). This
+    /// disturbs the stream while the encoder's FIFO resets.
+    pub(crate) fn hdmi_enable(&self) -> Result<(), abi::errno::Errno> {
+        use amdgpu::{flip, hdmi};
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        if !self.hdmi_prepared.load(core::sync::atomic::Ordering::Acquire) {
+            self.hdmi_prepare()?;
+        }
+        let pause = |us: u32| bus::manager().delay_us(u64::from(us));
+        self.hdmi_watch(&w, "before the switch to HDMI mode");
+        hdmi::video_mode(&w, &pause);
+        self.log(format_args!(
+            "HDMI: encoder in HDMI mode (frames {})",
+            flip::frame_count(&w)
+        ));
+        let clear = hdmi::avi_info_frame(&w, &pause);
+        self.log(format_args!(
+            "HDMI: AVI info frame written (no conflict: {clear})"
+        ));
+        hdmi::packet_controls(&w);
+        self.log(format_args!("HDMI: packet controls set"));
+        bus::manager().delay_us(50_000);
+        self.log(format_args!(
+            "HDMI: 50 ms later: frames {}",
+            flip::frame_count(&w)
+        ));
+        hdmi::endpoint_enable(&w);
+        self.log(format_args!("HDMI: endpoint 0 audio enabled"));
+        hdmi::unmute(&w);
+        bus::manager().delay_us(50_000);
+        self.hdmi_watch(&w, "after the switch, the enable and the unmute");
+        Ok(())
+    }
+
+    /// The reverse of the audio enable: mute, then clear the endpoint.
+    pub(crate) fn hdmi_off(&self) -> Result<(), abi::errno::Errno> {
+        let gpu = self.gpu()?;
+        amdgpu::hdmi::mute_and_disable(&Bar5(&gpu));
+        self.log(format_args!("HDMI: audio muted and the endpoint cleared"));
+        Ok(())
+    }
+
     /// A one-line summary of the cached table, for a sysctl.
     pub(crate) fn summary(&self) -> String {
         match &*self.table.lock() {
@@ -821,6 +909,26 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             .map_err(|_| abi::errno::Errno::EAGAIN)
         },
     );
+    for (name, help, f) in [
+        (
+            "hdmi_audio",
+            "Write 1 to prepare the HDMI audio side (encoder, endpoint, clock); the picture is not touched",
+            Amd::hdmi_prepare as fn(&Amd) -> Result<(), abi::errno::Errno>,
+        ),
+        (
+            "hdmi",
+            "Write 1 to switch the encoder to HDMI mode with the AVI info frame and enable audio; disturbs the picture briefly",
+            Amd::hdmi_enable,
+        ),
+        (
+            "hdmi_off",
+            "Write 1 to mute the HDMI audio and clear the endpoint",
+            Amd::hdmi_off,
+        ),
+    ] {
+        let r = Arc::clone(a);
+        crate::control::trigger(t, node, name, help, move || f(&r));
+    }
     let r = Arc::clone(a);
     crate::control::trigger(
         t,
