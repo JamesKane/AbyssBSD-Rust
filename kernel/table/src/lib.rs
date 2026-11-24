@@ -48,6 +48,7 @@ macro_rules! drivers {
             rge::DRIVER,
             ahci::AHCI,
             ahci::AHCICH,
+            vgapci::DRIVER,
             virtio_random::DRIVER,
             virtio_input::DRIVER,
             xhci_driver::PCI,

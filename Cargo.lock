@@ -342,6 +342,7 @@ dependencies = [
  "uart",
  "umass",
  "usbus",
+ "vgapci",
  "virtio",
  "virtio-blk",
  "virtio-input",
@@ -1246,6 +1247,14 @@ dependencies = [
  "sync",
  "ustar",
  "vm",
+]
+
+[[package]]
+name = "vgapci"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
 ]
 
 [[package]]
