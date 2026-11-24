@@ -176,7 +176,15 @@ fn amd_aperture(cx: &mut AttachCx<'_>, child: &Arc<PciChild>) -> Option<Arc<Aper
         .position(|b| b.index == 0)
         .and_then(|i| {
             let size = child.function.bars.iter().find(|b| b.index == 0)?.size;
-            Some((cx.mmio_bytes(i).ok()?, usize::try_from(size).ok()?))
+            match cx.mmio_bytes(i) {
+                Ok(m) => Some((m, usize::try_from(size).ok()?)),
+                Err(e) => {
+                    log(&alloc::format!(
+                        "the VRAM aperture (BAR0) was refused: {e:?}"
+                    ));
+                    None
+                }
+            }
         });
     match cx.mmio_bytes(index) {
         Ok(mmio) => Some(Arc::new(Aperture {

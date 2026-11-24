@@ -425,14 +425,14 @@ those results are recorded and do not gate.
    RTX 4070 (NVIDIA's open kernel modules are dual MIT/GPL, GSP firmware does most of the work,
    and FreeBSD's baseline is NVIDIA's own driver) comes later.
 
-   **2026-11-24:** the project owner chose to start the X870E's graphics work with the RTX 4070
-   (`AD104`), not the RDNA2 iGPU, because a clean-room specification exists for it
-   (`~/Projects/OS/chinese-wall/specs/nvidia-nova`) and none for the Radeon. `lib/nvgpu` holds the
-   first slice (chip identification, the Video BIOS reader, the `NVFW` firmware container), host-tested
-   on images built from the specification. This reverses the order above for the X870E; ADR-0018 and
-   ADR-0026 still say RDNA2 first, and need an amendment before the order in section 9 changes.
+   **2026-11-24:** both X870E GPUs were brought up far enough to read them, and the owner has chosen to
+   carry the **Radeon first, on the iGPU**, to completion (§16), matching the ADRs. The RTX 4070
+   (`drivers/drmn`'s NVIDIA half, `lib/nvgpu`, the clean-room `nvidia-nova` specification) stays where it
+   stopped: identified, its Video BIOS and firmware files read, and the firmware security microcode's FRTS
+   command run once on request (§9 of HARDWARE.md); the GSP boot waits.
    On FreeBSD a native GPU driver is a child of the PCI function's `vgapci` (`drmn0` under `vgapci0`
-   in the QEMU corpus), so the native driver should attach as that child, leaving `vgapci0` in the tree.
+   in the QEMU corpus); the native drivers attach the same way.
+
 2. **FreeBSD's discovery and policy details** (§2, §7.4, §8): sysctl names, devd strings, master
    privileges, device node modes. Record them from FreeBSD 15.1 with `drm-kmod` before writing
    `sys/drm`.
@@ -742,3 +742,110 @@ the run that passed did not need either.
 
 Open: the sync polarities (a monitor that locks regardless would show the same picture); DisplayID
 extensions, YCbCr 4:2:0-only modes, interlaced modes and the audio blocks are not read.
+
+## 16. Radeon on the X870E (Raphael, then Navi 22): state and plan
+
+Specification: `~/Projects/OS/chinese-wall/specs/amd-rdna2` (sections 01 to 12; every source MIT).
+Code: `lib/amdgpu` (MIT, with AMD's notices), `drivers/drmn` (the AMD half), `vgapci`.
+
+### 16.1 Built and measured (2026-11-24)
+
+- **Attach.** `vgapci1` maps the register window (BAR5) and adds `drmn1`, which reads two fixed registers
+  (VRAM size, 512 MiB; the platform security processor's ready bit) and declines a device that answers all
+  ones. Nothing is written at attach.
+- **IP discovery.** `dev.drmn.1.discover` reads the table from the last 64 KiB of VRAM through the index
+  registers (restored afterwards, one lock) and logs 30 blocks, identical to Fedora's: GC 10.3.6, SDMA 5.2.6,
+  DMU (display) 3.1.5, PSP/SMU 13.0.5, interrupt handler 5.2.1, host data path 5.2.0, bus interface 7.3.0.
+- **The firmware's display (`dev.drmn.1.display`, 224 reads, no writes).** Pipe 0 only: plane 0, blend 0,
+  output processor 0, timing generator 0, encoder 0. 1920x1080 in a 2200x1125 total (Linux's later timing).
+  The surface is **linear, 32-bit ARGB, pitch 7,680 bytes, with no compression, at the first byte of VRAM**
+  (GPU address `0xF400000000`); the plane's system aperture covers all of VRAM, so a surface anywhere in VRAM
+  scans out with no page tables. The encoder is in DVI mode (no audio on HDMI as left). The display
+  microcontroller (DMCUB) runs the platform's firmware, not the driver's (scratch 0 = `0x42`).
+- **The kernel's framebuffer is BAR0.** `efifb: framebuffer at 0xfc10000000, 0x7e9000 bytes`: the loader's
+  GOP surface is the first 8,294,400 bytes of the iGPU's VRAM aperture (BAR0, 256 MiB of the 512 MiB), which is
+  the test for "this GOP picture is this device's": compare the loader's base with BAR0's.
+- **Frame buffer offset.** `DCN_VM_FB_OFFSET` = `0x1840`, so VRAM is system physical `0x1840000000`
+  (ACPI-reserved), as the wall author inferred.
+- **What firmware owns at handover** (wall author, 01 §6.1): VRAM `0` to the end of the GOP surface (use 9 MiB),
+  and the top 2 MiB (`0x1fe00000` on; the discovery table is in it). Not firmware-owned, so ours to place:
+  the PSP's trusted memory zone (10 MiB; Linux `0x1e000000`), the GART table (Linux `0x1fc00000`) and the
+  display microcontroller's windows.
+
+### 16.2 Stages
+
+Each stage names what it needs and how it is seen to work on the board. The first two are independent of the
+PSP; **mode setting and HDMI audio wait on the PSP** because the display microcontroller runs the platform's
+firmware (§16.1) and stage R3 must load the driver's.
+
+| Stage | Work | Depends on | Exit (seen on the X870E) |
+|---|---|---|---|
+| R0 | Identify; read the discovery table and the firmware's display state | Done | `drmn1` attaches; the table and the display read match Fedora's |
+| R1 | Adopt the running display (pipe 0); scan out the driver's own buffers by flipping the surface address; the KMS device `gop-kms` gives way to; vblank; `vt` follows | The CPU path to VRAM (§16.3); sys/drm; vt handover | A dumb-buffer client (a test pattern, then `kms-test`) flips between two buffers at 60 Hz with the panel never blanking; killing the driver (or a panic) puts the firmware's picture back |
+| R2 | Memory: GMC (apertures, GART, GPU page tables), the interrupt ring, the doorbells | Spec 05 | A GPU page-table walk of a test buffer; an interrupt (a fence signalled by the engine in R4) arrives |
+| R3 | The platform security processor (load firmware, set the trusted memory zone), the SMU (clocks), the DMCUB bring-up; then mode setting (timing, clocks, watermarks) and HDMI mode with audio | Specs 03, 04, 08 stage 2 and 3 | A new mode (1280x720, then 3840x2160 on a second output) comes up and the old one returns; an HDMI info frame and HD Audio over HDMI work |
+| R4 | The graphics and DMA engines (ring buffers, the command processor), the userland interface (`amdgpu` ioctls) | Specs 06, 07, 09 | `vkcube` through RADV, then Sway through wlroots on Vulkan (the acceptance capture, §14) |
+| R5 | The same on the Navi 22 (Z690-A) | Its discovery table (read by R0 on that box) and VBIOS | R0's exit there, then R1 |
+
+### 16.3 Stage R1
+
+**Where the work lives.** A `dcn` module in `drivers/drmn`'s AMD half implements `sys/drm`'s `CrtcHw`,
+`PlaneHw`, `EncoderHw` and `ConnectorHw` for the adopted pipe. Adoption is as §15.5 does for Sky1: only if a
+timing generator runs **and** the loader's framebuffer lies in this device's BAR0 (the alias test in §16.1);
+with the RTX 4070 as the boot display it does nothing. The KMS device it registers replaces `gop-kms`
+(§7.5): `vt` switches to its console framebuffer and back if it detaches.
+
+**What a flip is.** Write the surface address high then low (`HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH`
+`0xeb2c`, then `_ADDRESS` `0xeb28`), with pitch `0xeb1c` (pixels minus 1) and format unchanged from what the
+firmware set; poll the flip-pending bit, or the vblank, for completion. Nothing else is touched in R1: no
+clocks, no watermarks, no timing, and the encoder stays in the mode firmware left it.
+
+**Buffers.** Scan-out buffers are allocated from the VRAM range `[9 MiB, 0x1e000000)` (about 471 MiB), leaving
+the top 32 MiB for R2 and R3 (the trusted memory zone, the GART table, the microcontroller's windows). Their GPU
+address is `0xF400000000 + offset`; the plane's aperture already covers them.
+
+**The CPU path (decision needed, §16.4).** A dumb buffer needs the CPU to write pixels into VRAM. The
+candidates:
+
+1. *BAR0.* It is this node's own resource and a WC window onto the first 256 MiB of VRAM, enough for R1. The
+   broker refuses the grant today, because the console's framebuffer (the same bytes, `0xfc10000000`) is on its
+   list of sensitive ranges: a leaf driver may not map the kernel's console. The adoption itself is what
+   moves the console, so the rule should lift for the owner of the BAR the console lies in, once it has
+   registered a replacement.
+2. *The carve-out at `0x1840000000` (512 MiB).* It reaches all of VRAM, but it is ACPI-reserved memory, not a
+   PCI resource, so it would need a new kind of grant (a platform memory claim computed from two registers,
+   not a table entry per board).
+
+R1 recommends (1). Writes through BAR0 need the host-data-path flush before the display reads them (the
+register is in spec 05); the probe `dev.drmn.1.vram` (reads the first words of BAR0; written, not yet
+accepted, see §16.5) is the first test.
+
+**Fallback.** `stop` and the panic path write the firmware surface's address back (it is never overwritten:
+buffers start above 9 MiB) and unregister the KMS device, so `vt` draws on the efifb range again. The board has
+no serial, so this is the only recovery short of a power cycle.
+
+**Vblank.** No interrupt ring until R2. Start with the core's timer from the mode's refresh rate
+(`vblank_interrupt()` false, as `gop-kms` does), and read the timing generator's frame counter to confirm.
+
+**First board test.** A sysctl that flips between two buffers holding a test pattern, back to the firmware
+surface after a timer, so a hang can be told from a bad picture on the screen.
+
+**Driver name.** The userland ioctl `DRM_IOCTL_VERSION` reports the Linux driver name, `amdgpu` (§2), but R1
+has no render side: Mesa probes by that name and finds no render node, which is the case `gop-kms` already
+presents (`simpledrm`-like). Spec 09 lists what RADV expects; none of it is in R1.
+
+### 16.4 Decisions for the owner
+
+1. **The CPU path to VRAM:** BAR0 with a console-handover exception to the sensitive-range rule (recommended),
+   or the carve-out with a new kind of platform memory claim.
+2. **The iGPU stays the primary display** while this is worked; the firmware setting (Initial Display Output)
+   is the one thing about this machine that is not at its default.
+3. **The order after R1:** R2 (memory and interrupts) before R3 (PSP, SMU, mode setting), or R3 first because
+   mode changes need it and R2 only matters for the render side.
+
+### 16.5 Not yet true
+
+`dev.drmn.1.vram` (reads a few words through BAR0) cannot run yet: the broker refuses the BAR0 grant as
+`Sensitive`, confirmed on the board on 2026-11-24, because the console's framebuffer is the first 8 MiB of that
+BAR (§16.3, the CPU path). The extra watermark, delivery-parameter and microcontroller-window registers (about
+120 more) are in `lib/amdgpu`'s list but have not been read on the board yet.
