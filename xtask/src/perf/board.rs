@@ -13,9 +13,30 @@ use std::path::Path;
 use super::{Report, Side};
 use crate::util::Result;
 
-/// The baseline: the board's FreeBSD kernel without its debugging options
-/// (stock 15.1 does not run on the board).
-const BASELINE: &str = "FreeBSD 16.0-CURRENT f12c9f4ee6 GENERIC-HMP-IOMMU-NODEBUG";
+/// A board the reports are made for: its name, the baseline FreeBSD, and
+/// what the two sides share.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Platform {
+    pub(super) name: &'static str,
+    pub(super) baseline: &'static str,
+    pub(super) shared: &'static str,
+}
+
+/// The Orange Pi 6 Plus: the board's FreeBSD kernel without its debugging
+/// options (stock 15.1 does not run on the board).
+pub(super) const OPI6P: Platform = Platform {
+    name: "the Orange Pi 6 Plus",
+    baseline: "FreeBSD 16.0-CURRENT f12c9f4ee6 GENERIC-HMP-IOMMU-NODEBUG",
+    shared: "the same 15.1 userland (AbyssBSD's root) on both",
+};
+
+/// The Ryzen 9 7900X on the X870E AORUS ELITE WIFI7: stock FreeBSD
+/// 15.1-RELEASE (`tests/perf/x870e/`).
+pub(super) const X870E: Platform = Platform {
+    name: "the Ryzen 9 7900X / X870E",
+    baseline: "FreeBSD 15.1-RELEASE GENERIC (stock)",
+    shared: "FreeBSD 15.1 userland on both",
+};
 
 /// A class's samples: benchmark, side, one value per run.
 type Samples = BTreeMap<String, BTreeMap<Side, Vec<f64>>>;
@@ -55,7 +76,7 @@ fn parse(log: &str) -> Result<(Vec<Sample>, Vec<String>)> {
     Ok((results, env))
 }
 
-pub(super) fn report(dir: &Path, rev: &str) -> Result<()> {
+pub(super) fn report(dir: &Path, rev: &str, p: Platform) -> Result<()> {
     let mut by_class: BTreeMap<String, Samples> = BTreeMap::new();
     let mut units = BTreeMap::new();
     let mut runs: BTreeMap<Side, usize> = BTreeMap::new();
@@ -99,8 +120,9 @@ pub(super) fn report(dir: &Path, rev: &str) -> Result<()> {
     }
 
     let mut text = format!(
-        "perf on the Orange Pi 6 Plus: AbyssBSD {rev} vs {BASELINE}\n\
-         {f} FreeBSD runs, {a} AbyssBSD runs; the same 15.1 userland (AbyssBSD's root) on both\n\n"
+        "perf on {}: AbyssBSD {rev} vs {}\n\
+         {f} FreeBSD runs, {a} AbyssBSD runs; {}\n\n",
+        p.name, p.baseline, p.shared
     );
     for (side, lines) in &env {
         for l in lines {
@@ -109,7 +131,7 @@ pub(super) fn report(dir: &Path, rev: &str) -> Result<()> {
     }
     let mut failures = 0;
     // The classes in the order perf-run.sh runs them.
-    let order = ["big", "mid", "little", "all"];
+    let order = ["big", "mid", "little", "all", "workers"];
     let mut classes: Vec<&String> = by_class.keys().collect();
     classes.sort_by_key(|c| order.iter().position(|o| o == c).unwrap_or(order.len()));
     for class in classes {
@@ -119,7 +141,8 @@ pub(super) fn report(dir: &Path, rev: &str) -> Result<()> {
             text,
             "\n{}",
             report.render_titled(&format!(
-                "core class {class}, AbyssBSD {rev} vs {BASELINE}, {f}/{a} runs"
+                "core class {class}, AbyssBSD {rev} vs {}, {f}/{a} runs",
+                p.baseline
             ))
         );
     }

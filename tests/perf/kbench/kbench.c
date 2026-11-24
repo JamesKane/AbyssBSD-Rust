@@ -151,6 +151,15 @@ kb_cpus(int *ids)
 	return (n < 2 ? 0 : n);
 }
 
+/* Whether debug.kbench.cpus holds a usable list. */
+static bool
+kb_cpus_listed(void)
+{
+	int ids[MAXCPU];
+
+	return (kb_cpus(ids) != 0);
+}
+
 static int
 kb_cpu(int i)
 {
@@ -206,7 +215,11 @@ static void
 kb_default_cpus(struct kb_run *r)
 {
 	for (int i = 0; i < r->nthreads; i++)
-		r->cpus[i] = (i + 1) % KB_NCPU;
+		/*
+		 * With a CPU list, worker i is the list's worker i: the
+		 * wrap at KB_NCPU would put worker 7 on the coordinator's CPU.
+		 */
+		r->cpus[i] = kb_cpus_listed() ? i + 1 : (i + 1) % KB_NCPU;
 }
 
 /*

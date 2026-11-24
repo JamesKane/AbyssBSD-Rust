@@ -215,7 +215,14 @@ fn fits(workers: usize) -> bool {
 
 /// Worker `i`'s CPU in the default placement.
 fn default_cpu(i: usize) -> CpuId {
-    cpu(u32::try_from((i + 1) % CPUS).unwrap_or(0))
+    // With a list, worker `i` is the list's worker `i`: the wrap at `CPUS`
+    // would put worker 7 on the coordinator's CPU.
+    let n = if cpu_list().is_some() {
+        i + 1
+    } else {
+        (i + 1) % CPUS
+    };
+    cpu(u32::try_from(n).unwrap_or(0))
 }
 
 /// Starts one worker per entry of `cpus`, each running `body(run, index)`,

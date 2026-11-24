@@ -41,7 +41,7 @@ Orange Pi 6 Plus: `board/perf-run.sh`). Unset, it behaves as in the guests.
 The in-kernel suites take the same kind of list: AbyssBSD's boot option `abyss.bench.cpus=c,w1,w2,...`
 and the module's `debug.kbench.cpus`. Its first entry is the coordinator's CPU (the suite's CPU
 0), the rest the workers' (the suite's CPU *i* ≥ 1 is entry *i* − 1 of the rest, modulo their
-number), so the workers never share the coordinator's CPU. A benchmark with more workers than the
+number), so the workers never share the coordinator's CPU: with a list, worker *i* of the suite is the list's worker *i* (the default placement's wrap at 8 would put the eighth on the coordinator's CPU). A benchmark with more workers than the
 list has worker CPUs is left out on both sides: a kernel-priority thread is not time-sliced on
 FreeBSD, so two on one CPU would measure that (`t8` on a class of four). On arm64 the module
 counts with the generic timer (`CNTVCT_EL0` at `CNTFRQ_EL0`) where amd64 uses the TSC, and runs

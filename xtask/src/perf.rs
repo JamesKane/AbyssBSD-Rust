@@ -43,7 +43,7 @@ const BOOTSTRAP: usize = 2000;
 
 const USAGE: &str = "usage: cargo xtask --remote perf [--suite p2|p3|p4|p5|p6|p6.thr|p6.event|p6.unix|p6.pty|p7|vt|diag] [--runs N] [--prepare] \
                      [--freebsd-only [--prof] | --abyss-only [--prof [--prof-cpu N]]]\n       \
-                     cargo xtask perf --platform opi6p --dir DIR [--rev REV]";
+                     cargo xtask perf --platform opi6p|x870e --dir DIR [--rev REV]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Side {
@@ -67,7 +67,14 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
         let dir = args.take_value("--dir")?;
         let rev = args.take_value("--rev")?;
         args.finish()?;
-        let (true, Some(dir)) = (platform == "opi6p", dir) else {
+        let (Some(p), Some(dir)) = (
+            match platform.as_str() {
+                "opi6p" => Some(board::OPI6P),
+                "x870e" => Some(board::X870E),
+                _ => None,
+            },
+            dir,
+        ) else {
             return Err(USAGE.into());
         };
         let rev = match rev {
@@ -76,7 +83,7 @@ pub(crate) fn cmd(mut args: Args) -> Result<()> {
                 .trim()
                 .to_owned(),
         };
-        return board::report(Path::new(&dir), &rev);
+        return board::report(Path::new(&dir), &rev, p);
     }
     let suite = args.take_value("--suite")?.unwrap_or_else(|| "p2".into());
     let runs: usize = args
