@@ -484,9 +484,6 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
     20 to 60% either way (ordering the hot functions was measured and dropped). A small change is
     compared there by instructions executed (PMU event `0x08`), not time, until something controls
     it;
-  - the arm64 kernel's target makes no unaligned access, so an integer read out of a byte slice
-    is a byte load each (144 ns of every signal): a sweep of the hot paths that parse bytes
-    (packet headers, on-disk structures);
   - after `p5` has run in the same boot, `kevent.pipe1000` is 7% slower until a reboot. Each
     knote's filter is still its own allocation;
   - the kernel's profiler drops samples taken in user mode (`prof.rs`: `USER` and `OTHER` are the
@@ -496,7 +493,9 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
   a power cycle recovers. Seen from both kernels, so the firmware's reset path is the suspect.
 - **Hangs seen once, not reproduced:** a held key on `vt`; `aarch64-el2` (INTx) in
   `tests/user/cam`, once in three runs in QEMU.
-- **To check on the board:** the RX8900 and the PD controllers, `hcons`' media keys, the `devinfo`
+- **To check on the board:** the arm64 kernel's unaligned access (`-strict-align`, byte loads in
+  the signal path were 144 ns of each signal; boots in QEMU, not yet run on the board: Device
+  memory faults on it), the RX8900 and the PD controllers, `hcons`' media keys, the `devinfo`
   comparison, and FreeBSD's recordings for storage and USB (`tests/corpus/opi6p/freebsd/`).
 - **Small gaps** (compat-deviations): `ichsmb` names, the old `mount(2)` for cd9660, writing BSD
   labels, `glabel`'s `label/` names, USB isochronous transfers and alternate settings.

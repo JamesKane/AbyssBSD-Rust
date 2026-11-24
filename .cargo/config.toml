@@ -15,6 +15,13 @@ rustflags = [
 # The prebuilt aarch64 `core` is not PIC, so it has absolute relocations in
 # read-only sections; `-z notext` allows them. The loader applies every
 # relocation before page permissions take effect.
+#
+# `-strict-align`: the target's default makes every integer read out of a byte
+# slice four or eight byte loads. FreeBSD's arm64 kernel allows unaligned
+# access, as `SCTLR_EL1.A` is clear here, and Normal memory takes it. Device
+# memory does not, so MMIO goes through volatile accesses of the register's
+# own width, and nothing runs in Rust before the MMU is on (`entry.rs`).
+# rustc warns that the feature is unstable (once a crate); it is stable in LLVM.
 [target.aarch64-unknown-none-softfloat]
 rustflags = [
     "-C", "relocation-model=pie",
@@ -22,4 +29,5 @@ rustflags = [
     "-C", "link-arg=-znotext",
     "-C", "link-arg=-zmax-page-size=4096",
     "-C", "force-frame-pointers=yes",
+    "-C", "target-feature=-strict-align",
 ]
