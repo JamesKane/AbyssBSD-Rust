@@ -47,3 +47,12 @@ The same capture as `linux/amdgpu/`, with the monitor on the motherboard's HDMI 
 is the boot VGA device (`boot_vga` 1; the RTX 4070 has none). It adds `amdgpu_dm_dtn_log` (the display core's
 state with the firmware's mode still on screen: 1920x1080 on one HUBP) and the display capability files.
 The video BIOS is the same as in the first capture and is not in the repository.
+
+## `abyssbsd/` (2026-11-24)
+
+What AbyssBSD's `drmn1` (the Radeon 610M, boot VGA through the firmware setting above) read from the hardware,
+`dmesg` lines with the node name stripped: `raphael-drmn1.txt` holds the attach line, the IP discovery table read from
+VRAM through the index registers (30 blocks, identical to `linux/amdgpu/ip_discovery.txt`), and the 224 display
+registers of the amd-rdna2 specification's section 08 section 2.6 **as the firmware's GOP left them**, before any
+driver programmed the display (the one display pipe active: 1920x1080 in a 2200x1125 total, the surface at VRAM
+`0xf400000000`).
