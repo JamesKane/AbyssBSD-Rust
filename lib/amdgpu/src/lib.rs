@@ -27,6 +27,7 @@ pub mod discovery;
 pub mod display;
 mod display_regs;
 pub mod flip;
+pub mod ih;
 pub mod memory;
 mod memory_regs;
 pub mod regs;
