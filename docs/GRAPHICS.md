@@ -896,3 +896,35 @@ presents (`simpledrm`-like). Spec 09 lists what RADV expects; none of it is in R
   clients' buffers in place (R2's page tables) instead of copying them.
 - **Not yet read or done:** the decoding of the platform display firmware's window registers is in the
   specification's 08 section 9.0.1; stage R3 overwrites those windows, so R1 stays out of the top 2 MiB.
+
+### 16.6 R2 and R3 in steps (2026-11-24)
+
+The owner's order is R2 (memory and interrupts), then R3 (the security processor, the display microcontroller,
+mode setting, HDMI audio). Reading specifications 03, 05 and 08 for it shows how little the two depend on
+each other: **the PSP's ring, fence, command and staging buffers, the trusted memory zone and the
+display microcontroller's windows all fit in video memory, which the display and the PSP already reach through
+the system aperture (no page tables)**. R3 therefore does not wait for R2's page tables; R2 is first because it
+brings the vertical blanking interrupt, which R3's mode setting wants, and the memory the engines (R4) need.
+
+The display shares the memory hub (MMHUB) with the multimedia engines, so **R2's hub writes are the first
+that can disturb the picture**. Each is made one hub at a time, the graphics hub (GFXHUB, which the display does
+not use) before the MMHUB, and each is checked by the frame counter still counting and a flip still working.
+
+| Step | Work | Depends on | Exit (seen on the X870E) |
+|---|---|---|---|
+| R2.0 | Read-only capture of the registers R2 will write (both hubs' apertures, L1 TLB and L2 control, fault control, the interrupt handler's ring registers, the host data path, the doorbell aperture and its ranges), as the firmware and the GOP left them; compared with the specification's reference values and Linux's | Done with R1 | The capture is in the corpus; every register the specification names reads as it says or the difference is recorded |
+| R2.1 | Interrupts: one MSI vector through `vgapci`; the interrupt handler's ring in video memory (no GART), its read pointer by register; the display's frame-start interrupt (client 4, source `0x3c`, `OTG0_OTG_GLOBAL_SYNC_STATUS` bit 0); the card's `vblank_interrupt()` true and `Kms::vblank` from the handler, the timer retired | R2.0; interrupt delivery for a `vgapci` child | The interrupt count over three seconds equals the frame count (180 at 60 Hz) and `kmsflip`'s events arrive from it; the ring never overflows over ten minutes of Sway |
+| R2.2 | The graphics hub: GART aperture, system aperture, fault defaults, L1 TLB, L2, context 0 and the user contexts, the invalidation engines, the host data path flush; the GART table in video memory | R2.0; spec 05 §4–5 | Registers read back as written; an invalidation request on engine 17 is acknowledged; the display's frame counter never stops and a flip works throughout |
+| R2.3 | The memory hub (MMHUB), the same, with the display's aperture settings kept as the firmware set them | R2.2 | The same exit, and `kmsflip` and Sway run unchanged; if the picture blinks, the first register that differs is found by writing one at a time |
+| R2.4 | Doorbells: BAR2 mapped, the aperture enabled, the interrupt handler's and the engines' ranges (the Raphael ranges are behind the NBIF index/data pair) | R2.1 | The interrupt handler's read pointer, written through its doorbell, shows in `IH_RB_RPTR` |
+| R3.1 | The firmware files on the board, and the PSP ring: the secure OS is already running (`C2PMSG_81` nonzero); ring, command, fence and staging buffers in video memory; the ring created | The files; spec 03 §1–4 | A harmless command (the security processor's version query, or TOC load) returns success in the response block |
+| R3.2 | The TOC, the trusted memory zone (10 MiB, outside the top 2 MiB the platform's display microcontroller holds), and the display microcontroller's image loaded by type 51; its reset, its windows (CW2–CW6, region 5) and inbox/outbox programmed from the driver layout; its release | R3.1; spec 08 §3.2, §9.0.1 | `SCRATCH0` bits 0 and 1 set (the driver's firmware runs); the picture never blanks until the platform's windows are replaced, and a flip still works after |
+| R3.3 | Mode setting through the display microcontroller and the register path: a second mode, the old mode again; clocks (the SMU, spec 04 §4: Raphael needs messages 4 steps), watermarks from a table, not the GOP's | R3.2; spec 04, 08 §3–6 | 1280x720 and back on the panel, the timing generator's totals as set |
+| R3.4 | HDMI mode with audio: the encoder's HDMI configuration, the audio infoframe and the audio clock; the HD Audio controller on the Radeon's function 1 (the HDA driver is there) | R3.3 | A tone through the monitor's speakers |
+
+**What is on the board for R3.** Firmware files (`dcn_3_1_5_dmcub.bin`, the PSP TOC and trusted applications
+for 13.0.5; 02 §9) are on the Fedora machine under `/lib/firmware/amdgpu` as `.xz`; the board's FreeBSD has none.
+They are loaded with the DMCUB firmware's own 256-byte header and footer intact (spec 02 §6). Getting them onto
+the board is a copy of the files (decompressed on this machine) into the AbyssBSD root; the loader of firmware
+in the kernel is what the NVIDIA half already uses.
+
