@@ -1,5 +1,5 @@
 [package]
-name = "nova"
+name = "drmn"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 abi = { path = "../../lib/abi" }
 bus = { path = "../../sys/bus" }
+amdgpu = { path = "../../lib/amdgpu" }
 nvgpu = { path = "../../lib/nvgpu" }
 sync = { path = "../../sys/sync" }
 sysctl = { path = "../../sys/sysctl" }

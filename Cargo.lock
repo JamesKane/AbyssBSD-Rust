@@ -76,6 +76,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "amdgpu"
+version = "0.0.0"
+
+[[package]]
 name = "amdsbwd"
 version = "0.0.0"
 dependencies = [
@@ -315,6 +319,7 @@ dependencies = [
  "cix-sky1",
  "cpufreq",
  "devtree",
+ "drmn",
  "gpiobus",
  "hcons",
  "hda-driver",
@@ -326,7 +331,6 @@ dependencies = [
  "iicbus",
  "isa",
  "linlondp",
- "nova",
  "nvme",
  "pci",
  "rge",
@@ -370,6 +374,20 @@ dependencies = [
 [[package]]
 name = "drm-fourcc"
 version = "0.0.0"
+
+[[package]]
+name = "drmn"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "amdgpu",
+ "bus",
+ "nvgpu",
+ "sync",
+ "sysctl",
+ "vgapci",
+ "vm",
+]
 
 [[package]]
 name = "edid"
@@ -853,19 +871,6 @@ dependencies = [
  "hal",
  "mbuf",
  "sync",
-]
-
-[[package]]
-name = "nova"
-version = "0.0.0"
-dependencies = [
- "abi",
- "bus",
- "nvgpu",
- "sync",
- "sysctl",
- "vgapci",
- "vm",
 ]
 
 [[package]]
