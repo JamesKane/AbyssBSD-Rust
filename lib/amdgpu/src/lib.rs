@@ -22,4 +22,6 @@ extern crate alloc;
 extern crate std;
 
 pub mod discovery;
+pub mod display;
+mod display_regs;
 pub mod regs;
