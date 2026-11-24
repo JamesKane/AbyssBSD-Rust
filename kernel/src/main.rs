@@ -141,6 +141,13 @@ fn kmain(boot_info: PhysAddr) -> ! {
         kprintln!("entered at EL2; EL2 stub installed, running at EL1");
     }
     kprintln!("command line: {:?}", boot::cmdline());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if boot::flag("abyss.idle.hlt") {
+            arch::cpu::set_idle_halt();
+        }
+        kprintln!("idle: idle CPUs wait with {}", arch::cpu::idle_method());
+    }
     symbols::init(info);
     md::init(info);
 

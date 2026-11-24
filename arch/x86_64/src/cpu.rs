@@ -2,6 +2,7 @@
 //! Privileged instructions: control registers, MSRs, port I/O, halting.
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 /// `IA32_EFER`.
 pub const MSR_EFER: u32 = 0xc000_0080;
@@ -167,12 +168,95 @@ pub fn interrupts_enabled() -> bool {
     flags & (1 << 9) != 0
 }
 
-/// Waits for an interrupt with interrupts masked: `STI; HLT` opens the
-/// interrupt window only while halted (STI's one-instruction shadow
-/// covers HLT), services what arrives, and masks again.
+/// How idle CPUs wait: 0 not yet decided, 1 `MWAIT`, 2 `HLT`.
+static IDLE_WAIT: AtomicU8 = AtomicU8::new(0);
+
+/// The cache line `MONITOR` watches while idle. Nothing writes it: an
+/// interrupt is what ends the wait, as it does a halt (the waker's IPI);
+/// the line only has to be armed for `MWAIT` to wait.
+#[repr(align(64))]
+struct MonitorLine(#[allow(dead_code)] u64);
+static MONITOR_LINE: MonitorLine = MonitorLine(0);
+
+/// Whether idle CPUs may wait with `MWAIT` (hint 0, C1) instead of `HLT`:
+/// the CPU has `MONITOR`/`MWAIT` with interrupts as break events, and
+/// this is not a hypervisor's guest (where it is unavailable or emulated
+/// as a spin). FreeBSD's default idle on such a CPU is the same wait
+/// (`cpu_idle_mwait`, and the C1 of `acpi_cpu_idle`).
+fn mwait_usable() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::arch::x86_64::__cpuid;
+        let leaf1 = __cpuid(1);
+        let monitor = leaf1.ecx & (1 << 3) != 0;
+        let hypervisor = leaf1.ecx & (1 << 31) != 0;
+        if !monitor || hypervisor || __cpuid(0).eax < 5 {
+            return false;
+        }
+        // CPUID.5:ECX bit 0 (extensions enumerated) and bit 1 (interrupts
+        // break a wait even when masked).
+        return __cpuid(5).ecx & 0b11 == 0b11;
+    }
+    #[allow(unreachable_code)]
+    false
+}
+
+/// Whether idle CPUs wait with `MWAIT`, once decided (`HLT` if this
+/// CPU cannot, or `set_idle_halt` asked).
+fn idle_uses_mwait() -> bool {
+    match IDLE_WAIT.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let yes = mwait_usable();
+            IDLE_WAIT.store(if yes { 1 } else { 2 }, Ordering::Relaxed);
+            yes
+        }
+    }
+}
+
+/// Makes idle CPUs wait with `HLT` even where `MWAIT` is usable (boot
+/// option `abyss.idle.hlt`, for comparing the two). On a Ryzen 9 7900X a
+/// core halted for a millisecond or more takes about ten microseconds to
+/// wake (a hundred and more after five milliseconds), where `MWAIT` in C1
+/// takes under one.
+pub fn set_idle_halt() {
+    IDLE_WAIT.store(2, Ordering::Relaxed);
+}
+
+/// How idle CPUs wait, for the boot log: "MWAIT (C1)" or "HLT".
+pub fn idle_method() -> &'static str {
+    if idle_uses_mwait() {
+        "MWAIT (C1)"
+    } else {
+        "HLT"
+    }
+}
+
+/// Waits for an interrupt with interrupts masked: `STI; HLT` (or
+/// `STI; MWAIT`) opens the interrupt window only while waiting (STI's
+/// one-instruction shadow covers it), services what arrives, and masks
+/// again.
 pub fn wait_for_interrupt() {
-    // SAFETY: the caller is ready for interrupts while halted.
-    unsafe { asm!("sti", "hlt", "cli", options(nostack)) };
+    if idle_uses_mwait() {
+        // SAFETY: MONITOR/MWAIT are usable (`mwait_usable`); the line is
+        // a valid, readable address; the caller is ready for interrupts
+        // while waiting. A write to the line, or any interrupt, ends the
+        // wait; the caller rechecks its condition either way.
+        unsafe {
+            asm!(
+                "monitor",
+                in("rax") core::ptr::addr_of!(MONITOR_LINE),
+                in("ecx") 0u32,
+                in("edx") 0u32,
+                options(nostack, preserves_flags),
+            );
+            asm!("sti", "mwait", "cli", in("eax") 0u32, in("ecx") 0u32, options(nostack));
+        }
+    } else {
+        // SAFETY: the caller is ready for interrupts while halted.
+        unsafe { asm!("sti", "hlt", "cli", options(nostack)) };
+    }
 }
 
 /// Asks the cache for the line at `p` in a state this CPU can write
@@ -183,6 +267,17 @@ pub fn wait_for_interrupt() {
 pub fn prefetch_write<T>(p: *const T) {
     // SAFETY: a prefetch never faults and has no architectural effect.
     unsafe { asm!("prefetchw [{}]", in(reg) p, options(nostack, preserves_flags)) };
+}
+
+/// Writes this CPU's modified cache lines back to memory and empties its
+/// caches (`WBINVD`), before a reset: the persistent log ring (the previous
+/// boot's log, a panic's message) is kept in RAM, and a platform reset drops
+/// what is still only in a cache. A core halted with `HLT` may flush its
+/// caches by itself in a deep state; one waiting with `MWAIT` in C1 does not.
+pub fn flush_caches() {
+    // SAFETY: WBINVD only moves data between the caches and memory; it is
+    // privileged and the kernel runs at ring 0.
+    unsafe { asm!("wbinvd", options(nostack, preserves_flags)) };
 }
 
 /// Stops this CPU for good.

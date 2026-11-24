@@ -52,6 +52,11 @@ pub fn prefetch_write<T>(p: *const T) {
     unsafe { asm!("prfm pstl1keep, [{}]", in(reg) p, options(nostack, preserves_flags)) };
 }
 
+/// Writes this CPU's modified cache lines back to memory before a reset
+/// (x86_64's `WBINVD`, which its idle `MWAIT` made necessary). Nothing is
+/// done here: no aarch64 board has been seen to lose the log at a reset.
+pub fn flush_caches() {}
+
 /// Stops this CPU for good.
 pub fn halt_forever() -> ! {
     disable_interrupts();
