@@ -928,3 +928,30 @@ They are loaded with the DMCUB firmware's own 256-byte header and footer intact 
 the board is a copy of the files (decompressed on this machine) into the AbyssBSD root; the loader of firmware
 in the kernel is what the NVIDIA half already uses.
 
+### 16.7 R2.0: what the firmware left (2026-11-24)
+
+`dev.drmn.1.memory` (`lib/amdgpu/src/memory.rs`, 120 plain reads; the invalidation engines' semaphore registers
+are left out, as reading one takes the semaphore) on the X870E at the GOP's state; the capture is
+`tests/corpus/x870e/abyssbsd/raphael-drmn1-memory.txt`.
+
+- **As the specification says the reference leaves them.** Both hubs: video memory at `0xf400` to `0xf41f`
+  (16 MiB units), frame buffer offset `0x1840`, system aperture `0x3d0000` to `0x3d07ff` (the whole of video
+  memory, 256 KiB units), default page address 0. Both L2 caches have `CNTL3`, `CNTL4` and `CNTL5` at their reset
+  values (`0x80100007`, `0xc1`, `0x3fe0`); fault control is `0x3ffffffc` (every default-enable bit set, both
+  crash bits clear).
+- **No page tables anywhere.** Context 0 and context 1 of both hubs read `0x007ffe80` (`ENABLE_CONTEXT` clear),
+  with the page-table base, start and end zero. The display, the security processor and the interrupt handler
+  reach video memory by the system aperture alone, which is what R2.1 and R3.1 rely on.
+- **Differences from what Linux writes** (to be settled by the specification's author): the L1 TLB control reads
+  `0x501` on both hubs (Linux's step writes enable, access mode 3, advanced driver model and type 3); fault control
+  2 reads `0x20000` (graphics hub) and `0xa0000` (memory hub); the AGP aperture reads 0 for bottom, top and
+  base (Linux disables it with a bottom of `0xFFFFFF`).
+- **The interrupt handler is off and unmade.** The ring control reads `0x40610000` (enable clear, `MC_SPACE` 4,
+  the reset value), base, pointers and write-back address zero, its doorbell off, the doorbell aperture
+  (`DOORBELL_APER_EN`) 0, the bus interface's interrupt control `0x10000` and its dummy page 0. The host data path's
+  flush-invalidate bit is already set (`HDP_MISC_CNTL` `0x2d600be1`), with the flush remap registers at their
+  defaults `0x385c` and `0x3858`.
+- **Questions sent to the specification's author** about the L1 TLB bits, fault control 2, the AGP window, the
+  interrupt control's bit 16, and whether the interrupt ring and its write-back slot may be in video memory with
+  no page tables. R2.1 builds on that answer.
+

@@ -201,6 +201,42 @@ impl Amd {
         }
     }
 
+    /// Reads the memory, interrupt and doorbell registers the firmware left
+    /// (stage R2.0, docs/GRAPHICS.md §16.6) and logs them: plain reads.
+    pub(crate) fn memory(&self) -> Result<(), abi::errno::Errno> {
+        use abi::errno::Errno;
+        let gpu = self.gpu()?;
+        let d = {
+            let cache = self.table.lock();
+            cache.clone()
+        };
+        let Some(d) = d else {
+            self.log(format_args!(
+                "memory registers: read the discovery table first (dev.drmn sysctl `discover`)"
+            ));
+            return Err(Errno::EINVAL);
+        };
+        match amdgpu::memory::read_all(&Bar5(&gpu), &d) {
+            Ok(readings) => {
+                self.log(format_args!(
+                    "memory registers as the firmware left them ({} reads):",
+                    readings.len()
+                ));
+                for r in &readings {
+                    self.log(format_args!(
+                        "  {} @{:#07x} = {:#010x}",
+                        r.name, r.offset, r.value
+                    ));
+                }
+                Ok(())
+            }
+            Err(skip) => {
+                self.log(format_args!("memory registers not read: {skip:?}"));
+                Err(Errno::ENOTSUP)
+            }
+        }
+    }
+
     /// Tests whether BAR0 is the same memory as the video memory the display
     /// and the index registers see: words at the firmware's framebuffer are
     /// compared between the two paths, and then two words in unused memory
@@ -526,6 +562,14 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         "flip",
         "Write 1 to show a test pattern from video memory for three seconds, then restore the firmware's picture",
         move || r.flip_test(),
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "memory",
+        "Write 1 to read the memory, interrupt and doorbell registers and log them (read-only)",
+        move || r.memory(),
     );
     let r = Arc::clone(a);
     crate::control::trigger(
