@@ -34,7 +34,7 @@ impl Model {
     }
 }
 
-impl Words for Arc<Model> {
+impl Words for Model {
     fn read32(&self, off: usize) -> u32 {
         self.get(off)
     }

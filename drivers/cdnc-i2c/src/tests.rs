@@ -113,7 +113,7 @@ impl State {
     }
 }
 
-impl Words for Arc<Model> {
+impl Words for Model {
     fn read32(&self, off: usize) -> u32 {
         let mut st = self.0.lock().unwrap();
         match off {

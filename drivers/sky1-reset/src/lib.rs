@@ -129,22 +129,8 @@ impl Controller {
     }
 }
 
-/// A controller's 32-bit registers.
-pub trait Words: Send + Sync {
-    /// Reads the word at `offset`.
-    fn read32(&self, offset: usize) -> u32;
-    /// Writes the word at `offset`.
-    fn write32(&self, offset: usize, v: u32);
-}
-
-impl Words for MmioGrant<Bytes> {
-    fn read32(&self, offset: usize) -> u32 {
-        regs::Mmio::read32(self, offset)
-    }
-    fn write32(&self, offset: usize, v: u32) {
-        regs::Mmio::write32(self, offset, v);
-    }
-}
+/// The controller's 32-bit registers.
+pub use regs::Mmio32 as Words;
 
 /// A controller's lines: [`Reset`] over its words.
 pub struct Lines<W> {

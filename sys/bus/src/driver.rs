@@ -204,6 +204,17 @@ pub struct MmioGrant<B> {
     ledger: Arc<Ledger>,
 }
 
+impl regs::Mmio32 for MmioGrant<Bytes> {
+    #[inline]
+    fn read32(&self, offset: usize) -> u32 {
+        Mmio::read32(self, offset)
+    }
+    #[inline]
+    fn write32(&self, offset: usize, v: u32) {
+        Mmio::write32(self, offset, v);
+    }
+}
+
 impl<B> MmioGrant<B> {
     /// Whether firmware or another device shares the range (§8.1).
     #[must_use]

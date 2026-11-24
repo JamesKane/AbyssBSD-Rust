@@ -17,6 +17,8 @@
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+extern crate alloc;
+
 pub mod block;
 pub mod shared;
 
@@ -177,6 +179,39 @@ impl Mmio<Bytes> {
     pub fn write32(&self, offset: usize, v: u32) {
         // SAFETY: as for `read8`.
         unsafe { self.ptr::<u32>(offset).write_volatile(v) }
+    }
+}
+
+/// A block of 32-bit registers by byte offset: what a driver's hardware
+/// logic is written against, so a test can stand in a simulated device for
+/// the mapped one. `Mmio<Bytes>` and the bus's grant implement it; the calls
+/// are static, so they compile to the same volatile accesses.
+pub trait Mmio32: Send + Sync {
+    /// Reads the word at `offset`.
+    fn read32(&self, offset: usize) -> u32;
+    /// Writes the word at `offset`.
+    fn write32(&self, offset: usize, v: u32);
+}
+
+impl<T: Mmio32 + ?Sized> Mmio32 for alloc::sync::Arc<T> {
+    #[inline]
+    fn read32(&self, offset: usize) -> u32 {
+        (**self).read32(offset)
+    }
+    #[inline]
+    fn write32(&self, offset: usize, v: u32) {
+        (**self).write32(offset, v);
+    }
+}
+
+impl Mmio32 for Mmio<Bytes> {
+    #[inline]
+    fn read32(&self, offset: usize) -> u32 {
+        Mmio::read32(self, offset)
+    }
+    #[inline]
+    fn write32(&self, offset: usize, v: u32) {
+        Mmio::write32(self, offset, v);
     }
 }
 
