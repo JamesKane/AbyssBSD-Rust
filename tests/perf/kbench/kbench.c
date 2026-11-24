@@ -585,12 +585,16 @@ kb_fire(void *arg __unused)
 
 static uint64_t *kb_samples;
 
+/* The callout latency's interval and sample count (suite "callout"). */
+static int kb_iv_us = 1000;
+static int kb_iv_n = KB_LAT_CALLOUT;
+
 static void
 kb_callout_lat_body(struct kb_run *r __unused, int idx __unused)
 {
-	uint64_t one_ms = kb_freq / 1000;
+	uint64_t one_ms = kb_freq / 1000 * kb_iv_us / 1000;
 
-	for (int i = 0; i < KB_LAT_CALLOUT; i++) {
+	for (int i = 0; i < kb_iv_n; i++) {
 		uint64_t t0;
 		sbintime_t s0;
 
@@ -598,7 +602,8 @@ kb_callout_lat_body(struct kb_run *r __unused, int idx __unused)
 		kb_fired = 0;
 		t0 = kb_ticks();
 		s0 = sbinuptime();
-		callout_reset_sbt_on(&kb_callout, s0 + SBT_1MS, 0, kb_fire,
+		callout_reset_sbt_on(&kb_callout, s0 + kb_iv_us * SBT_1US, 0,
+		    kb_fire,
 		    NULL, curcpu, C_ABSOLUTE | C_DIRECT_EXEC);
 		while (!kb_fired)
 			msleep_spin(__DEVOLATILE(void *, &kb_fired), &kb_spin,
@@ -1356,6 +1361,37 @@ kb_suite_diag(void)
 	pause("kbsp", hz / 100);
 }
 
+/*
+ * Suite "callout" (investigation, not gating): the callout latency at
+ * other intervals, as AbyssBSD's callout.after probes: a CPU that sleeps
+ * longer between callouts may be woken from a deeper state.
+ */
+static void
+kb_suite_callout(void)
+{
+	static const int ivs[] = { 250, 1000, 2000, 5000 };
+	struct kb_run r;
+	char name[32];
+
+	memset(&r, 0, sizeof(r));
+	kb_samples = malloc(KB_LAT_WAKEUP * sizeof(*kb_samples), M_KBENCH,
+	    M_WAITOK | M_ZERO);
+	for (int i = 0; i < nitems(ivs); i++) {
+		kb_iv_us = ivs[i];
+		kb_iv_n = 200;
+		pause("kbq", hz / 3);
+		r.body = kb_callout_lat_body;
+		r.nthreads = 1;
+		kb_default_cpus(&r);
+		kb_launch(&r, 0);
+		snprintf(name, sizeof(name), "callout.iv%dus", ivs[i]);
+		kb_report_lat(name, kb_samples, kb_iv_n);
+	}
+	kb_iv_us = 1000;
+	kb_iv_n = KB_LAT_CALLOUT;
+	free(kb_samples, M_KBENCH);
+}
+
 static int
 kb_sysctl_run(SYSCTL_HANDLER_ARGS)
 {
@@ -1366,7 +1402,7 @@ kb_sysctl_run(SYSCTL_HANDLER_ARGS)
 	if (error != 0 || req->newptr == NULL)
 		return (error);
 	if (strcmp(suite, "p2") != 0 && strcmp(suite, "p3") != 0 &&
-	    strcmp(suite, "diag") != 0)
+	    strcmp(suite, "diag") != 0 && strcmp(suite, "callout") != 0)
 		return (EINVAL);
 #ifndef __amd64__
 	/* p3 and diag read bhyve's disks, HPET, and q35 SSDT. */
@@ -1382,6 +1418,8 @@ kb_sysctl_run(SYSCTL_HANDLER_ARGS)
 	printf("\nkbench begin %s cpus=%d\n", suite, mp_ncpus);
 	if (strcmp(suite, "p2") == 0)
 		kb_suite_p2();
+	else if (strcmp(suite, "callout") == 0)
+		kb_suite_callout();
 	else if (strcmp(suite, "p3") == 0)
 		kb_suite_p3();
 	else

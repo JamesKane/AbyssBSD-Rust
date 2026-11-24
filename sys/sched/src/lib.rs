@@ -1642,6 +1642,17 @@ fn release_space(c: &PerCpu) {
     drop(loaded);
 }
 
+/// How the idle threads wait, for investigations (`bench`): 0 as ULE
+/// does (spin if the CPU has been switching often, else halt), 1 always
+/// halt, 2 always spin before halting.
+static IDLE_MODE: AtomicU16 = AtomicU16::new(0);
+
+/// Sets how the idle threads wait (see [`IDLE_MODE`]): `0` ULE's policy,
+/// `1` halt at once, `2` spin first. For investigations only.
+pub fn set_idle_mode(mode: u16) {
+    IDLE_MODE.store(mode, Ordering::Relaxed);
+}
+
 fn idle_loop() {
     loop {
         let irq = hal::irq::disable();
@@ -1653,9 +1664,10 @@ fn idle_loop() {
         // costs the waker an interrupt (microseconds of it under a
         // hypervisor). ULE's idle thread has such a moment too, while it
         // looks for a thread to steal (`tdq_idled`) before it halts.
-        let spins = if !switching_often(c) {
+        let mode = IDLE_MODE.load(Ordering::Relaxed);
+        let spins = if mode == 1 || (mode == 0 && !switching_often(c)) {
             0
-        } else if c.smt.load(Ordering::Relaxed) {
+        } else if c.smt.load(Ordering::Relaxed) && mode == 0 {
             IDLE_SPINS_SMT
         } else {
             IDLE_SPINS

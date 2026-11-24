@@ -7,11 +7,13 @@
 # the lower one at boot); AbyssBSD drives it through CPPC at its highest
 # performance. Prints the kbench lines.
 #
-# Usage: kbench-run.sh CPUS KBENCH.KO: the coordinator's CPU, then the
-# workers' (tests/perf/README.md, "Settings"), e.g. 0,2,4,6,8,10,12,14,16.
+# Usage: kbench-run.sh CPUS KBENCH.KO [SUITE]: the coordinator's CPU, then the
+# workers' (tests/perf/README.md, "Settings"), e.g. 0,2,4,6,8,10,12,14,16;
+# SUITE is p2 unless another is asked for (callout, for investigations).
 set -eu
 CPUS=${1:?usage: kbench-run.sh CPUS KBENCH.KO}
 KO=${2:?usage: kbench-run.sh CPUS KBENCH.KO}
+SUITE=${3:-p2}
 if pgrep -x powerd >/dev/null; then
 	service powerd onestop >/dev/null 2>&1 || kill "$(cat /var/run/powerd.pid)"
 fi
@@ -25,10 +27,11 @@ for i in $(jot 60); do
 	sleep 5
 done
 echo "kbench env freq=$(sysctl -n dev.cpu.0.freq) levels=$(sysctl -n dev.cpu.0.freq_levels | tr ' ' ,) cx=$(sysctl -n hw.acpi.cpu.cx_lowest) ident=$(sysctl -n kern.ident)"
-kldstat -q -m kbench && kldunload kbench
+unload() { for id in $(kldstat | awk '/kbench/ { print $1 }'); do kldunload -i "$id"; done; }
+unload
 kldload "$KO"
-trap 'kldunload kbench' EXIT
+trap unload EXIT
 sysctl -q debug.kbench.cpus="$CPUS" >/dev/null
 sysctl -q kern.msgbuf_clear=1 >/dev/null
-sysctl -q debug.kbench.run=p2 >/dev/null
+sysctl -q debug.kbench.run=$SUITE >/dev/null
 dmesg | grep -a '^kbench '

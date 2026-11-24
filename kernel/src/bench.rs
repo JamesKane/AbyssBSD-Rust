@@ -122,6 +122,8 @@ pub(crate) fn run(s: &Sleepable, suite: &str) -> bool {
         "p2" => suite_p2,
         "p3" => suite_p3,
         "diag" => suite_diag,
+        "callout" => suite_callout,
+        "callout.after" => suite_callout_after,
         _ => {
             kprintln!("bench: unknown suite {suite:?}");
             return false;
@@ -1156,43 +1158,228 @@ fn ctxsw(s: &Sleepable, name: &str, a: CpuId, b: CpuId) {
 
 /// How late a 1 ms callout's handler starts, from a sleeping worker.
 fn callout_latency(s: &Sleepable) {
+    let samples = callout_samples(s, LAT_CALLOUT);
+    // `abyss.bench.detail`: the distribution and the slow samples' times
+    // too (investigation; the suite's lines are the same).
+    if crate::boot::flag("abyss.bench.detail") {
+        callout_detail(&samples);
+    }
+    let mut late: Vec<u64> = samples.iter().map(|&(_, late, _)| late).collect();
+    report_lat("callout.latency", &mut late);
+}
+
+/// `n` samples of how late a 1 ms callout's handler starts, from a sleeping
+/// worker on the suite's CPU 1: each as the arming time (nanoseconds on the
+/// counter), the lateness (nanoseconds) of the handler, and the lateness of
+/// the timer interrupt's entry (`time::STAMP_ENTRY`: 0 if not stamped).
+fn callout_samples(s: &Sleepable, n: usize) -> Vec<(u64, u64, u64)> {
+    callout_samples_at(s, n, 1_000_000, default_cpu(0))
+}
+
+/// As [`callout_samples`], with the callout `interval_ns` ahead, on `cpu`.
+fn callout_samples_at(
+    s: &Sleepable,
+    n: usize,
+    interval_ns: u64,
+    cpu: CpuId,
+) -> Vec<(u64, u64, u64)> {
     struct Fire {
         q: WaitQueue,
         fired: AtomicBool,
         at: AtomicU64,
+        entry: AtomicU64,
     }
     fn fire(arg: usize, _: &IrqCx) {
         // SAFETY: `arg` is the worker's `Fire`, which outlives its timer.
         let f = unsafe { &*core::ptr::with_exposed_provenance::<Fire>(arg) };
         f.at.store(time::counter(), Ordering::Relaxed);
+        f.entry.store(
+            time::TIMER_ENTRY[hal::cpu_id().index()].load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         f.fired.store(true, Ordering::Release);
         f.q.wake_all();
     }
-    let samples = Arc::new(sync::SpinLock::new(Vec::with_capacity(LAT_CALLOUT)));
+    time::STAMP_ENTRY.store(crate::boot::flag("abyss.bench.detail"), Ordering::Relaxed);
+    let samples = Arc::new(sync::SpinLock::new(Vec::with_capacity(n)));
     let out = Arc::clone(&samples);
     let run = Run::new();
-    launch(s, &run, &[default_cpu(0)], 0, move |_, _, ws| {
-        let one_ms = time::ns_to_ticks(1_000_000);
-        let mut local = Vec::with_capacity(LAT_CALLOUT);
+    launch(s, &run, &[cpu], 0, move |_, _, ws| {
+        let one_ms = time::ns_to_ticks(interval_ns);
+        let mut local = Vec::with_capacity(n);
         let f = Fire {
             q: WaitQueue::new(),
             fired: AtomicBool::new(false),
             at: AtomicU64::new(0),
+            entry: AtomicU64::new(0),
         };
         let timer = core::pin::pin!(Timer::new());
-        for _ in 0..LAT_CALLOUT {
+        for _ in 0..n {
             f.fired.store(false, Ordering::Relaxed);
             let t0 = time::counter();
-            timer
-                .as_ref()
-                .reset(1_000_000, fire, core::ptr::from_ref(&f).expose_provenance());
+            timer.as_ref().reset(
+                interval_ns,
+                fire,
+                core::ptr::from_ref(&f).expose_provenance(),
+            );
             f.q.wait_until(ws, || f.fired.load(Ordering::Acquire));
             let late = f.at.load(Ordering::Relaxed).saturating_sub(t0 + one_ms);
-            local.push(time::ticks_to_ns(late));
+            let entry = f.entry.load(Ordering::Relaxed);
+            let entry_late = if entry == 0 {
+                0
+            } else {
+                time::ticks_to_ns(entry.saturating_sub(t0 + one_ms))
+            };
+            local.push((time::ticks_to_ns(t0), time::ticks_to_ns(late), entry_late));
         }
         *out.lock() = local;
     });
-    report_lat("callout.latency", &mut samples.lock());
+    let mut taken = samples.lock();
+    core::mem::take(&mut *taken)
+}
+
+/// The suite `callout` (investigation, not gating): the lateness of a 1 ms
+/// callout over many samples: the percentile ladder, and when the slow
+/// samples were (their arming times, in microseconds from the first
+/// sample), so a period shows as a spacing.
+fn suite_callout(s: &Sleepable) {
+    callout_detail(&callout_samples(s, 4000));
+}
+
+/// The suite `callout.after` (investigation, not gating): how the first
+/// 1 ms callout samples go after different activity, each probe of 200
+/// samples preceded by what its name says: its slow count (2 us or more
+/// late) and how many of them came first, in a row.
+fn suite_callout_after(s: &Sleepable) {
+    fn probe(s: &Sleepable, name: &str) {
+        probe_at(s, name, 1_000_000, default_cpu(0));
+    }
+    fn probe_at(s: &Sleepable, name: &str, interval_ns: u64, cpu: CpuId) {
+        let samples = callout_samples_at(s, 200, interval_ns, cpu);
+        let slow = samples.iter().filter(|&&(_, l, _)| l >= 2_000).count();
+        let head = samples.iter().take_while(|&&(_, l, _)| l >= 2_000).count();
+        if let Some(&(_, l, e)) = samples.iter().find(|&&(_, l, _)| l >= 2_000) {
+            kprintln!("kbench callout.after.{name}.first_late {l} ns");
+            kprintln!("kbench callout.after.{name}.first_entry_late {e} ns");
+        }
+        let mut late: Vec<u64> = samples.iter().map(|&(_, l, _)| l).collect();
+        late.sort_unstable();
+        kprintln!("kbench callout.after.{name}.slow {slow} ns");
+        kprintln!("kbench callout.after.{name}.head {head} ns");
+        kprintln!(
+            "kbench callout.after.{name}.p50 {} ns",
+            late[late.len() / 2]
+        );
+    }
+    fn spin(s: &Sleepable, cpus: &[CpuId], ns: u64) {
+        let run = Run::new();
+        launch(s, &run, cpus, ns, |r, _, _| {
+            while !r.stopped() {
+                hal::spin_hint();
+            }
+        });
+    }
+    probe(s, "cold");
+    // The idle threads forced: halt at once, and spin first.
+    for (name, mode) in [("forced_halt", 1), ("forced_spin", 2), ("auto", 0)] {
+        sched::set_idle_mode(mode);
+        time::sleep_ns(s, 200_000_000);
+        probe(s, name);
+    }
+    throughput_with(
+        s,
+        "callout.armcancel",
+        1,
+        || Box::pin(Timer::new()),
+        |t, _| {
+            t.as_ref().reset(RUN_NS, |_, _| {}, 0);
+            black_box(t.stop());
+            1
+        },
+    );
+    probe(s, "armcancel");
+    spin(s, &[cpu(1)], 1_000_000_000);
+    probe(s, "spin_cpu2");
+    let all: Vec<CpuId> = (1..9).map(cpu).collect();
+    spin(s, &all, 1_000_000_000);
+    probe(s, "spin_all");
+    time::sleep_ns(s, 1_000_000_000);
+    probe(s, "idle_1s");
+    time::sleep_ns(s, 100_000_000);
+    probe(s, "idle_100ms");
+    // Other intervals and CPUs, each after a quiet spell: is the slow
+    // stretch a time or a count of samples, and is it CPU 2's alone?
+    for (name, interval, other) in [
+        ("iv250us", 250_000, 2),
+        ("iv2ms", 2_000_000, 2),
+        ("iv5ms", 5_000_000, 2),
+        ("cpu4", 1_000_000, 4),
+        ("cpu6", 1_000_000, 6),
+        ("cpu14", 1_000_000, 14),
+    ] {
+        time::sleep_ns(s, 300_000_000);
+        probe_at(s, name, interval, CpuId(other));
+    }
+    // The same, with one other CPU busy during the probe: the SMT sibling
+    // of the probe's CPU, another core of its core complex die, and a core
+    // of the other die.
+    for (name, other) in [
+        ("busy_sibling", 3),
+        ("busy_same_ccd", 4),
+        ("busy_other_ccd", 16),
+    ] {
+        time::sleep_ns(s, 500_000_000);
+        let stop = Arc::new(AtomicBool::new(false));
+        let st = Arc::clone(&stop);
+        let spinner = sched::Builder::new("kbench")
+            .priority(Priority::KERNEL)
+            .bind(CpuId(other))
+            .spawn(move |_| {
+                while !st.load(Ordering::Acquire) {
+                    hal::spin_hint();
+                }
+            })
+            .expect("bench: spawn spinner");
+        time::sleep_ns(s, 50_000_000);
+        probe(s, name);
+        stop.store(true, Ordering::Release);
+        spinner.join(s);
+    }
+}
+
+/// The percentile ladder of `samples`, and when the slow ones were (their
+/// arming times in microseconds from the first sample), so a period shows
+/// as a spacing.
+fn callout_detail(samples: &[(u64, u64, u64)]) {
+    const SLOW_NS: u64 = 2_000;
+    let mut late: Vec<u64> = samples.iter().map(|&(_, l, _)| l).collect();
+    late.sort_unstable();
+    for (name, per_mille) in [
+        ("p50", 500),
+        ("p90", 900),
+        ("p95", 950),
+        ("p99", 990),
+        ("p999", 999),
+    ] {
+        kprintln!(
+            "kbench callout.{name} {} ns",
+            late[late.len() * per_mille / 1000]
+        );
+    }
+    kprintln!("kbench callout.max {} ns", late[late.len() - 1]);
+    let first = samples[0].0;
+    let slow: Vec<&(u64, u64, u64)> = samples.iter().filter(|&&(_, l, _)| l >= SLOW_NS).collect();
+    kprintln!("kbench callout.slow_count {} ns", slow.len());
+    let mut last = 0;
+    for (i, &&(t, l, e)) in slow.iter().enumerate().take(40) {
+        let at = (t - first) / 1000;
+        kprintln!(
+            "kbench callout.slow{i} {} ns at {at} us, {} us after the previous, interrupt entry {e} ns late",
+            l,
+            at.saturating_sub(last)
+        );
+        last = at;
+    }
 }
 
 /// Cross-CPU wakeup latency of a sleeping thread on an idle CPU.

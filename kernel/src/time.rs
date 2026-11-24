@@ -459,6 +459,14 @@ fn set_deadline(ticks: u64) {
     arch::timer::set_deadline(ticks);
 }
 
+/// Whether the timer interrupt stamps the counter at its entry, for
+/// `bench`'s investigations (`abyss.bench.detail`).
+pub(crate) static STAMP_ENTRY: AtomicBool = AtomicBool::new(false);
+
+/// The counter at the last timer interrupt's entry, per CPU, while
+/// [`STAMP_ENTRY`] is set.
+pub(crate) static TIMER_ENTRY: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
 /// Timer interrupts taken, per CPU (diagnostics).
 static TICKS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
@@ -466,6 +474,9 @@ static TICKS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 /// re-arms. Interrupt context, interrupts masked.
 pub(crate) fn on_timer(cx: &IrqCx) {
     let cpu = hal::cpu_id();
+    if STAMP_ENTRY.load(Ordering::Relaxed) {
+        TIMER_ENTRY[cpu.index()].store(counter(), Ordering::Relaxed);
+    }
     TICKS[cpu.index()].fetch_add(1, Ordering::Relaxed);
     // The one-shot deadline is spent.
     PROGRAMMED[cpu.index()].store(UNARMED, Ordering::Relaxed);
