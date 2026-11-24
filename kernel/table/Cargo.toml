@@ -24,6 +24,7 @@ rge = { path = "../../drivers/rge" }
 uart = { path = "../../drivers/uart" }
 umass = { path = "../../drivers/umass" }
 hda-driver = { path = "../../drivers/hda" }
+nova = { path = "../../drivers/nova" }
 vgapci = { path = "../../drivers/vgapci" }
 usbus = { path = "../../sys/usb" }
 virtio = { path = "../../sys/virtio" }
