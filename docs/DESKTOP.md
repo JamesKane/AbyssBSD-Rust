@@ -96,7 +96,7 @@ check that it is in place for this program.
 |---|---|---|
 | **nullfs** (`ro`, `nosuid`) | `abyss-jaild` mounts the session's directories into jails | VFS.md non-goal today; add to P6.10 or a VFS follow-up before M-D.1 |
 | **MAC framework with `mac_priority`** (the `realtime` group may use `rtprio`) | Real-time compositor thread for an unprivileged user | MULTIUSER.md answers "no MAC"; add the framework's hooks `mac_priority` uses, before M-D.2 |
-| **`sound(4)`**: OSS `/dev/dsp` and `/dev/mixer`, `sndstat` (`SNDSTIOC_*`, nvlist), `hw.snd.default_unit`, `snd_dummy` | Sound pane, volume keys, Firefox (cubeb's OSS backend), harness | No audio plan exists. `snd_dummy` and the sound core before M-D.1's sound lanes; HDA and USB audio before M-D.4 |
+| **`sound(4)`**: OSS `/dev/dsp` and `/dev/mixer`, `sndstat` (`SNDSTIOC_*`, nvlist), `hw.snd.default_unit`, `snd_dummy` | Sound pane, volume keys, Firefox (cubeb's OSS backend), harness | [AUDIO.md](AUDIO.md) (draft). `snd_dummy` and the sound core (A1) before M-D.1's sound lanes; HDA (A2, A4) before M-D.4. USB audio is A5 and waits on isochronous transfers, so it follows M-D.4 unless the USB track adds them sooner |
 | **ACPI sleep and buttons**: `acpiconf -s 3` (S3), `hw.acpi.supported_sleep_state`, `hw.acpi.power_button_state`, lid and button devd notifies, `hw.acpi.battery.*` | Power, lid, Sleep menu item | P11 power management; the sysctls and notifies earlier (P8) |
 | **Networking for the desktop**: `getifaddrs` with `AF_LINK`, `PF_ROUTE` sockets, `wlan(4)`, `wpa_supplicant`, `ifconfig wlanN create` | Network pane, Wi-Fi, Firefox | P7; Wi-Fi drivers after P7 |
 | **ZFS**: `zpool`, `zfs`, boot environments, `zfs snapshot/rollback` | Installer default layout, Disk Utility, `abyss update` | M-Z |
@@ -218,8 +218,8 @@ Changes to the desktop are made in the monorepo (ADR-0018 rule 4). This plan nee
 2. ~~Is the desktop's 12700KF the build server?~~ Yes (decided 2026-10-29). It is tested from USB,
    and from a spare NVMe once that is free (§7).
 3. ~~virtio-gpu renderer~~: decided 2026-10-29. wlroots' Vulkan renderer on Venus (§3.3).
-4. **Audio.** No audio design exists in this repository. The desktop needs OSS `sound(4)` first and
-   HDA soon after. It needs its own document, like USB.md.
+4. **Audio.** Draft design: [AUDIO.md](AUDIO.md). The desktop needs OSS `sound(4)` first (its
+   stage A1) and HDA soon after (A2, A4).
 5. **What AbyssBSD releases.** The desktop's Phase 17 builds a release from its fork's world. An
    AbyssBSD release is this kernel with FreeBSD's 15.1 world and the desktop's packages. Whether
    the two releases converge (one medium, either kernel) is for the desktop's Phase 17 and

@@ -28,8 +28,8 @@ it binds to whatever libraries the host happens to have. This design removes eac
 construction (§3) and keeps the flexibility: any library in a bundle can be replaced, and several
 bundles run side by side.
 
-Two things the request assumes are not in the tree yet. There is **no audio stack**: `sound(4)`
-is unscheduled ([DESKTOP.md](DESKTOP.md) §3.2, §9 question 4). Vulkan reaches hardware only as
+Two things the request assumes are not in the tree yet. There is **no audio stack**: it is
+designed in [AUDIO.md](AUDIO.md) and unscheduled. Vulkan reaches hardware only as
 [GRAPHICS.md](GRAPHICS.md) §14's steps land (Venus at M-G.3, panvk at M-G.5, RADV at M-G.6). Both
 are prerequisites here (§12), not part of this design.
 
@@ -348,9 +348,8 @@ Windows libraries with only built-in targets and the bundled linker, as
   is ours, over `sound(4)`'s Open Sound System device with its virtual channels for mixing, as
   FreeBSD's own audio clients use it. XAudio2 is FAudio on top (§2.2). The older interfaces are
   thin layers over the endpoint.
-- Latency and period sizes are set through `sound(4)`'s existing controls. If games need a
-  low-latency shared-memory path that `sound(4)` lacks, that is a finding for the audio design,
-  not something to build here.
+- The endpoint starts on `sound(4)`'s Open Sound System device and moves to a native stream
+  ([AUDIO.md](AUDIO.md) §6.4) for shared-memory I/O, event-driven wakes, and true latency.
 
 ---
 
@@ -456,7 +455,7 @@ diagnostic for `nt.frame` and never a gate.
 |---|---|---|
 | The `Abi` personality seam | LINUXULATOR.md L1, or built here first | W1 |
 | Vulkan in QEMU (Venus), dma-buf, explicit synchronization | M-G.3 | W3 |
-| `sound(4)`: the core, `snd_dummy`, then a hardware driver | Unscheduled (DESKTOP.md §3.2) | W4 |
+| Sound: `sound(4)` with a hardware driver, then native streams | [AUDIO.md](AUDIO.md) A2 to A4, unscheduled | W4 |
 | RADV on RDNA2 | M-G.6 | W4 on hardware |
 | `nullfs` or `unionfs`, application jails | M-D.1 | W5 |
 
