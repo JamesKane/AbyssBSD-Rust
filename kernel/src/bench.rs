@@ -124,6 +124,7 @@ pub(crate) fn run(s: &Sleepable, suite: &str) -> bool {
         "diag" => suite_diag,
         "callout" => suite_callout,
         "callout.after" => suite_callout_after,
+        "rwdiag" => suite_rwdiag,
         _ => {
             kprintln!("bench: unknown suite {suite:?}");
             return false;
@@ -402,11 +403,11 @@ fn lock_sets() -> Vec<&'static LockSet> {
 
 /// A lock benchmark: `workers` threads run `op` on each lock set in turn
 /// for [`PLACEMENT_NS`]; reports the mean.
-fn lock_throughput<F: Fn(&LockSet, &Sleepable) -> u64 + Copy + Send + Sync + 'static>(
+fn lock_throughput<L: Sync, F: Fn(&L, &Sleepable) -> u64 + Copy + Send + Sync + 'static>(
     s: &Sleepable,
     name: &str,
     workers: usize,
-    sets: &[&'static LockSet],
+    sets: &[&'static L],
     op: F,
 ) {
     if !fits(workers) {
@@ -1244,6 +1245,63 @@ fn callout_samples_at(
 /// sample), so a period shows as a spacing.
 fn suite_callout(s: &Sleepable) {
     callout_detail(&callout_samples(s, 4000));
+}
+
+/// The suite `rwdiag` (investigation, not gating): what contended readers
+/// cost on a bare shared word, the access pattern of a reader lock without
+/// the lock: acquire and release by load and compare-and-swap (what
+/// `RwLock::read` does) and by one `fetch_add` and `fetch_sub` each (no
+/// retry), beside `rw.rd` itself, in the placements of `lock_throughput`.
+fn suite_rwdiag(s: &Sleepable) {
+    #[repr(align(4096))]
+    struct RawSet {
+        word: core::sync::atomic::AtomicUsize,
+        other: sync::SpinLock<u64>,
+    }
+    let raw: Vec<&'static RawSet> = (0..PLACEMENTS)
+        .map(|_| {
+            &*Box::leak(Box::new(RawSet {
+                word: core::sync::atomic::AtomicUsize::new(1),
+                other: sync::SpinLock::new(0),
+            }))
+        })
+        .collect();
+    let sets = lock_sets();
+    for t in [1, 2, 4, 8] {
+        lock_throughput(s, &alloc::format!("rwdiag.cas.t{t}"), t, &raw, |l, _| {
+            let mut w = l.word.load(Ordering::Relaxed);
+            while let Err(v) =
+                l.word
+                    .compare_exchange_weak(w, w + 8, Ordering::Acquire, Ordering::Relaxed)
+            {
+                w = v;
+            }
+            let mut w = l.word.load(Ordering::Relaxed);
+            while let Err(v) =
+                l.word
+                    .compare_exchange_weak(w, w - 8, Ordering::Release, Ordering::Relaxed)
+            {
+                w = v;
+            }
+            1
+        });
+        lock_throughput(s, &alloc::format!("rwdiag.xadd.t{t}"), t, &raw, |l, _| {
+            l.word.fetch_add(8, Ordering::Acquire);
+            l.word.fetch_sub(8, Ordering::Release);
+            black_box(&l.other);
+            1
+        });
+        lock_throughput(
+            s,
+            &alloc::format!("rwdiag.rw.rd.t{t}"),
+            t,
+            &sets,
+            |l, ws| {
+                black_box(*l.rw.read(ws));
+                1
+            },
+        );
+    }
 }
 
 /// The suite `callout.after` (investigation, not gating): how the first

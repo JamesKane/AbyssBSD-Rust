@@ -22,11 +22,12 @@ use crate::cli::Args;
 use crate::util::{self, Result};
 
 const MIB: usize = 1 << 20;
-const DISK_BYTES: usize = 320 * MIB;
+const DISK_BYTES: usize = 384 * MIB;
 /// The ESP starts 1 MiB in, the usual alignment.
 const ESP_FIRST_LBA: u64 = 2048;
-/// Room for the debug kernel (about 150 MB unstripped) and the memory-disk root.
-const ESP_BYTES: usize = 256 * MIB;
+/// Room for the debug kernel (about 210 MB unstripped, with the in-kernel
+/// tests, on aarch64) and the memory-disk root.
+const ESP_BYTES: usize = 320 * MIB;
 
 pub(crate) fn cmd(mut args: Args) -> Result<()> {
     let arch = Arch::one_from_args(&mut args)?;

@@ -237,6 +237,55 @@ pub mod atomic {
         }
         a.compare_exchange(old, new, Ordering::AcqRel, Ordering::Acquire)
     }
+
+    /// Adds `v` to the word with acquire ordering and returns the value it
+    /// held: one wait-free instruction on amd64 (`LOCK XADD`), and where
+    /// the CPUs have FEAT_LSE on arm64 (`LDADDA`). The ARMv8.0 loop
+    /// ([`cas`]'s reason) is what a plain `fetch_add` becomes elsewhere.
+    #[inline]
+    pub fn fetch_add_acquire(a: &AtomicUsize, v: usize) -> usize {
+        #[cfg(target_arch = "aarch64")]
+        if LSE.load(Ordering::Relaxed) {
+            let old: usize;
+            // SAFETY: `LDADDA` on the atomic's own word, which is valid and
+            // aligned; every CPU has the instruction (`LSE`).
+            unsafe {
+                core::arch::asm!(
+                    ".arch_extension lse",
+                    "ldadda {v}, {old}, [{p}]",
+                    v = in(reg) v,
+                    old = out(reg) old,
+                    p = in(reg) a.as_ptr(),
+                    options(nostack, preserves_flags),
+                );
+            }
+            return old;
+        }
+        a.fetch_add(v, Ordering::Acquire)
+    }
+
+    /// Subtracts `v` from the word with release ordering and returns the
+    /// value it held (see [`fetch_add_acquire`]; `LDADDL` of `-v` with LSE).
+    #[inline]
+    pub fn fetch_sub_release(a: &AtomicUsize, v: usize) -> usize {
+        #[cfg(target_arch = "aarch64")]
+        if LSE.load(Ordering::Relaxed) {
+            let old: usize;
+            // SAFETY: as in `fetch_add_acquire`, with `LDADDL`.
+            unsafe {
+                core::arch::asm!(
+                    ".arch_extension lse",
+                    "ldaddl {v}, {old}, [{p}]",
+                    v = in(reg) v.wrapping_neg(),
+                    old = out(reg) old,
+                    p = in(reg) a.as_ptr(),
+                    options(nostack, preserves_flags),
+                );
+            }
+            return old;
+        }
+        a.fetch_sub(v, Ordering::Release)
+    }
 }
 
 /// What the architecture keeps per thread, at the start of every thread

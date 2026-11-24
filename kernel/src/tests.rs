@@ -797,6 +797,119 @@ ktest! {
 }
 
 ktest! {
+    /// Writers that sleep inside the lock, readers that arrive while one
+    /// holds it (their counts are barred and go back) and while one waits
+    /// for them to drain: exclusion holds, every thread finishes, and a
+    /// waiting writer is not starved by readers that come after it.
+    fn rw_locks_with_sleeping_holders() {
+        use alloc::sync::Arc;
+        use alloc::vec::Vec;
+        use core::sync::atomic::AtomicU64;
+        use sched::lock::{LockClass, SxLock};
+        static CLASS: LockClass = LockClass::new("test sx sleepers", 13);
+        let l = Arc::new(SxLock::new(&CLASS, (0u64, 0u64)));
+        let readers_in = Arc::new(AtomicU64::new(0));
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let (l, readers_in) = (Arc::clone(&l), Arc::clone(&readers_in));
+                sched::spawn("rwsleep", sched::Priority::KERNEL, move |_| {
+                    for n in 0..60 {
+                        if i % 4 == 0 {
+                            let mut g = l.write(&cx());
+                            assert_eq!(readers_in.load(Ordering::Relaxed), 0, "reader inside a write");
+                            g.0 += 1;
+                            // Sleeping holders make the others take the
+                            // slow path and sleep.
+                            if n % 3 == 0 {
+                                crate::time::sleep_ns(&cx(), 100_000);
+                            }
+                            g.1 += 1;
+                        } else {
+                            let g = l.read(&cx());
+                            readers_in.fetch_add(1, Ordering::Relaxed);
+                            if n % 5 == 0 {
+                                crate::time::sleep_ns(&cx(), 100_000);
+                            }
+                            assert_eq!(g.0, g.1, "torn write seen");
+                            readers_in.fetch_sub(1, Ordering::Relaxed);
+                        }
+                    }
+                })
+                .unwrap()
+            })
+            .collect();
+        for t in &threads {
+            t.join(&cx());
+        }
+        assert_eq!(l.read(&cx()).0, 120);
+    }
+}
+
+ktest! {
+    /// A writer that waits for a reader that holds the lock gets it before
+    /// readers that arrive after the writer (writers are preferred), and
+    /// the lock is free at the end (no count left behind by readers that
+    /// were turned away).
+    fn rw_waiting_writer_goes_before_late_readers() {
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicBool, AtomicU64};
+        use sched::lock::{LockClass, SxLock};
+        static CLASS: LockClass = LockClass::new("test sx order", 14);
+        let l = Arc::new(SxLock::new(&CLASS, 0u64));
+        let order = Arc::new(AtomicU64::new(0));
+        let writer_at = Arc::new(AtomicU64::new(0));
+        let first_in = Arc::new(AtomicBool::new(false));
+        // The first reader holds the lock for a while.
+        let first = {
+            let (l, first_in) = (Arc::clone(&l), Arc::clone(&first_in));
+            sched::spawn("rw first", sched::Priority::KERNEL, move |_| {
+                let _g = l.read(&cx());
+                first_in.store(true, Ordering::Release);
+                crate::time::sleep_ns(&cx(), 800_000_000);
+            })
+            .unwrap()
+        };
+        while !first_in.load(Ordering::Acquire) {
+            crate::time::sleep_ns(&cx(), 100_000);
+        }
+        let writer = {
+            let (l, order, writer_at) = (Arc::clone(&l), Arc::clone(&order), Arc::clone(&writer_at));
+            sched::spawn("rw writer", sched::Priority::KERNEL, move |_| {
+                let mut g = l.write(&cx());
+                writer_at.store(order.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                *g += 1;
+            })
+            .unwrap()
+        };
+        // Let the writer spin its fill and go to sleep behind the reader
+        // (only a sleeping writer bars readers; a spinning one does not),
+        // then send late readers.
+        crate::time::sleep_ns(&cx(), 400_000_000);
+        let late_at = Arc::new(AtomicU64::new(u64::MAX));
+        let late: alloc::vec::Vec<_> = (0..4)
+            .map(|_| {
+                let (l, order, late_at) = (Arc::clone(&l), Arc::clone(&order), Arc::clone(&late_at));
+                sched::spawn("rw late", sched::Priority::KERNEL, move |_| {
+                    let g = l.read(&cx());
+                    late_at.fetch_min(order.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                    assert_eq!(*g, 1, "a late reader came before the writer");
+                })
+                .unwrap()
+            })
+            .collect();
+        first.join(&cx());
+        writer.join(&cx());
+        for t in &late {
+            t.join(&cx());
+        }
+        assert_eq!(writer_at.load(Ordering::SeqCst), 1, "the writer was not first");
+        assert!(late_at.load(Ordering::SeqCst) > 1);
+        // Nothing left held: a writer takes the lock at once.
+        assert!(l.try_write().is_some(), "a count was left behind");
+    }
+}
+
+ktest! {
     fn epochs_wait_for_readers() {
         use alloc::sync::Arc;
         use core::sync::atomic::AtomicBool;
