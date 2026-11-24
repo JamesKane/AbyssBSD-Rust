@@ -172,10 +172,6 @@ impl CharDevice for Klog {
     fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
         Err(Errno::ENXIO)
     }
-
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
 }
 
 /// An open of `/dev/klog`; its last close is `logclose`.
@@ -231,11 +227,6 @@ impl CharDevice for KlogOpen {
             done += uio.copy_out(&buf[..n])?;
         }
         Ok(done)
-    }
-
-    /// No `d_write` (`enodev`).
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
     }
 
     /// `logioctl`.

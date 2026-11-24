@@ -446,22 +446,29 @@ pub trait CharDevice: Send + Sync {
     }
     /// Reads into `uio` from `offset` (the file's offset, which disks use
     /// and terminals ignore); `nonblock` asks for `EAGAIN` instead of
-    /// waiting.
+    /// waiting. A device with no `d_read` fails `ENODEV` (`no_read`).
     fn read(
         &self,
         s: &Sleepable,
         uio: &mut dyn Uio,
         offset: u64,
         nonblock: bool,
-    ) -> Result<usize, Errno>;
-    /// Writes from `uio` at `offset`.
+    ) -> Result<usize, Errno> {
+        let _ = (s, uio, offset, nonblock);
+        Err(Errno::ENODEV)
+    }
+    /// Writes from `uio` at `offset`; no `d_write` fails `ENODEV`
+    /// (`no_write`).
     fn write(
         &self,
         s: &Sleepable,
         uio: &mut dyn Uio,
         offset: u64,
         nonblock: bool,
-    ) -> Result<usize, Errno>;
+    ) -> Result<usize, Errno> {
+        let _ = (s, uio, offset, nonblock);
+        Err(Errno::ENODEV)
+    }
     /// Whether mapping it gives zero-filled anonymous memory, as
     /// `/dev/zero` does (`D_MMAP_ANON`).
     fn maps_as_zeros(&self) -> bool {

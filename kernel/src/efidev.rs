@@ -37,7 +37,7 @@ use abi::efi::*;
 use abi::errno::Errno;
 use efi::raw::{RawGuid, Time};
 use sched::Sleepable;
-use vfs::{CharDevice, Uio};
+use vfs::CharDevice;
 
 use crate::firmware;
 
@@ -251,15 +251,6 @@ fn request(req: u32, arg: &mut [u8]) -> Result<(), Errno> {
 struct EfiDev;
 
 impl CharDevice for EfiDev {
-    /// No `d_read` (`enodev`).
-    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
     fn ioctl(&self, _: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
         request(req, arg)
     }

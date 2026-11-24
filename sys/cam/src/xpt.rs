@@ -31,7 +31,7 @@ use abi::cam::{
 };
 use abi::errno::Errno;
 use sched::Sleepable;
-use vfs::{CharDevice, Uio};
+use vfs::CharDevice;
 
 use crate::ccb::{Ccb, Path, PathInq, TranSettings, union_valid};
 use crate::edt::{self, DeviceNode, Edt, Sim};
@@ -135,14 +135,6 @@ impl CharDevice for XptDev {
             return Err(Errno::ENODEV);
         }
         Ok(None)
-    }
-
-    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
     }
 
     fn ioctl(&self, _: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
@@ -357,14 +349,6 @@ impl CharDevice for PassDev {
             return Err(Errno::EINVAL);
         }
         Ok(None)
-    }
-
-    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
     }
 
     fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {

@@ -70,10 +70,6 @@ impl CharDevice for Devctl {
     fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
         Err(Errno::ENXIO)
     }
-
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
 }
 
 /// An open of `/dev/devctl`; its last close is `devclose`.
@@ -114,11 +110,6 @@ impl CharDevice for DevctlOpen {
             let _w = sched::wait_message("dev cv");
             crate::signal::sleep(s, &WAIT, || m.events_queued() > 0, None)?;
         }
-    }
-
-    /// No `d_write` (`enodev`).
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
     }
 
     /// `devioctl`: the rest (`FIONREAD`, `TIOCSPGRP`, ...) is `ENOTTY`.
@@ -283,15 +274,6 @@ impl Devctl2 {
 }
 
 impl CharDevice for Devctl2 {
-    /// No `d_read` (`enodev`).
-    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
     fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
         Self::request(s, req, arg)
     }

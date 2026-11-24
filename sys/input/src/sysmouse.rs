@@ -209,10 +209,6 @@ impl CharDevice for Node {
     fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
         Err(Errno::ENXIO)
     }
-
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
 }
 
 /// An open of `/dev/sysmouse`.
@@ -270,10 +266,6 @@ impl CharDevice for Open {
         }
     }
 
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
     fn ioctl(&self, _: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
         ioctl(req, arg)
     }
@@ -284,14 +276,6 @@ impl CharDevice for Open {
 struct ConsoleCtl;
 
 impl CharDevice for ConsoleCtl {
-    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
     fn ioctl(&self, _: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
         match req {
             CONS_GETVERS => put(arg, &0x200i32.to_ne_bytes()),

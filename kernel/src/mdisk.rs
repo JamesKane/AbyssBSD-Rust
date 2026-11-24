@@ -32,7 +32,7 @@ use abi::md::{
 use sched::{Sleepable, WaitQueue};
 use storage::{Bio, BioError, BioOp, Disk, DiskInfo, DiskQueues};
 use sync::SpinLock;
-use vfs::{CharDevice, Uio};
+use vfs::CharDevice;
 
 /// The disk name.
 const NAME: &str = "md";
@@ -452,14 +452,6 @@ fn query(arg: &mut [u8]) -> Result<(), Errno> {
 }
 
 impl CharDevice for Control {
-    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
     fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
         if !matches!(req, MDIOCATTACH | MDIOCDETACH | MDIOCQUERY) {
             return Err(Errno::ENOTTY);

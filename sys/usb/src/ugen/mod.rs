@@ -225,14 +225,6 @@ pub(crate) fn endpoints_removed(s: &Sleepable, dev: &UsbDevice) {
 struct Ctl;
 
 impl CharDevice for Ctl {
-    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
     fn ioctl(&self, _s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
         match req {
             USB_READ_DIR => {

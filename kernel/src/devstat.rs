@@ -14,7 +14,7 @@ use abi::errno::Errno;
 use sched::Sleepable;
 use storage::devstat;
 use sysctl::{Number, Value};
-use vfs::{CharDevice, Uio};
+use vfs::CharDevice;
 
 /// The pages: 16, so 224 entries (a disk takes two, a partition one).
 const ORDER: u8 = 4;
@@ -113,14 +113,6 @@ impl CharDevice for DevstatDev {
             return Err(Errno::EPERM);
         }
         Ok(None)
-    }
-
-    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
     }
 
     /// `DIOCGMEDIASIZE`: the bytes of the pages holding entries.

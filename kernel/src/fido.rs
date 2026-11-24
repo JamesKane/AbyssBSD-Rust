@@ -36,7 +36,7 @@ use abi::errno::Errno;
 use abi::watchdog::{PATH_WATCHDOG, SBT_1S, Sbintime, WD_TO_1SEC, WD_TO_NEVER, sbt_to_ns};
 use sched::{IrqCx, Sleepable};
 use sync::Once;
-use vfs::{CharDevice, Uio};
+use vfs::CharDevice;
 use watchdog::{Class, Env, Watchdog, WatchdogError};
 
 use crate::softclock::Callout;
@@ -168,15 +168,6 @@ impl Watchdog for HardclockWatchdog {
 struct Fido;
 
 impl CharDevice for Fido {
-    /// No `d_read` (`enodev`).
-    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
     fn ioctl(&self, _: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
         CLASS.ioctl(&KernelEnv, req, arg)
     }

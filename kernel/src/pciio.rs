@@ -30,7 +30,7 @@ use addr::{PhysAddr, VirtAddr};
 use pci::config::Width;
 use pci::user::{self, GetconfError, Listed};
 use sched::Sleepable;
-use vfs::{CharDevice, Uio};
+use vfs::CharDevice;
 
 use crate::mm::space::{AddressSpace, Anon, AnonKind};
 use crate::uaccess::{Plain, bytes_of, bytes_of_mut};
@@ -439,16 +439,6 @@ impl CharDevice for DevPci {
             crate::fs::cred(s).securelevel_gt(0)?;
         }
         Ok(None)
-    }
-
-    /// No `d_read`.
-    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
-    /// No `d_write`.
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
     }
 
     /// Without the open file's flags: as read-only.

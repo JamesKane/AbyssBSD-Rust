@@ -26,7 +26,7 @@ use geom::table::{Media, Provider, Table, Topology};
 use sched::Sleepable;
 use storage::Disk;
 use sync::SpinLock;
-use vfs::{CharDevice, Uio};
+use vfs::CharDevice;
 
 /// FreeBSD's `GID_OPERATOR`, which owns the node.
 const GID_OPERATOR: u32 = 5;
@@ -39,14 +39,6 @@ const ARG_SIZE: usize = 48;
 struct GeomCtl;
 
 impl CharDevice for GeomCtl {
-    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
     fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
         if req != GEOM_CTL {
             return Err(Errno::ENOTTY);

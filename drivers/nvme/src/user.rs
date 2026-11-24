@@ -202,14 +202,6 @@ pub(crate) struct CtrlDev {
 }
 
 impl CharDevice for CtrlDev {
-    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
     fn ioctl(&self, s: &Sleepable, req: u32, arg: &mut [u8]) -> Result<(), Errno> {
         let c = &self.ctrl.upgrade().ok_or(Errno::ENXIO)?;
         match req {

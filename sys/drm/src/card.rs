@@ -249,14 +249,6 @@ impl CharDevice for Node {
         let open: Arc<dyn CharDevice> = self.0.open_file()?;
         Ok(Some(open))
     }
-
-    fn read(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
-
-    fn write(&self, _: &Sleepable, _: &mut dyn Uio, _: u64, _: bool) -> Result<usize, Errno> {
-        Err(Errno::ENODEV)
-    }
 }
 
 #[derive(Default)]
