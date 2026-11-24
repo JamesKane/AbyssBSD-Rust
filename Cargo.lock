@@ -76,6 +76,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "amdgpu"
+version = "0.0.0"
+
+[[package]]
 name = "amdsbwd"
 version = "0.0.0"
 dependencies = [
