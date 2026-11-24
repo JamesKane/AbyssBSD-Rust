@@ -867,6 +867,9 @@ dependencies = [
 [[package]]
 name = "nvgpu"
 version = "0.0.0"
+dependencies = [
+ "elf",
+]
 
 [[package]]
 name = "nvme"

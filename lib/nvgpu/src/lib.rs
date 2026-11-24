@@ -13,7 +13,10 @@
 //! unit tests use images built from that specification. The Video BIOS
 //! reader has also read the RTX 4070's own ROM on the X870E (2026-11-24: four
 //! images, and a version 3 descriptor for the GPU system processor with two
-//! signatures). The firmware container has not met a real firmware file.
+//! signatures). The stock firmware files (`stock`) have been checked against the
+//! test vectors in specification 02 section 5.7.10, on the real files of
+//! linux-firmware 20261019. The `NVFW` container has not met a real file;
+//! nothing distributes one.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -26,4 +29,5 @@ pub mod chip;
 pub mod fuse;
 pub mod mem;
 pub mod nvfw;
+pub mod stock;
 pub mod vbios;
