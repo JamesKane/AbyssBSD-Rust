@@ -842,9 +842,32 @@ presents (`simpledrm`-like). Spec 09 lists what RADV expects; none of it is in R
 3. **The order after R1 (still open; the owner's "recommendations" did not cover it):** R2 (memory and interrupts) before R3 (PSP, SMU, mode setting), or R3 first because
    mode changes need it and R2 only matters for the render side.
 
-### 16.5 State of the probe
+### 16.5 Proven on the board (2026-11-24)
 
-With the adopting grant, `dev.drmn.1.vram` (2026-11-24) maps BAR0 (256 MiB) and reads: zeros at offset 0, 0x7800
-and 8 MiB, and live-looking data at 128 MiB. The verdict test (BAR0 against the index-register read of the same
-offsets, inside and beyond the framebuffer) is still to write. The extra display registers were read on the board
-and are in `tests/corpus/x870e/abyssbsd/raphael-drmn1.txt`; the specification's decoding is its 08 section 9.0.1.
+- **BAR0 is the video memory.** `dev.drmn.1.vram` writes two words through BAR0 (at 64 MiB and at the aperture's
+  end) and reads them back through the index registers: identical. The loader's framebuffer is therefore the first
+  8,294,400 bytes of the iGPU's video memory, and the console and the display's scan-out read the same bytes.
+- **The flip works.** `dev.drmn.1.flip` adopts pipe 0 (`lib/amdgpu/src/flip.rs`: timing generator on, no flip
+  pending, surface at the start of video memory, pitch 1920), paints eight colour bars with a white frame at video
+  memory 16 MiB through BAR0, flushes the host data path, flips to it (taken in 9.6 ms, within one 60 Hz frame),
+  holds three seconds, and flips back (16.5 ms). The owner saw the bars and then the console again. Only the
+  surface address (high half first, then the low half that latches it) and the flip-type bit were written to the
+  display, plus the host-data-path setup (05 section 7).
+- **Scan-out in place is not possible yet.** `sys/drm`'s buffer objects are cached system memory only
+  (`Gem::new` refuses other placements), and the display reads system memory only through GART page tables (R2).
+  So R1's KMS device keeps clients' buffers in system memory and a commit **copies** the pixels into one of two
+  video-memory surfaces through BAR0, then flips to it: tear-free, and the copy is the cost `gop-kms` pays too.
+- **The card works (2026-11-24).** `drivers/amd-kms` implements `CrtcHw`, `PlaneHw`, `EncoderHw` and `ConnectorHw`
+  over this flip: a commit copies the client's pixels (forced opaque) into the back one of two video-memory
+  surfaces through BAR0 and flips to it; turning the controller off flips back to the firmware's surface, which is
+  the console's. `drmn` registers it as `dri/card1` and retires the firmware framebuffer card when
+  `hw.drmn.kms=1` is on the kernel command line (`EFI/ABYSS/CMDLINE`), the display is the firmware's (timing
+  generator on, surface at the start of video memory) and the console's framebuffer is the start of this
+  device's BAR0. `tests/graphics/kmsflip.c` (raw ioctls, no libdrm) set the 1920x1080 mode (19.9 ms) and flipped
+  between a gradient and a bar pattern six times (3.2 ms each); the owner saw both on the screen. The card
+  passes the same kind of QEMU kernel test as the firmware card (`drm_card.rs`) over a display in memory.
+- **Only the whole screen:** a plane smaller than the screen is refused, as the surface shown is drawn whole.
+- **Still to do in R1:** the panic path that shows the console (only `stop` flips back), a timer-versus-hardware
+  check of vblank, `hw.drmn.kms` on by default once the owner agrees, and the run of the Sway acceptance on it.
+- **Not yet read or done:** the decoding of the platform display firmware's window registers is in the
+  specification's 08 section 9.0.1; stage R3 overwrites those windows, so R1 stays out of the top 2 MiB.

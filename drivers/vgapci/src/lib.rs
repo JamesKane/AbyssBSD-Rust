@@ -100,6 +100,27 @@ impl Aperture {
         Some(map.read32(offset))
     }
 
+    /// Writes the 32-bit word at byte `offset` of the VRAM aperture;
+    /// `false` (and no write) if there is no aperture, or the offset is
+    /// unaligned or outside it.
+    pub fn vram_write32(&self, offset: usize, value: u32) -> bool {
+        let Some((map, len)) = self.vram.as_ref() else {
+            return false;
+        };
+        if !offset.is_multiple_of(4) || offset.checked_add(4).is_none_or(|e| e > *len) {
+            return false;
+        }
+        map.write32(offset, value);
+        true
+    }
+
+    /// The physical address of the start of the VRAM aperture, if there is
+    /// one.
+    #[must_use]
+    pub fn vram_phys(&self) -> Option<u64> {
+        self.vram.as_ref().map(|(m, _)| m.phys())
+    }
+
     /// The size of the VRAM aperture, if there is one.
     #[must_use]
     pub fn vram_len(&self) -> Option<usize> {

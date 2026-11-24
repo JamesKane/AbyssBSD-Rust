@@ -8,7 +8,10 @@ publish.workspace = true
 [dependencies]
 abi = { path = "../../lib/abi" }
 bus = { path = "../../sys/bus" }
+amd-kms = { path = "../amd-kms" }
 amdgpu = { path = "../../lib/amdgpu" }
+drm = { path = "../../sys/drm" }
+sched = { path = "../../sys/sched" }
 nvgpu = { path = "../../lib/nvgpu" }
 sync = { path = "../../sys/sync" }
 sysctl = { path = "../../sys/sysctl" }

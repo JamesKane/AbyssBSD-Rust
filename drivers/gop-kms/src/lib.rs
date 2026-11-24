@@ -161,7 +161,9 @@ pub trait Pixels {
     fn chunk(&self, offset: u64, f: &mut dyn FnMut(&[u8])) -> bool;
 }
 
-struct GemPixels<'a>(&'a drm::gem::Gem);
+/// A buffer object's pixels, for [`copy_region`].
+#[derive(Debug)]
+pub struct GemPixels<'a>(pub &'a drm::gem::Gem);
 
 impl Pixels for GemPixels<'_> {
     fn chunk(&self, offset: u64, f: &mut dyn FnMut(&[u8])) -> bool {

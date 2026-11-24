@@ -31,7 +31,7 @@ use sync::SpinLock;
 use vgapci::Aperture;
 
 /// The GPU's register window, for `amdgpu`'s sequences.
-struct Bar5<'a>(&'a Aperture);
+pub(crate) struct Bar5<'a>(pub(crate) &'a Aperture);
 
 impl regs::Window for Bar5<'_> {
     fn read32(&self, offset: usize) -> u32 {
@@ -59,6 +59,10 @@ pub(crate) struct Amd {
     gpu: Weak<Aperture>,
     /// Held across every index/data sequence and the table cache.
     table: SpinLock<Option<Discovery>>,
+    /// Whether the host-data-path flush has been set up.
+    hdp_ready: core::sync::atomic::AtomicBool,
+    /// The graphics card, once registered.
+    kms: SpinLock<Option<(Arc<amd_kms::AmdKms>, Arc<drm::Card>)>>,
 }
 
 impl core::fmt::Debug for Amd {
@@ -90,6 +94,8 @@ impl Amd {
             name,
             gpu,
             table: SpinLock::new(None),
+            hdp_ready: core::sync::atomic::AtomicBool::new(false),
+            kms: SpinLock::new(None),
         }
     }
 
@@ -195,10 +201,11 @@ impl Amd {
         }
     }
 
-    /// Reads a few words of VRAM through the aperture (BAR0), to learn
-    /// whether it shows the same bytes as the firmware's framebuffer: the
-    /// first words (where the firmware's picture starts), words just past
-    /// the first 8 MiB, and the table's last 64 KiB.
+    /// Tests whether BAR0 is the same memory as the video memory the display
+    /// and the index registers see: words at the firmware's framebuffer are
+    /// compared between the two paths, and then two words in unused memory
+    /// (64 MiB and just below the aperture's end) are written through BAR0
+    /// and read back through the index registers.
     pub(crate) fn vram_probe(&self) -> Result<(), abi::errno::Errno> {
         use abi::errno::Errno;
         let gpu = self.gpu()?;
@@ -207,19 +214,208 @@ impl Amd {
             return Err(Errno::ENXIO);
         };
         self.log(format_args!("VRAM aperture (BAR0): {len:#x} bytes"));
-        for (what, at) in [
-            ("first words", 0usize),
-            ("a line in", 4 * 1920 * 4),
-            ("just past 8 MiB", 8 << 20),
-            ("the middle of the aperture", len / 2),
-        ] {
-            let mut words = [0u32; 8];
-            for (i, w) in words.iter_mut().enumerate() {
-                *w = gpu.vram_read32(at + 4 * i).unwrap_or(u32::MAX);
+        let mut same = true;
+        for at in [0usize, 0x7800, 0x7e_8ff8, 0x80_0000] {
+            let bar0 = gpu.vram_read32(at).unwrap_or(u32::MAX);
+            let index = {
+                let _guard = self.table.lock();
+                regs::read_vram(&Bar5(&gpu), at as u64)
+            };
+            same &= bar0 == index;
+            self.log(format_args!(
+                "  offset {at:#x}: BAR0 {bar0:#010x}, index registers {index:#010x}"
+            ));
+        }
+        for (at, value) in [(64usize << 20, 0xa5a5_1234u32), (len - 4, 0x5a5a_4321)] {
+            let before = gpu.vram_read32(at).unwrap_or(0);
+            gpu.vram_write32(at, value);
+            let index = {
+                let _guard = self.table.lock();
+                regs::read_vram(&Bar5(&gpu), at as u64)
+            };
+            gpu.vram_write32(at, before);
+            same &= index == value;
+            self.log(format_args!(
+                "  offset {at:#x}: wrote {value:#010x} through BAR0, the index registers read {index:#010x}"
+            ));
+        }
+        self.log(format_args!(
+            "BAR0 {} the video memory the index registers reach",
+            if same { "is" } else { "is NOT" }
+        ));
+        Ok(())
+    }
+
+    /// Stage R1's first board test: shows a test pattern from video memory
+    /// outside the firmware's framebuffer by flipping the display's surface
+    /// to it, holds it three seconds, and flips back. The display's own
+    /// state (timing, format, pitch) is never written.
+    pub(crate) fn flip_test(&self) -> Result<(), abi::errno::Errno> {
+        use abi::errno::Errno;
+        use amdgpu::flip;
+        use core::sync::atomic::Ordering;
+        /// Where the test surface starts in video memory (past the firmware's
+        /// 8 MiB framebuffer, and well below the top 2 MiB).
+        const AT: usize = 16 << 20;
+        const WIDTH: usize = 1920;
+        const HEIGHT: usize = 1080;
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        let Some(len) = gpu.vram_len() else {
+            self.log(format_args!("flip: VRAM aperture (BAR0) is not mapped"));
+            return Err(Errno::ENXIO);
+        };
+        let bytes = WIDTH * HEIGHT * 4;
+        if AT + bytes > len {
+            return Err(Errno::ENOSPC);
+        }
+        // Only the firmware's own display, as the discovery table says it is
+        // here, and as the registers say it is running.
+        if self.table.lock().is_none() {
+            self.discover()?;
+        }
+        {
+            let cache = self.table.lock();
+            let d = cache.as_ref().ok_or(Errno::EIO)?;
+            if let Err(skip) = display::check(d) {
+                self.log(format_args!("flip: this display is not adopted: {skip:?}"));
+                return Err(Errno::ENODEV);
             }
-            self.log(format_args!("  {what} (offset {at:#x}): {words:08x?}"));
+        }
+        let adopted = match flip::adopt(&w) {
+            Ok(a) if a.pitch_pixels as usize == WIDTH => a,
+            Ok(a) => {
+                self.log(format_args!(
+                    "flip: the pitch is {} pixels, not {WIDTH}",
+                    a.pitch_pixels
+                ));
+                return Err(Errno::ENODEV);
+            }
+            Err(e) => {
+                self.log(format_args!(
+                    "flip: the display is not the firmware's: {e:?}"
+                ));
+                return Err(Errno::ENODEV);
+            }
+        };
+        self.log(format_args!(
+            "flip: the surface is at {:#x}; painting the test pattern at video memory {AT:#x}",
+            flip::surface(&w)
+        ));
+        // Eight bars, a white frame, and a black row at every 100th line.
+        const BARS: [u32; 8] = [
+            0xffff_ffff,
+            0xffff_ff00,
+            0xff00_ffff,
+            0xff00_ff00,
+            0xffff_00ff,
+            0xffff_0000,
+            0xff00_00ff,
+            0xff00_0000,
+        ];
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let frame = x < 8 || y < 8 || x >= WIDTH - 8 || y >= HEIGHT - 8;
+                let px = if frame {
+                    0xffff_ffff
+                } else if y % 100 == 99 {
+                    0xff00_0000
+                } else {
+                    BARS[x * 8 / WIDTH]
+                };
+                gpu.vram_write32(AT + 4 * (y * WIDTH + x), px);
+            }
+        }
+        if !self.hdp_ready.swap(true, Ordering::AcqRel) {
+            flip::hdp_init(&w);
+        }
+        // The last word back through BAR0 completes the posted writes.
+        let _ = gpu.vram_read32(AT + bytes - 4);
+        flip::hdp_flush(&w);
+        let shown = adopted.vram_base + AT as u64;
+        for (what, to) in [
+            ("to the pattern", shown),
+            ("back to the firmware's", adopted.vram_base),
+        ] {
+            flip::flip(&w, to);
+            let mut waited_us = 0u32;
+            while flip::pending(&w) && waited_us < 200_000 {
+                bus::manager().delay_us(100);
+                waited_us += 100;
+            }
+            self.log(format_args!(
+                "flip {what}: {}; surface now {:#x}; waited {waited_us} us",
+                if flip::pending(&w) {
+                    "STILL PENDING"
+                } else {
+                    "taken"
+                },
+                flip::surface(&w)
+            ));
+            if what == "to the pattern" {
+                for _ in 0..3000 {
+                    bus::manager().delay_us(1000);
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Makes the display the firmware left a graphics card, and takes over
+    /// from the firmware framebuffer's card, if this is the display the
+    /// console shows (docs/GRAPHICS.md §16.3). Logs why not otherwise.
+    pub(crate) fn register_kms(&self, s: &sched::Sleepable) {
+        if self.kms.lock().is_some() {
+            return;
+        }
+        let Ok(gpu) = self.gpu() else {
+            return;
+        };
+        if self.table.lock().is_none() && self.discover().is_err() {
+            return;
+        }
+        {
+            let cache = self.table.lock();
+            let Some(d) = cache.as_ref() else {
+                return;
+            };
+            if let Err(skip) = display::check(d) {
+                self.log(format_args!("no graphics card: {skip:?}"));
+                return;
+            }
+        }
+        let card = match crate::kms::card(&gpu) {
+            Ok(c) => c,
+            Err(e) => {
+                self.log(format_args!("no graphics card: {e:?}"));
+                return;
+            }
+        };
+        let node = match drm::register(card.clone()) {
+            Ok(n) => n,
+            Err(e) => {
+                self.log(format_args!("graphics card not registered: {e:?}"));
+                return;
+            }
+        };
+        self.log(format_args!(
+            "graphics card dri/card{} over the firmware's display",
+            node.unit()
+        ));
+        let gone = drm::retire_firmware_cards(s);
+        if gone > 0 {
+            self.log(format_args!("took over from the firmware framebuffer card"));
+        }
+        *self.kms.lock() = Some((card, node));
+    }
+
+    /// Takes the card away and shows the firmware's picture again.
+    pub(crate) fn unregister_kms(&self, s: &sched::Sleepable) {
+        let held = self.kms.lock().take();
+        if let Some((card, node)) = held {
+            card.restore();
+            node.unregister(s);
+        }
     }
 
     /// A one-line summary of the cached table, for a sysctl.
@@ -272,6 +468,14 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         "vram",
         "Write 1 to read a few words of VRAM through BAR0 and log them (read-only)",
         move || r.vram_probe(),
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "flip",
+        "Write 1 to show a test pattern from video memory for three seconds, then restore the firmware's picture",
+        move || r.flip_test(),
     );
     let r = Arc::clone(a);
     crate::control::trigger(

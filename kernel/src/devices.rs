@@ -311,6 +311,7 @@ pub(crate) fn init(s: &Sleepable) {
     // `hw.nvme.*` (`TUNABLE_INT_FETCH`), before any controller attaches.
     let tunable = |name: &str| crate::boot::value(name).and_then(|v| v.parse::<i32>().ok());
     nvme::set_tunables(&tunable);
+    drmn::set_tunables(&tunable);
     // `hw.iommu.*` and `hw.smmu.*` (docs/IOMMU.md §4.12): arm64's, where
     // FreeBSD's IOMMU knobs are the SMMU's (x86 DMAR and AMD-Vi are
     // deferred, §9).
