@@ -129,12 +129,21 @@ fn amd_aperture(cx: &mut AttachCx<'_>, child: &Arc<PciChild>) -> Option<Arc<Aper
         log("no register window (BAR5)");
         return None;
     };
-    let len = match cx.resources().get(index) {
-        Some(Resource::Memory { len, .. }) => *len,
-        _ => 0,
-    };
+    // `mmio_bytes` counts the memory resources only; the list also holds
+    // the I/O BAR and the interrupt.
+    let len = cx
+        .resources()
+        .iter()
+        .filter_map(|r| match r {
+            Resource::Memory { len, .. } => Some(*len),
+            _ => None,
+        })
+        .nth(index)
+        .unwrap_or(0);
     if len < AMD_BAR5_MIN {
-        log("the register window is too small");
+        log(&alloc::format!(
+            "the register window is too small: memory resource {index} is {len:#x} bytes"
+        ));
         return None;
     }
     match cx.mmio_bytes(index) {
