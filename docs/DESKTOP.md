@@ -891,6 +891,25 @@ Where FreeBSD has no driver (`panthor`), results are recorded and do not gate, u
    control: OBS's WebSocket protocol, if its specification can be used without consulting GPL
    sources, or no control beyond what OBS's own global hotkeys give. The `stream` profile still
    starts on any capture session either way.
+
+   **Or replace OBS** (likely, if no route avoids GPL code). A Scoria-native `scoria-cast` in
+   `desk/` takes the capture pass's dma-bufs and the audio buses and does what OBS does: scenes
+   (stages already are), encoding, muxing, recording, a replay buffer, and streaming, with its
+   controls as ordinary Scoria actions. The design to adapt is Sable's `sable-cast`
+   (`git show 8ff58ee:docs/DESKTOP.md`, §5.6–§5.7), under the same license rules:
+   - **Video:** Vulkan Video on the GPU (VCN on RDNA2, the Sky1's codec), which needs the encode
+     engines from GRAPHICS.md §13 question 3. The software fallback is SVT-AV1 and OpenH264
+     (both BSD). x264 and x265 are GPL and are never linked.
+   - **Audio:** libopus (BSD), and ffmpeg's native AAC encoder.
+   - **Containers and outputs:** libavformat from ffmpeg's LGPL configuration, linked
+     dynamically: fragmented MP4 and Matroska files, RTMP and RTMPS (TLS from base's `libssl`).
+     SRT (libsrt, MPL-2.0) and WHIP later.
+   - **The ffmpeg catch:** FreeBSD's packaged ffmpeg may be built with GPL options, which makes
+     the whole library GPL. Either the inventory carries an LGPL ffmpeg build of its own, or
+     `scoria-cast` links SVT-AV1, OpenH264, and libopus directly and keeps only libavformat
+     (and libavutil) from ffmpeg.
+   - **A/V sync and latency:** capture timestamps from presentation feedback and the audio
+     device clock, one clock for both, as Sable §5.7.3 laid out.
 10. **Capture cost.** Measure the capture pass at 1080p60 and 1440p60 with a game on a plane, and
     decide whether capture may drop its rate under load.
 
@@ -908,7 +927,7 @@ The headless foundation needs only P6 and starts before M-G finishes.
 | **M-D.3** | Accelerated in QEMU, and the session: dma-buf import, explicit synchronization, direct scanout; `scoria-sup`, the bus, `scoriactl`, the worker and configuration reload, rules and profiles, `try`; `xwayland-satellite`; `scoria-ui`, the bar, launcher and palette, notifier, locker; the overview; capture (`ext-image-copy-capture`, the two passes, the privacy layer, the `stream` profile) | M-G.2, M-G.3, P7, AUDIO A1 | A complete session on Venus with explicit sync: `foot`, Firefox, and an X11 program through `xwayland-satellite`, configured live, with the floors' tests passing; a capture client records a desktop with one window redacted and one display-only |
 | **M-D.4** | Metal: direct scanout and planes on real hardware, variable refresh, tearing, Game Focus, the frame-timing display, the action wheel, controllers, the latency rig | M-G.4–M-G.6, AUDIO A2/A4, controller drivers, asynchronous flips and variable refresh (§11.3), P11 for sleep | `desk` (metal) within 2% of FreeBSD 15.1 with `drm-kmod` on the X870E and the Z690-A; §8.3's budget holds on the rig; on the Orange Pi 6 Plus with `panthor`, the session runs accelerated and its `desk` results are recorded without gating (§12.2) |
 | **M-D.5** | Installed: the package on AbyssBSD's medium, the login path (§14 question 7), installs to UFS, then ZFS | INSTALLER.md I.1–I.3; M-Z for ZFS | An installed disk boots to a Scoria session in QEMU and from the X870E's second NVMe |
-| **M-D.6** | Streaming and expression: OBS integration (§14 question 9), stages, stream audio; wallpaper palettes, templates, user shaders, bundles, showcase; input methods, color management, clipboard history, tablets, accessibility, session restore, `scoria-dbus-bridge` | `cuse` or taps (§14 question 4) | A 1080p60 stream of a stage with capture-only overlays and per-program audio |
+| **M-D.6** | Streaming and expression: OBS integration or `scoria-cast` (§14 question 9), stages, stream audio; wallpaper palettes, templates, user shaders, bundles, showcase; input methods, color management, clipboard history, tablets, accessibility, session restore, `scoria-dbus-bridge` | `cuse` or taps (§14 question 4) | A 1080p60 stream of a stage with capture-only overlays and per-program audio |
 
 ## References
 
