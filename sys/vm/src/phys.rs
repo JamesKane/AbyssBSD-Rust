@@ -427,6 +427,62 @@ impl<'a> PhysAllocator<'a> {
         Ok(())
     }
 
+    /// Returns single pages that [`PhysAllocator::alloc`] (or `alloc_run`)
+    /// handed out, as [`PhysAllocator::free`] at order 0 would, but the
+    /// runs of consecutive frames among them go back as the largest aligned
+    /// blocks that fit: a cache's batch, which came from one block, merges
+    /// once, not a page at a time (FreeBSD's `vm_phys_enqueue_contig`,
+    /// which `vm_phys_free_contig` calls for a run). Sorts `pfns`.
+    pub fn free_batch(&mut self, pfns: &mut [Pfn]) -> Result<(), FreeError> {
+        pfns.sort_unstable();
+        let mut i = 0;
+        while i < pfns.len() {
+            let first = pfns[i];
+            let s = self.segment_of(first).ok_or(FreeError::Unmanaged(first))?;
+            let limit = self.segments[s].seg.end.0;
+            let mut n = 1;
+            while i + n < pfns.len()
+                && pfns[i + n].0 == first.0 + n as u64
+                && first.0 + (n as u64) < limit
+            {
+                n += 1;
+            }
+            // Duplicates sort next to each other: a double free.
+            if pfns.get(i + n) == Some(&pfns[i + n - 1]) {
+                return Err(FreeError::NotAllocated(
+                    pfns[i + n - 1],
+                    Order::ZERO,
+                    PageState::Free,
+                ));
+            }
+            let base = self.index_in(s, first);
+            for k in 0..n {
+                let page = self.pages[base + k];
+                if page.state != PageState::Allocated || page.order != 0 {
+                    return Err(FreeError::NotAllocated(
+                        first.add(k as u64),
+                        Order::ZERO,
+                        page.state,
+                    ));
+                }
+            }
+            let mut at = 0;
+            while at < n {
+                let p = first.0 + at as u64;
+                let mut k = (p.trailing_zeros() as usize).min(ORDERS - 1);
+                while at + (1 << k) > n {
+                    k -= 1;
+                }
+                let order = Order(u8::try_from(k).unwrap_or(0));
+                self.pages[base + at].order = order.get();
+                self.free(Pfn(p), order)?;
+                at += 1 << k;
+            }
+            i += n;
+        }
+        Ok(())
+    }
+
     /// Frame counts over all domains.
     #[must_use]
     pub fn stats(&self) -> Stats {
@@ -607,11 +663,9 @@ impl PageMagazine {
         } else {
             Self::BATCH.min(self.len)
         };
-        for _ in 0..n {
-            self.len -= 1;
-            a.free(self.pfns[self.len], Order::ZERO)?;
-        }
-        Ok(())
+        let start = self.len - n;
+        self.len = start;
+        a.free_batch(&mut self.pfns[start..start + n])
     }
 }
 
@@ -642,6 +696,29 @@ mod tests {
         let mut pages = vec![VmPage::RESERVED; n];
         let mut a = PhysAllocator::new(&mut pages, segs).unwrap();
         f(&mut a)
+    }
+
+    #[test]
+    fn batch_free_merges_runs_and_catches_double_frees() {
+        with(&[seg(0, 4096, 0)], |a| {
+            a.add_free(Pfn(0), Pfn(4096));
+            let whole = a.free_blocks(DomainId(0));
+            let mut got = Vec::new();
+            while got.len() < 100 {
+                let (first, n) = a.alloc_run(DomainId(0), 100 - got.len()).unwrap();
+                got.extend((0..n as u64).map(|k| first.add(k)));
+            }
+            // Out of order, as a cache's pages come back.
+            got.reverse();
+            a.free_batch(&mut got.clone()).unwrap();
+            assert_eq!(a.stats().free, 4096);
+            assert_eq!(a.free_blocks(DomainId(0)), whole);
+            // A page twice in one batch, and a page already free.
+            let p = a.alloc(Order::ZERO, DomainId(0)).unwrap();
+            assert!(a.free_batch(&mut [p, p]).is_err());
+            a.free(p, Order::ZERO).unwrap();
+            assert!(a.free_batch(&mut [p]).is_err());
+        });
     }
 
     #[test]

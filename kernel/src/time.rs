@@ -362,7 +362,7 @@ impl Timer {
     /// Arms the timer to run `func(arg)` `ns` nanoseconds from now,
     /// replacing any pending arming (FreeBSD's `callout_reset`).
     pub(crate) fn reset(self: Pin<&Self>, ns: u64, func: TimerFn, arg: usize) {
-        let deadline = counter().saturating_add(timer_ticks(ns));
+        let deadline = counter_unordered().saturating_add(timer_ticks(ns));
         let me = ptr::from_ref(self.get_ref());
         let c = self.cpu.index();
         // The queue lock masks interrupts, as `reprogram` needs.
