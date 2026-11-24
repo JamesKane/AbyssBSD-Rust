@@ -8,8 +8,8 @@
 //! display (the UEFI GOP framebuffer, `gop-kms`) keeps working. (The bus
 //! already lists the function's BARs as held, as FreeBSD's `devinfo -rv`
 //! shows them under `vgapciN`.) It gives the function's place in the tree (`vgapciN`, as `devinfo` shows it on
-//! FreeBSD), at the generic rank, which a native display driver (M-G.6)
-//! outranks by matching the vendor and device.
+//! FreeBSD). A native display driver (M-G) attaches as its child, as
+//! FreeBSD's `drmn0` does under `vgapci0`, not in its place.
 //!
 //! Behavior reference: sys/dev/pci/vga_pci.c (`vga_pci_probe`).
 

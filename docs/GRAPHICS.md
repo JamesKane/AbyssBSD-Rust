@@ -424,6 +424,15 @@ those results are recorded and do not gate.
    RDNA2 iGPUs. The
    RTX 4070 (NVIDIA's open kernel modules are dual MIT/GPL, GSP firmware does most of the work,
    and FreeBSD's baseline is NVIDIA's own driver) comes later.
+
+   **2026-11-24:** the project owner chose to start the X870E's graphics work with the RTX 4070
+   (`AD104`), not the RDNA2 iGPU, because a clean-room specification exists for it
+   (`~/Projects/OS/chinese-wall/specs/nvidia-nova`) and none for the Radeon. `lib/nvgpu` holds the
+   first slice (chip identification, the Video BIOS reader, the `NVFW` firmware container), host-tested
+   on images built from the specification. This reverses the order above for the X870E; ADR-0018 and
+   ADR-0026 still say RDNA2 first, and need an amendment before the order in section 9 changes.
+   On FreeBSD a native GPU driver is a child of the PCI function's `vgapci` (`drmn0` under `vgapci0`
+   in the QEMU corpus), so the native driver should attach as that child, leaving `vgapci0` in the tree.
 2. **FreeBSD's discovery and policy details** (§2, §7.4, §8): sysctl names, devd strings, master
    privileges, device node modes. Record them from FreeBSD 15.1 with `drm-kmod` before writing
    `sys/drm`.
