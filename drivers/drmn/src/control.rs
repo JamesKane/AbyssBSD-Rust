@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! The sysctls that run the GPU's write stages, one at a time, on request:
+//! The NVIDIA side of `drmn` (the graphics device node of FreeBSD's `drm-kmod`:
+//! see the crate's module comment): the sysctls that run the GPU's write stages, one at a time, on request:
 //! nothing here runs at attach, so a stage that hangs the machine can
 //! never keep the installed kernel from booting.
 //!
@@ -26,10 +27,6 @@ use nvgpu::{fuse, fwsec, mem};
 use sync::SpinLock;
 use vgapci::Aperture;
 use vm::dma::DmaCoherent;
-
-fn log(args: core::fmt::Arguments<'_>) {
-    bus::manager().log(args);
-}
 
 /// The GPU's registers for `nvgpu`'s sequences.
 struct Hw<'a>(&'a Aperture);
@@ -66,6 +63,7 @@ struct Flush {
 
 /// A GPU being driven from its sysctls.
 pub(crate) struct Control {
+    name: String,
     gpu: Weak<Aperture>,
     boot_0: u32,
     flush: SpinLock<Option<Flush>>,
@@ -78,12 +76,17 @@ impl core::fmt::Debug for Control {
 }
 
 impl Control {
-    pub(crate) fn new(gpu: Weak<Aperture>, boot_0: u32) -> Self {
+    pub(crate) fn new(name: String, gpu: Weak<Aperture>, boot_0: u32) -> Self {
         Self {
+            name,
             gpu,
             boot_0,
             flush: SpinLock::new(None),
         }
+    }
+
+    fn log(&self, args: core::fmt::Arguments<'_>) {
+        bus::manager().log(format_args!("{}: {args}", self.name));
     }
 
     fn gpu(&self) -> Result<Arc<Aperture>, abi::errno::Errno> {
@@ -123,22 +126,23 @@ impl Control {
         let gpu = self.gpu()?;
         let mut slot = self.flush.lock();
         if !on {
-            log(format_args!("drmn0: clearing the flush page registers"));
+            self.log(format_args!("clearing the flush page registers"));
             self.clear_flush(&gpu, &mut slot);
             return Ok(());
         }
         if slot.is_some() {
             return Ok(());
         }
-        log(format_args!("drmn0: allocating the flush page"));
+        self.log(format_args!("allocating the flush page"));
         let page = gpu
             .dma_tag()
+            .ok_or(Errno::ENODEV)?
             .coherent::<u8>(4096)
             .map_err(|_| Errno::ENOMEM)?;
         let address = page.bus_addr();
         let (hi, lo) = mem::flush_registers_ada(address).ok_or(Errno::EINVAL)?;
-        log(format_args!(
-            "drmn0: registering the flush page at {address:#x} (high {hi:#x}, low {lo:#x})"
+        self.log(format_args!(
+            "registering the flush page at {address:#x} (high {hi:#x}, low {lo:#x})"
         ));
         gpu.write32(0x0010_0c40, hi);
         gpu.write32(0x0010_0c10, lo);
@@ -147,14 +151,12 @@ impl Control {
             gpu.read32(0x0010_0c10).unwrap_or(0),
         );
         if back != (hi, lo) {
-            log(format_args!(
-                "drmn0: the flush registers read back {back:x?}"
-            ));
+            self.log(format_args!("the flush registers read back {back:x?}"));
             gpu.write32(0x0010_0c40, 0);
             gpu.write32(0x0010_0c10, 0);
             return Err(Errno::EIO);
         }
-        log(format_args!("drmn0: flush page registered"));
+        self.log(format_args!("flush page registered"));
         *slot = Some(Flush { page, address });
         Ok(())
     }
@@ -164,10 +166,7 @@ impl Control {
             // The registers must not point at memory that is freed.
             gpu.write32(0x0010_0c40, 0);
             gpu.write32(0x0010_0c10, 0);
-            log(format_args!(
-                "drmn0: flush page at {:#x} released",
-                f.address
-            ));
+            self.log(format_args!("flush page at {:#x} released", f.address));
             drop(f.page);
         }
     }
@@ -182,9 +181,7 @@ impl Control {
 
     fn need_flush(&self) -> Result<(), abi::errno::Errno> {
         if self.flush.lock().is_none() {
-            log(format_args!(
-                "drmn0: refused: register the flush page first"
-            ));
+            self.log(format_args!("refused: register the flush page first"));
             return Err(abi::errno::Errno::EINVAL);
         }
         Ok(())
@@ -194,14 +191,14 @@ impl Control {
     pub(crate) fn gsp_reset(&self) -> Result<(), abi::errno::Errno> {
         let gpu = self.gpu()?;
         self.need_flush()?;
-        log(format_args!("drmn0: resetting the GPU system processor"));
+        self.log(format_args!("resetting the GPU system processor"));
         match falcon::reset(&Hw(&gpu), GSP, self.boot_0) {
             Ok(()) => {
-                log(format_args!("drmn0: GPU system processor reset done"));
+                self.log(format_args!("GPU system processor reset done"));
                 Ok(())
             }
             Err(e) => {
-                log(format_args!("drmn0: reset failed: {e:?}"));
+                self.log(format_args!("reset failed: {e:?}"));
                 Err(abi::errno::Errno::EIO)
             }
         }
@@ -213,13 +210,13 @@ impl Control {
         let gpu = self.gpu()?;
         self.need_flush()?;
         let hw = Hw(&gpu);
-        log(format_args!("drmn0: FRTS: reading the Video BIOS"));
+        self.log(format_args!("FRTS: reading the Video BIOS"));
         let v = vbios::read(&Prom(&gpu)).map_err(|e| {
-            log(format_args!("drmn0: FRTS: Video BIOS: {e:?}"));
+            self.log(format_args!("FRTS: Video BIOS: {e:?}"));
             Errno::EIO
         })?;
         let Descriptor::V3(d) = v.descriptor else {
-            log(format_args!("drmn0: FRTS: not a version 3 descriptor"));
+            self.log(format_args!("FRTS: not a version 3 descriptor"));
             return Err(Errno::ENOTSUP);
         };
         let fb = mem::usable_fb_bytes(hw.read32(mem::NV_USABLE_FB_SIZE_IN_MB));
@@ -231,8 +228,8 @@ impl Control {
         let frts = mem::frts_region(vga).ok_or(Errno::EINVAL)?;
         let fuse_reg = fuse::register(d.engine_id_mask, d.ucode_id).map_err(|_| Errno::EINVAL)?;
         let reg_version = fuse::version(hw.read32(fuse_reg));
-        log(format_args!(
-            "drmn0: FRTS: region {:#x}..{:#x}, fuse version {reg_version}, signature versions {:#x}",
+        self.log(format_args!(
+            "FRTS: region {:#x}..{:#x}, fuse version {reg_version}, signature versions {:#x}",
             frts.start, frts.end, d.signature_versions
         ));
         let prepared = fwsec::prepare(
@@ -244,40 +241,41 @@ impl Control {
             reg_version,
         )
         .map_err(|e| {
-            log(format_args!("drmn0: FRTS: preparing the microcode: {e:?}"));
+            self.log(format_args!("FRTS: preparing the microcode: {e:?}"));
             Errno::EINVAL
         })?;
-        log(format_args!(
-            "drmn0: FRTS: image {:#x} bytes; instructions {:?}, data {:?}",
+        self.log(format_args!(
+            "FRTS: image {:#x} bytes; instructions {:?}, data {:?}",
             prepared.image.len(),
             prepared.imem,
             prepared.dmem
         ));
         let buf = gpu
             .dma_tag()
+            .ok_or(Errno::ENODEV)?
             .coherent::<u8>(prepared.image.len())
             .map_err(|_| Errno::ENOMEM)?;
         for (i, b) in prepared.image.iter().enumerate() {
             buf.write(i, *b);
         }
         let dma = buf.bus_addr();
-        log(format_args!(
-            "drmn0: FRTS: image in memory at {dma:#x}; turning on bus mastering"
+        self.log(format_args!(
+            "FRTS: image in memory at {dma:#x}; turning on bus mastering"
         ));
         gpu.pci().set_bus_master(true);
         let result = boot::run_frts(&hw, self.boot_0, &prepared, dma, frts, &mut |step| {
-            log(format_args!("drmn0: FRTS: {step}"));
+            self.log(format_args!("FRTS: {step}"));
         });
         match result {
             Ok(()) => {
-                log(format_args!(
-                    "drmn0: FRTS done: protected region 2 is {:?}",
+                self.log(format_args!(
+                    "FRTS done: protected region 2 is {:?}",
                     boot::wpr2(&hw)
                 ));
                 Ok(())
             }
             Err(e) => {
-                log(format_args!("drmn0: FRTS failed: {e:?}; {}", self.report()));
+                self.log(format_args!("FRTS failed: {e:?}; {}", self.report()));
                 Err(match e {
                     BootError::Wpr2Active => Errno::EBUSY,
                     _ => Errno::EIO,

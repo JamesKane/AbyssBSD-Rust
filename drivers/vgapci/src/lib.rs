@@ -10,12 +10,17 @@
 //! `vgapciN`.) It gives the function's place in the tree, as `devinfo`
 //! shows it on FreeBSD.
 //!
-//! A native display driver (M-G) attaches as its child, as FreeBSD's
-//! `drmn0` does under `vgapci0`, not in its place. FreeBSD lets any display
-//! driver claim a `vgapci` child by its PCI IDs; here `vgapci` adds the
-//! `drmn` child itself for the vendors that have a native driver (so far
-//! NVIDIA's), and maps the register aperture (BAR0) for it, handing the
-//! child a weak reference so that this driver's detach is never held up.
+//! A native display driver (M-G) attaches as its child, not in its place.
+//! The child is the `drmn` node, as on FreeBSD: `drmn` is the name FreeBSD's
+//! `drm-kmod` gives a graphics device's node (`drmn0`), the device a native GPU
+//! driver attaches as, under the display function's `vgapci` node. "DRM" is
+//! the Direct Rendering Manager, the kernel's graphics interface.
+//!
+//! FreeBSD lets any display driver claim a `vgapci` child by its PCI IDs;
+//! here `vgapci` adds the `drmn` child itself for the vendors that have a
+//! native driver (NVIDIA's and AMD's), maps the register aperture for it
+//! (BAR0 on NVIDIA, BAR5 on AMD), and hands the child a weak reference so
+//! that this driver's detach is never held up.
 //!
 //! Behavior reference: sys/dev/pci/vga_pci.c (`vga_pci_probe`).
 
@@ -33,6 +38,7 @@ use bus::{
     StopReason,
 };
 use devtree::ids::PciId;
+use pci::BarKind;
 use pci::bus::PciChild;
 use regs::Bytes;
 use vm::dma::{DmaConstraints, DmaTag};
@@ -47,6 +53,11 @@ const OLD_VGA: PciId = PciId::subclass(0x00, 0x01);
 const VENDOR_NVIDIA: u16 = 0x10de;
 /// The register aperture's size on the NVIDIA GPUs (BAR0: 16 MiB).
 const NVIDIA_BAR0_LEN: u64 = 0x100_0000;
+/// AMD's PCI vendor ID.
+const VENDOR_AMD: u16 = 0x1002;
+/// The register window (BAR5) of the AMD GPUs is 512 KiB (Raphael) or
+/// 1 MiB (Navi 22); anything smaller is not one.
+const AMD_BAR5_MIN: u64 = 0x8_0000;
 
 /// What `vgapci` holds of a GPU for its native driver: the register
 /// aperture, the PCI function (bus mastering is the driver's to turn on),
@@ -55,7 +66,7 @@ pub struct Aperture {
     mmio: MmioGrant<Bytes>,
     len: usize,
     pci: Arc<PciChild>,
-    tag: DmaTag,
+    tag: Option<DmaTag>,
 }
 
 impl core::fmt::Debug for Aperture {
@@ -81,10 +92,11 @@ impl Aperture {
         &self.pci
     }
 
-    /// The DMA tag: 47-bit addresses, 256-byte alignment.
+    /// The DMA tag (47-bit addresses, 256-byte alignment), for the vendors
+    /// whose driver loads firmware by DMA; `None` for the others.
     #[must_use]
-    pub fn dma_tag(&self) -> &DmaTag {
-        &self.tag
+    pub fn dma_tag(&self) -> Option<&DmaTag> {
+        self.tag.as_ref()
     }
 
     /// The 32-bit register at byte `offset`, or `None` if it is not
@@ -98,15 +110,53 @@ impl Aperture {
     }
 }
 
-/// What the `drmn` child is given: its parent's aperture, weakly.
+/// What the `drmn` child (the graphics device node of FreeBSD's `drm-kmod`) is given: its parent's aperture, weakly, and the
+/// PCI vendor, which says which kind of GPU it is.
 #[derive(Debug)]
-pub struct Registers(pub Weak<Aperture>);
+pub struct Registers(pub Weak<Aperture>, pub u16);
+
+/// An AMD GPU's register window (BAR5), found by its BAR number among the
+/// memory resources, or `None` (and a log line saying why).
+fn amd_aperture(cx: &mut AttachCx<'_>, child: &Arc<PciChild>) -> Option<Arc<Aperture>> {
+    let log = |msg: &str| bus::manager().log(format_args!("vgapci: AMD GPU: {msg}"));
+    let Some(index) = child
+        .function
+        .bars
+        .iter()
+        .filter(|b| b.kind != BarKind::Io)
+        .position(|b| b.index == 5)
+    else {
+        log("no register window (BAR5)");
+        return None;
+    };
+    let len = match cx.resources().get(index) {
+        Some(Resource::Memory { len, .. }) => *len,
+        _ => 0,
+    };
+    if len < AMD_BAR5_MIN {
+        log("the register window is too small");
+        return None;
+    }
+    match cx.mmio_bytes(index) {
+        Ok(mmio) => Some(Arc::new(Aperture {
+            mmio,
+            len: usize::try_from(len).unwrap_or(0),
+            pci: Arc::clone(child),
+            tag: None,
+        })),
+        Err(e) => {
+            log(&alloc::format!("the register window was refused: {e:?}"));
+            None
+        }
+    }
+}
 
 /// `vgapciN`.
 #[derive(Debug)]
 pub struct VgaPci {
     /// The register aperture, for a function a native driver is wanted for.
     aperture: Option<Arc<Aperture>>,
+    vendor: u16,
 }
 
 impl Driver for VgaPci {
@@ -120,7 +170,8 @@ impl Driver for VgaPci {
     fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
         let child = cx.bus_data_arc::<PciChild>().ok_or(AttachError::Decline)?;
         let mut aperture = None;
-        if child.function.header.ident.vendor == VENDOR_NVIDIA
+        let vendor = child.function.header.ident.vendor;
+        if vendor == VENDOR_NVIDIA
             && matches!(
                 cx.resources().first(),
                 Some(Resource::Memory {
@@ -141,11 +192,13 @@ impl Driver for VgaPci {
                     mmio,
                     len: usize::try_from(NVIDIA_BAR0_LEN).unwrap_or(0),
                     pci: Arc::clone(&child),
-                    tag,
+                    tag: Some(tag),
                 }));
             }
+        } else if vendor == VENDOR_AMD {
+            aperture = amd_aperture(cx, &child);
         }
-        Ok(Self { aperture })
+        Ok(Self { aperture, vendor })
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
@@ -154,7 +207,7 @@ impl Driver for VgaPci {
                 class: "drmn",
                 channel: 0,
             };
-            let link = Registers(Arc::downgrade(a));
+            let link = Registers(Arc::downgrade(a), self.vendor);
             cx.add_child(ident, Some(Arc::new(link) as _), Vec::<Resource>::new());
         }
         Ok(())
