@@ -125,6 +125,7 @@ pub(crate) fn run(s: &Sleepable, suite: &str) -> bool {
         "callout" => suite_callout,
         "callout.after" => suite_callout_after,
         "rwdiag" => suite_rwdiag,
+        "ctxdiag" => suite_ctxdiag,
         _ => {
             kprintln!("bench: unknown suite {suite:?}");
             return false;
@@ -1122,6 +1123,17 @@ fn suite_diag(s: &Sleepable) {
         black_box(time::counter());
         1
     });
+}
+
+/// The cross-CPU context switch under each idle policy (investigation).
+fn suite_ctxdiag(s: &Sleepable) {
+    for (name, mode) in [("auto", 0), ("halt", 1), ("spin", 2)] {
+        sched::set_idle_mode(mode);
+        time::sleep_ns(s, 100_000_000);
+        ctxsw(s, &alloc::format!("ctxdiag.cross.{name}"), cpu(1), cpu(2));
+        ctxsw(s, &alloc::format!("ctxdiag.same.{name}"), cpu(1), cpu(1));
+    }
+    sched::set_idle_mode(0);
 }
 
 /// Strict alternation between two workers on `a` and `b`.

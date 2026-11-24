@@ -3,7 +3,7 @@
 # One AbyssBSD p2 boot per core class on the Orange Pi 6 Plus, for
 # investigation (no serial console needed; p2-board.sh's AbyssBSD half):
 # installs KERNEL on abyssroot (the old one stays as kernel.prev), boots
-# it with `abyss.bench=p2 abyss.bench.boot abyss.bench.cpus=...`, reads the
+# it with `abyss.bench=${SUITE:-p2} abyss.bench.boot abyss.bench.cpus=...`, reads the
 # kbench lines from the kernel log over ssh, and lets the board reset into
 # FreeBSD. Starts from FreeBSD.
 #
@@ -28,7 +28,7 @@ wait_freebsd() {
 }
 wait_freebsd || { log "board not in FreeBSD"; exit 1; }
 # Install the kernel (never via /tmp: that is the Crucial).
-fb 'mount /dev/gpt/abyssroot /mnt && cp -p /mnt/boot/kernel/kernel /mnt/boot/kernel/kernel.prev' || { log "mount failed"; exit 1; }
+fb 'umount /mnt; mount /dev/gpt/abyssroot /mnt && cp -p /mnt/boot/kernel/kernel /mnt/boot/kernel/kernel.prev' || { log "mount failed"; exit 1; }
 ssh $SSHOPT jkane@$B "su root -c 'cat > /mnt/boot/kernel/kernel.new'" < "$KERNEL" &&
 	fb 'mv /mnt/boot/kernel/kernel.new /mnt/boot/kernel/kernel && sync && umount /mnt' || { log "install failed"; exit 1; }
 cmdline() {
@@ -39,7 +39,7 @@ for class in "$@"; do
 	name=${class%%:*}
 	cpus=${class#*:}
 	wait_freebsd || { log "board not in FreeBSD"; exit 1; }
-	cmdline " abyss.bench=p2 abyss.bench.boot abyss.bench.cpus=$cpus" || exit 1
+	cmdline " abyss.bench=${SUITE:-p2} abyss.bench.boot abyss.bench.cpus=$cpus" || exit 1
 	log "$name ($cpus)"
 	fb 'nextboot -k kernel.nodebug && efibootmgr -n -b 0007 > /dev/null && shutdown -r now' >/dev/null
 	out=$S/$name.log
@@ -47,10 +47,10 @@ for class in "$@"; do
 		sleep 5
 		[ "$(T=15 ab 'sysctl -n kern.ident')" = ABYSSBSD ] || continue
 		T=30 ab 'dmesg' | tr -d '\r' > "$out"
-		grep -aq '^kbench end p2' "$out" && break
+		grep -aq "^kbench end ${SUITE:-p2}" "$out" && break
 	done
 	echo "== $name"
-	grep -a '^kbench ' "$out" | sed -n '/^kbench begin p2/,/^kbench end p2/p'
+	grep -a '^kbench ' "$out" | sed -n "/^kbench begin ${SUITE:-p2}/,/^kbench end ${SUITE:-p2}/p"
 	ab 'shutdown -r now' >/dev/null
 	sleep 45
 done
