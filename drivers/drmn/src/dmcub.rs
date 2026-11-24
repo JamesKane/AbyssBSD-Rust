@@ -214,4 +214,12 @@ fn round_trips(
         )),
         Err(e) => log(format_args!("DMCUB: inbox 1: {e:?}")),
     }
+    match inbox.submit(w, &mem, &dmcub::enable_outbox1(true), 100, 1000, &pause) {
+        Ok(()) => log(format_args!(
+            "DMCUB: outbox 1 notifications enabled (read pointer {:#x}, outbox 1 write pointer {:#x})",
+            w.read32(dmcub::INBOX1 + 12),
+            w.read32(dmcub::OUTBOX1 + 8)
+        )),
+        Err(e) => log(format_args!("DMCUB: enable outbox 1: {e:?}")),
+    }
 }

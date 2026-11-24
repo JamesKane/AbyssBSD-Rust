@@ -282,6 +282,18 @@ pub const COMMAND_BYTES: u32 = 64;
 
 /// Command type: no operation.
 pub const CMD_NOP: u8 = 0;
+/// Command type: enable notifications in outbox 1 (08 section 3.3): subtype 0,
+/// one dword at byte 4, 1 to enable. Nothing is posted until it is sent.
+pub const CMD_ENABLE_OUTBOX1: u8 = 71;
+
+/// The bytes of the enable-outbox-1 command.
+#[must_use]
+pub fn enable_outbox1(enable: bool) -> [u8; 8] {
+    let mut b = [0u8; 8];
+    b[..4].copy_from_slice(&header(CMD_ENABLE_OUTBOX1, 0, false, 4).to_le_bytes());
+    b[4..].copy_from_slice(&u32::from(enable).to_le_bytes());
+    b
+}
 
 /// The first four bytes of a command (08 section 3.3): the type, the
 /// subtype, whether a reply is wanted, and the payload size.
@@ -577,6 +589,14 @@ mod tests {
         assert_eq!(header(128, 2, true, 16), 128 | 2 << 8 | 1 << 16 | 16 << 24);
         // The payload size is 6 bits.
         assert_eq!(header(0, 0, false, 0xff), 0x3f << 24);
+    }
+
+    #[test]
+    fn enable_outbox1_is_a_header_word_then_the_flag() {
+        let b = enable_outbox1(true);
+        assert_eq!(u32::from_le_bytes([b[0], b[1], b[2], b[3]]), 71 | 4 << 24);
+        assert_eq!(u32::from_le_bytes([b[4], b[5], b[6], b[7]]), 1);
+        assert_eq!(enable_outbox1(false)[4], 0);
     }
 
     #[test]
