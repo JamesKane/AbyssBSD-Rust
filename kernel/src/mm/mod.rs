@@ -616,6 +616,16 @@ pub(crate) enum DeviceMapError {
 /// virtual memory for the life of the kernel, returning the address of
 /// `pa`.
 pub(crate) fn map_device(pa: PhysAddr, len: u64) -> Result<VirtAddr, DeviceMapError> {
+    map_device_with(pa, len, Attrs::DEVICE)
+}
+
+/// [`map_device`], write-combining: for a prefetchable aperture (video
+/// memory), including one the kernel's console already maps that way.
+pub(crate) fn map_device_wc(pa: PhysAddr, len: u64) -> Result<VirtAddr, DeviceMapError> {
+    map_device_with(pa, len, Attrs::FRAMEBUFFER)
+}
+
+fn map_device_with(pa: PhysAddr, len: u64, attrs: Attrs) -> Result<VirtAddr, DeviceMapError> {
     let off = pa.get() % 4096;
     let span =
         addr::align_up(len + off, 4096).ok_or(DeviceMapError::Map(pt::MapError::Misaligned))?;
@@ -626,7 +636,7 @@ pub(crate) fn map_device(pa: PhysAddr, len: u64) -> Result<VirtAddr, DeviceMapEr
     );
     let mut map = KERNEL_MAP.lock();
     let table = map.as_mut().expect("kernel map");
-    if let Err(e) = table.map(&mut Frames, va, pa - off, span, Attrs::DEVICE) {
+    if let Err(e) = table.map(&mut Frames, va, pa - off, span, attrs) {
         // Mappings made before an out-of-memory failure stay, and the
         // address range is leaked with them rather than reused.
         return Err(DeviceMapError::Map(e));

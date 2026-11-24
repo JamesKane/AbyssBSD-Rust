@@ -800,23 +800,24 @@ with the RTX 4070 as the boot display it does nothing. The KMS device it registe
 firmware set; poll the flip-pending bit, or the vblank, for completion. Nothing else is touched in R1: no
 clocks, no watermarks, no timing, and the encoder stays in the mode firmware left it.
 
-**Buffers.** Scan-out buffers are allocated from the VRAM range `[9 MiB, 0x1e000000)` (about 471 MiB), leaving
-the top 32 MiB for R2 and R3 (the trusted memory zone, the GART table, the microcontroller's windows). Their GPU
+**Buffers.** Scan-out buffers are allocated from the VRAM range `[9 MiB, 0x1e000000)` (about 471 MiB), bounded by BAR0's 256 MiB for the CPU path (a buffer the CPU writes must lie in BAR0), and clear of the top 2 MiB, which the platform's display
+microcontroller still uses (its windows run from `0x1fe00000`; the first window past `0x1ffd0400` overruns the end of VRAM). Their GPU
 address is `0xF400000000 + offset`; the plane's aperture already covers them.
 
 **The CPU path (decision needed, §16.4).** A dumb buffer needs the CPU to write pixels into VRAM. The
 candidates:
 
-1. *BAR0.* It is this node's own resource and a WC window onto the first 256 MiB of VRAM, enough for R1. The
-   broker refuses the grant today, because the console's framebuffer (the same bytes, `0xfc10000000`) is on its
-   list of sensitive ranges: a leaf driver may not map the kernel's console. The adoption itself is what
-   moves the console, so the rule should lift for the owner of the BAR the console lies in, once it has
-   registered a replacement.
+1. *BAR0* (chosen 2026-11-24). It is this node's own resource and a write-combining window onto the first
+   256 MiB of VRAM, enough for R1. The broker kept it from drivers because the console's framebuffer (the same
+   bytes) is a sensitive range. The rule as built: `AttachCx::mmio_bytes_console` grants a prefetchable resource
+   the console's framebuffer lies wholly inside, with no other sensitive range overlapping, mapped
+   write-combining as the console's own mapping is; every other overlap still refuses (host tests in `sys/bus`).
+   The console keeps drawing on its mapping until `vt` switches to the driver's display.
 2. *The carve-out at `0x1840000000` (512 MiB).* It reaches all of VRAM, but it is ACPI-reserved memory, not a
    PCI resource, so it would need a new kind of grant (a platform memory claim computed from two registers,
    not a table entry per board).
 
-R1 recommends (1). Writes through BAR0 need the host-data-path flush before the display reads them (the
+Writes through BAR0 need the host-data-path flush before the display reads them (the
 register is in spec 05); the probe `dev.drmn.1.vram` (reads the first words of BAR0; written, not yet
 accepted, see §16.5) is the first test.
 
@@ -836,16 +837,14 @@ presents (`simpledrm`-like). Spec 09 lists what RADV expects; none of it is in R
 
 ### 16.4 Decisions for the owner
 
-1. **The CPU path to VRAM:** BAR0 with a console-handover exception to the sensitive-range rule (recommended),
-   or the carve-out with a new kind of platform memory claim.
-2. **The iGPU stays the primary display** while this is worked; the firmware setting (Initial Display Output)
-   is the one thing about this machine that is not at its default.
-3. **The order after R1:** R2 (memory and interrupts) before R3 (PSP, SMU, mode setting), or R3 first because
+1. **The CPU path to VRAM:** decided 2026-11-24: BAR0, with the console-adoption grant of 16.3.
+2. **The iGPU stays the primary display** until the AMD stack is complete (decided 2026-11-24).
+3. **The order after R1 (still open; the owner's "recommendations" did not cover it):** R2 (memory and interrupts) before R3 (PSP, SMU, mode setting), or R3 first because
    mode changes need it and R2 only matters for the render side.
 
-### 16.5 Not yet true
+### 16.5 State of the probe
 
-`dev.drmn.1.vram` (reads a few words through BAR0) cannot run yet: the broker refuses the BAR0 grant as
-`Sensitive`, confirmed on the board on 2026-11-24, because the console's framebuffer is the first 8 MiB of that
-BAR (§16.3, the CPU path). The extra watermark, delivery-parameter and microcontroller-window registers (about
-120 more) are in `lib/amdgpu`'s list but have not been read on the board yet.
+With the adopting grant, `dev.drmn.1.vram` (2026-11-24) maps BAR0 (256 MiB) and reads: zeros at offset 0, 0x7800
+and 8 MiB, and live-looking data at 128 MiB. The verdict test (BAR0 against the index-register read of the same
+offsets, inside and beyond the framebuffer) is still to write. The extra display registers were read on the board
+and are in `tests/corpus/x870e/abyssbsd/raphael-drmn1.txt`; the specification's decoding is its 08 section 9.0.1.

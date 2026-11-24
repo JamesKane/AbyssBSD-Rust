@@ -13,6 +13,11 @@ use vm::dma::DmaMemory;
 /// and the consoles. Registered by the code that owns them.
 static SENSITIVE: SpinLock<alloc::vec::Vec<(u64, u64)>> = SpinLock::new(alloc::vec::Vec::new());
 
+/// The loader's framebuffer the console draws on, also kept off limits to
+/// drivers, except to the driver of the display it is part of
+/// (`mmio_bytes_console`).
+static CONSOLE_FB: SpinLock<Option<(u64, u64)>> = SpinLock::new(None);
+
 /// Maps registers the kernel itself owns (interrupt controllers, and
 /// later IOMMUs and ECAM), marking them off limits to drivers.
 pub(crate) fn map_reserved(pa: PhysAddr, len: u64) -> Result<VirtAddr, crate::mm::DeviceMapError> {
@@ -42,10 +47,27 @@ impl Platform for KernelPlatform {
     }
 
     fn sensitive(&self, pa: u64, len: u64) -> bool {
+        self.sensitive_beyond_console(pa, len)
+            || CONSOLE_FB
+                .lock()
+                .is_some_and(|(b, l)| pa < b + l && b < pa + len)
+    }
+
+    fn sensitive_beyond_console(&self, pa: u64, len: u64) -> bool {
         SENSITIVE
             .lock()
             .iter()
             .any(|&(b, l)| pa < b + l && b < pa + len)
+    }
+
+    fn console_framebuffer(&self) -> Option<(u64, u64)> {
+        *CONSOLE_FB.lock()
+    }
+
+    fn map_device_wc(&self, pa: u64, len: u64) -> Option<usize> {
+        crate::mm::map_device_wc(PhysAddr::new(pa), len)
+            .ok()
+            .and_then(|va| usize::try_from(va.get()).ok())
     }
 
     fn sysctl(&self, s: &Sleepable, f: &mut dyn FnMut(&mut Tree)) {
@@ -188,7 +210,7 @@ fn reserve_boot_devices() {
         r.push((m.phys.get(), m.size.max(4096)));
     }
     if let Some(f) = info.framebuffer.get() {
-        r.push((f.phys.get(), f.size));
+        *CONSOLE_FB.lock() = Some((f.phys.get(), f.size));
     }
 }
 

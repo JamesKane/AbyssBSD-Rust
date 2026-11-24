@@ -19,6 +19,21 @@ pub trait Platform: Sync {
     /// Whether `[pa, pa + len)` overlaps a range leaf drivers may not map
     /// (interrupt controllers, IOMMUs, ECAM, consoles).
     fn sensitive(&self, pa: u64, len: u64) -> bool;
+    /// The physical range of the loader's framebuffer that the kernel's
+    /// console draws on, if there is one (it is among the sensitive ranges).
+    fn console_framebuffer(&self) -> Option<(u64, u64)> {
+        None
+    }
+    /// Whether `[pa, pa + len)` overlaps a sensitive range other than the
+    /// console's framebuffer.
+    fn sensitive_beyond_console(&self, pa: u64, len: u64) -> bool {
+        self.sensitive(pa, len)
+    }
+    /// [`Platform::map_device`], write-combining: for a prefetchable
+    /// aperture (video memory). The default maps it uncached.
+    fn map_device_wc(&self, pa: u64, len: u64) -> Option<usize> {
+        self.map_device(pa, len)
+    }
     /// Runs `f` on the sysctl tree, exclusively.
     fn sysctl(&self, s: &Sleepable, f: &mut dyn FnMut(&mut Tree));
     /// Reads an I/O port `width` bytes wide (1, 2, or 4). Platforms without
