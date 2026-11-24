@@ -126,6 +126,7 @@ pub(crate) fn run(s: &Sleepable, suite: &str) -> bool {
         "callout.after" => suite_callout_after,
         "rwdiag" => suite_rwdiag,
         "ctxdiag" => suite_ctxdiag,
+        "ctxpmu" => suite_ctxpmu,
         _ => {
             kprintln!("bench: unknown suite {suite:?}");
             return false;
@@ -1134,6 +1135,76 @@ fn suite_ctxdiag(s: &Sleepable) {
         ctxsw(s, &alloc::format!("ctxdiag.same.{name}"), cpu(1), cpu(1));
     }
     sched::set_idle_mode(0);
+}
+
+/// The cross-CPU context switch with the performance monitors counting on
+/// both workers' CPUs (aarch64; investigation): per handoff, the cycles and
+/// four events' counts, one line per CPU, for each set of events.
+#[cfg(target_arch = "aarch64")]
+fn suite_ctxpmu(s: &Sleepable) {
+    // Architectural events: 0x08 instructions, 0x03 L1 data refills,
+    // 0x17 L2 data refills, 0x19 bus accesses; 0x01 L1 instruction refills,
+    // 0x10 branch mispredicts, 0x23 frontend stalls, 0x24 backend stalls.
+    // 0x05 L1 data TLB refills, 0x2a L3 data refills, 0x13 data accesses.
+    const SETS: [[u16; 4]; 3] = [
+        [0x08, 0x03, 0x17, 0x19],
+        [0x01, 0x10, 0x23, 0x24],
+        [0x05, 0x2a, 0x13, 0x16],
+    ];
+    struct Turn {
+        q: WaitQueue,
+        turn: AtomicUsize,
+        counts: [[AtomicU64; 5]; 2],
+    }
+    for (set, mode) in SETS.into_iter().flat_map(|s| [(s, 0), (s, 1)]) {
+        sched::set_idle_mode(mode);
+        time::sleep_ns(s, 50_000_000);
+        kprintln!("kbench ctxpmu idle mode {mode}");
+        let shared = Arc::new(Turn {
+            q: WaitQueue::new(),
+            turn: AtomicUsize::new(0),
+            counts: [const { [const { AtomicU64::new(0) }; 5] }; 2],
+        });
+        let run = Run::new();
+        let sh = Arc::clone(&shared);
+        launch(s, &run, &[cpu(1), cpu(2)], RUN_NS, move |run, me, ws| {
+            let other = 1 - me;
+            let mut n = 0;
+            crate::arch::cpu::pmu_start(set);
+            loop {
+                sh.q.wait_until(ws, || {
+                    sh.turn.load(Ordering::Acquire) == me || run.stopped()
+                });
+                sh.turn.store(other, Ordering::Release);
+                if run.stopped() {
+                    sh.q.wake_all();
+                    break;
+                }
+                n += 1;
+                sh.q.wake_one();
+            }
+            for (c, v) in sh.counts[me].iter().zip(crate::arch::cpu::pmu_read()) {
+                c.store(v, Ordering::Relaxed);
+            }
+            run.ops[me].0.store(n, Ordering::Relaxed);
+        });
+        let ops: u64 = run.ops[0].0.load(Ordering::Relaxed) + run.ops[1].0.load(Ordering::Relaxed);
+        for w in 0..2 {
+            let c: alloc::vec::Vec<u64> = shared.counts[w]
+                .iter()
+                .map(|v| v.load(Ordering::Relaxed) * 1000 / ops.max(1))
+                .collect();
+            kprintln!(
+                "kbench ctxpmu.cpu{w} cycles {} ev{:#x} {} ev{:#x} {} ev{:#x} {} ev{:#x} {} (per 1000 handoffs)",
+                c[0], set[0], c[1], set[1], c[2], set[2], c[3], set[3], c[4]
+            );
+        }
+    }
+    sched::set_idle_mode(0);
+}
+#[cfg(not(target_arch = "aarch64"))]
+fn suite_ctxpmu(_: &Sleepable) {
+    kprintln!("bench: ctxpmu is aarch64 only");
 }
 
 /// Strict alternation between two workers on `a` and `b`.

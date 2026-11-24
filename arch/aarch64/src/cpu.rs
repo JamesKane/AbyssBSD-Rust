@@ -433,6 +433,51 @@ pub fn set_current_thread(t: *const ()) {
     }
 }
 
+/// Starts the performance monitors on this CPU: the cycle counter and
+/// event counters 0..4 counting `events` (architectural event numbers),
+/// all from zero. For investigations (`bench`).
+pub fn pmu_start(events: [u16; 4]) {
+    // SAFETY: only programs this CPU's performance monitor registers.
+    unsafe {
+        // PMCR_EL0: E (enable), P (reset event counters), C (reset cycles).
+        asm!("msr pmcr_el0, {}", in(reg) 0b111u64, options(nomem, nostack));
+        for (n, ev) in events.into_iter().enumerate() {
+            asm!(
+                "msr pmselr_el0, {n}",
+                "isb",
+                "msr pmxevtyper_el0, {ev}",
+                n = in(reg) n as u64,
+                ev = in(reg) u64::from(ev),
+                options(nomem, nostack),
+            );
+        }
+        asm!("msr pmcntenset_el0, {}", in(reg) (1u64 << 31) | 0xf, options(nomem, nostack));
+        asm!("isb", options(nomem, nostack));
+    }
+}
+
+/// Reads the counters [`pmu_start`] set up: the cycle count, then the four
+/// events' counts.
+#[must_use]
+pub fn pmu_read() -> [u64; 5] {
+    let mut out = [0u64; 5];
+    // SAFETY: only reads this CPU's performance monitor registers.
+    unsafe {
+        asm!("isb", "mrs {}, pmccntr_el0", out(reg) out[0], options(nomem, nostack));
+        for n in 0..4u64 {
+            asm!(
+                "msr pmselr_el0, {n}",
+                "isb",
+                "mrs {v}, pmxevcntr_el0",
+                n = in(reg) n,
+                v = out(reg) out[n as usize + 1],
+                options(nomem, nostack),
+            );
+        }
+    }
+    out
+}
+
 /// Waits for an interrupt with interrupts masked; WFI wakes on a pending
 /// interrupt even when it is masked.
 pub fn wait_for_interrupt() {
