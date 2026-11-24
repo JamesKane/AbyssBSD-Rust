@@ -140,7 +140,7 @@ impl Platform for Machine {
     }
 }
 
-/// `usbdp_phyN`.
+/// `sky1_udphyN`.
 pub struct UsbDpPhyDevice {
     unit: u32,
     shared: Shared,
@@ -155,11 +155,11 @@ impl core::fmt::Debug for UsbDpPhyDevice {
 }
 
 impl Driver for UsbDpPhyDevice {
-    const NAME: &'static str = "usbdp_phy";
+    const NAME: &'static str = "sky1_udphy";
     const IDS: Ids = Ids::Acpi(&[AcpiId::new(HID)]);
 
     fn describe(_: &Ident) -> String {
-        "CIX Sky1 USB-C/DisplayPort combo PHY".into()
+        "USB-C/DisplayPort combo PHY (CIX Sky1)".into()
     }
 
     fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
