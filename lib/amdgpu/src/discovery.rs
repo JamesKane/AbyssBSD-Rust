@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Copyright Advanced Micro Devices, Inc.
+// Copyright 2018 Advanced Micro Devices, Inc.
+// Copyright 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2018  Advanced Micro Devices, Inc.
 // Copyright (c) 2026 The AbyssBSD Project
 //! The IP discovery table (specification 01, section 4): the binary header
 //! and its table list, the IP table with its dies and blocks (hardware ID,

@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MIT
-// Copyright Advanced Micro Devices, Inc.
+// Copyright (C) 2022  Advanced Micro Devices, Inc.
+// Copyright 2012-2021 Advanced Micro Devices, Inc.
+// Copyright 2012-15 Advanced Micro Devices, Inc.
+// Copyright 2019 Advanced Micro Devices, Inc.
+// Copyright 2019-2026 Advanced Micro Devices, Inc.
 // Copyright (c) 2026 The AbyssBSD Project
 //! Reading the display state the firmware left (specification 08, section
 //! 2.6): plain reads of registers in the direct window, none with side

@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: MIT
-// Copyright Advanced Micro Devices, Inc.
+// Copyright 2018 Advanced Micro Devices, Inc.
+// Copyright 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2018  Advanced Micro Devices, Inc.
+// Copyright 2008 Advanced Micro Devices, Inc.
+// Copyright 2008 Red Hat Inc.
+// Copyright 2009 Jerome Glisse.
+// Copyright 2025 Advanced Micro Devices, Inc.
+// Copyright (C) 2020  Advanced Micro Devices, Inc.
+// Copyright (C) 2022  Advanced Micro Devices, Inc.
 // Copyright (c) 2026 The AbyssBSD Project
 //! The AMD side of `drmn` (the graphics device node of FreeBSD's `drm-kmod`:
 //! see the crate's module comment): what an AMD GPU's registers say at attach (plain
@@ -187,6 +195,33 @@ impl Amd {
         }
     }
 
+    /// Reads a few words of VRAM through the aperture (BAR0), to learn
+    /// whether it shows the same bytes as the firmware's framebuffer: the
+    /// first words (where the firmware's picture starts), words just past
+    /// the first 8 MiB, and the table's last 64 KiB.
+    pub(crate) fn vram_probe(&self) -> Result<(), abi::errno::Errno> {
+        use abi::errno::Errno;
+        let gpu = self.gpu()?;
+        let Some(len) = gpu.vram_len() else {
+            self.log(format_args!("VRAM aperture (BAR0) is not mapped"));
+            return Err(Errno::ENXIO);
+        };
+        self.log(format_args!("VRAM aperture (BAR0): {len:#x} bytes"));
+        for (what, at) in [
+            ("first words", 0usize),
+            ("a line in", 4 * 1920 * 4),
+            ("just past 8 MiB", 8 << 20),
+            ("the middle of the aperture", len / 2),
+        ] {
+            let mut words = [0u32; 8];
+            for (i, w) in words.iter_mut().enumerate() {
+                *w = gpu.vram_read32(at + 4 * i).unwrap_or(u32::MAX);
+            }
+            self.log(format_args!("  {what} (offset {at:#x}): {words:08x?}"));
+        }
+        Ok(())
+    }
+
     /// A one-line summary of the cached table, for a sysctl.
     pub(crate) fn summary(&self) -> String {
         match &*self.table.lock() {
@@ -229,6 +264,14 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         "discover",
         "Write 1 to read the IP discovery table and log it",
         move || r.discover(),
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "vram",
+        "Write 1 to read a few words of VRAM through BAR0 and log them (read-only)",
+        move || r.vram_probe(),
     );
     let r = Arc::clone(a);
     crate::control::trigger(
