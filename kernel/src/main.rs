@@ -237,14 +237,19 @@ fn kmain(boot_info: PhysAddr) -> ! {
         if let Some(suite) = boot::value("abyss.bench") {
             let ran = bench::run(&s, suite);
             qemu::exit(ran);
-            // A board that cannot be powered on again from afar resets
-            // instead (`abyss.bench.reboot`): its default boot follows.
-            if boot::flag("abyss.bench.reboot") {
-                fs::shutdown(&s);
-                devices::shutdown(&s);
-                power::reset()
+            // A board with no serial console reads the results from the
+            // kernel log over the network: `abyss.bench.boot` carries on
+            // to multi-user after the suite, which ran before init.
+            if !boot::flag("abyss.bench.boot") {
+                // A board that cannot be powered on again from afar resets
+                // instead (`abyss.bench.reboot`): its default boot follows.
+                if boot::flag("abyss.bench.reboot") {
+                    fs::shutdown(&s);
+                    devices::shutdown(&s);
+                    power::reset()
+                }
+                power_off(&s)
             }
-            power_off(&s)
         }
         if boot::flag("abyss.halt") {
             kprintln!("Phase 1 kernel: nothing more to do yet. Halted (abyss.halt).");

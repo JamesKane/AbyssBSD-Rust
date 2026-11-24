@@ -98,20 +98,38 @@ for run in $(seq 0 $((RUNS - 1))); do
 				fb 'df /mnt | grep -q kyuawork || { fsck_ffs -p /dev/gpt/kyuawork; mount /dev/gpt/kyuawork /mnt; }'
 				T=3600 fb "sh /mnt/perf/kbench-run.sh $cpus" | tr -d '\r' >> "$out.tmp"
 			else
-				set_cmdline " abyss.bench=p2 abyss.bench.reboot abyss.bench.cpus=$cpus" ||
-				    { log "could not set AbyssBSD's command line"; exit 1; }
-				serial="$out.serial-$name"
-				stty -F "$TTY" 115200 raw -echo
-				cat "$TTY" > "$serial" &
-				cat_pid=$!
-				fb 'nextboot -k kernel.nodebug && efibootmgr -n -b 0007 > /dev/null && shutdown -r now' > /dev/null
-				# Up to an hour for the boot and the suite.
-				for i in $(seq 720); do
-					grep -aq '^kbench end p2' "$serial" && break
-					sleep 5
-				done
-				kill $cat_pid
-				tr -d '\r' < "$serial" | grep -a '^kbench ' | sed -n '/^kbench begin p2/,/^kbench end p2/p' >> "$out.tmp"
+				if [ -c "$TTY" ]; then
+					set_cmdline " abyss.bench=p2 abyss.bench.reboot abyss.bench.cpus=$cpus" ||
+					    { log "could not set AbyssBSD's command line"; exit 1; }
+					serial="$out.serial-$name"
+					stty -F "$TTY" 115200 raw -echo
+					cat "$TTY" > "$serial" &
+					cat_pid=$!
+					fb 'nextboot -k kernel.nodebug && efibootmgr -n -b 0007 > /dev/null && shutdown -r now' > /dev/null
+					# Up to an hour for the boot and the suite.
+					for i in $(seq 720); do
+						grep -aq '^kbench end p2' "$serial" && break
+						sleep 5
+					done
+					kill $cat_pid
+					tr -d '\r' < "$serial" | grep -a '^kbench ' | sed -n '/^kbench begin p2/,/^kbench end p2/p' >> "$out.tmp"
+				else
+					# No serial: the suite runs, the boot carries on to
+					# multi-user, and the kernel log is read over ssh.
+					set_cmdline " abyss.bench=p2 abyss.bench.boot abyss.bench.cpus=$cpus" ||
+					    { log "could not set AbyssBSD's command line"; exit 1; }
+					serial="$out.log-$name"
+					fb 'nextboot -k kernel.nodebug && efibootmgr -n -b 0007 > /dev/null && shutdown -r now' > /dev/null
+					for i in $(seq 720); do
+						sleep 5
+						[ "$(T=15 ab 'sysctl -n kern.ident')" = ABYSSBSD ] || continue
+						T=30 ab 'dmesg' | tr -d '\r' > "$serial"
+						grep -aq '^kbench end p2' "$serial" && break
+					done
+					grep -a '^kbench ' "$serial" | sed -n '/^kbench begin p2/,/^kbench end p2/p' >> "$out.tmp"
+					# Back to FreeBSD, the default boot.
+					ab 'shutdown -r now' > /dev/null
+				fi
 				# The reset follows the suite: wait for FreeBSD before the next.
 				sleep 60
 			fi

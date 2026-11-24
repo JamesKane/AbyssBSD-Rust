@@ -47,7 +47,9 @@ FreeBSD, so two on one CPU would measure that (`t8` on a class of four). On arm6
 counts with the generic timer (`CNTVCT_EL0` at `CNTFRQ_EL0`) where amd64 uses the TSC, and runs
 `p2` only (`p3` and `diag` are bhyve's). AbyssBSD's `abyss.bench.reboot` resets the machine after
 the suite instead of powering it off, and before a suite the kernel raises every CPU to its
-highest frequency.
+highest frequency. With no serial console, `abyss.bench.boot` carries on to multi-user after the suite
+(which ran before init), and the results are read from the kernel log over the network
+(`tests/perf/board/p2-board.sh` does this when `ABYSS_TTY` is not a device).
 
 ## Common rules
 

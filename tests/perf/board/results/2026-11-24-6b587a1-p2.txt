@@ -1,0 +1,191 @@
+perf on the Orange Pi 6 Plus: AbyssBSD 6b587a1 vs FreeBSD 16.0-CURRENT f12c9f4ee6 GENERIC-HMP-IOMMU-NODEBUG
+3 FreeBSD runs, 3 AbyssBSD runs; the same 15.1 userland (AbyssBSD's root) on both
+
+
+core class big, AbyssBSD 6b587a1 vs FreeBSD 16.0-CURRENT f12c9f4ee6 GENERIC-HMP-IOMMU-NODEBUG, 3/3 runs
+ratio = median(AbyssBSD) / median(FreeBSD); pass <= 1.02; noisy = FreeBSD CV > 1%
+
+benchmark                     FreeBSD       AbyssBSD   ratio  95% CI              CV  verdict
+callout.armcancel          55.6 ns/op     63.0 ns/op   1.133  [1.133, 1.150]   0.0%  Slower
+callout.latency.p50         1280.0 ns       390.0 ns   0.305  [0.277, 0.390]  17.0%  Noisy
+callout.latency.p99         1910.0 ns       720.0 ns   0.377  [0.371, 0.381]   1.3%  Noisy
+ctxsw.cross               966.3 ns/op   1061.8 ns/op   1.099  [1.054, 1.130]   1.7%  Noisy
+ctxsw.same                290.4 ns/op    261.5 ns/op   0.901  [0.900, 0.901]   0.0%  Win
+ipi.rtt                   761.4 ns/op    572.1 ns/op   0.751  [0.749, 0.753]   0.1%  Win
+malloc.hit.t1              41.0 ns/op     41.2 ns/op   1.005  [1.003, 1.005]   0.1%  Pass
+malloc.miss.t1             41.5 ns/op     42.0 ns/op   1.012  [1.010, 1.013]   0.1%  Pass
+mtx.t1                     23.5 ns/op     16.1 ns/op   0.682  [0.682, 0.682]   0.0%  Win
+mtx.t2                     56.3 ns/op     17.7 ns/op   0.315  [0.294, 0.323]   3.7%  Noisy
+mtx.t4                     54.0 ns/op     22.5 ns/op   0.416  [0.362, 0.491]  13.4%  Noisy
+page.hit.t1                49.1 ns/op     36.8 ns/op   0.749  [0.738, 0.756]   1.1%  Noisy
+page.miss.t1              109.3 ns/op     66.4 ns/op   0.607  [0.482, 1.280]  43.8%  Noisy
+rw.rd.t1                   24.3 ns/op     16.2 ns/op   0.664  [0.664, 0.665]   0.0%  Win
+rw.rd.t2                   56.3 ns/op     25.5 ns/op   0.453  [0.428, 0.458]   2.4%  Noisy
+rw.rd.t4                   71.1 ns/op     26.8 ns/op   0.377  [0.373, 0.391]   2.0%  Noisy
+rw.wr.t1                   23.6 ns/op     16.5 ns/op   0.698  [0.698, 0.698]   0.0%  Win
+rw.wr.t2                   52.8 ns/op     19.6 ns/op   0.371  [0.344, 0.550]  21.0%  Noisy
+rw.wr.t4                   47.2 ns/op     23.3 ns/op   0.492  [0.424, 0.603]  16.8%  Noisy
+sx.rd.t1                   24.4 ns/op     16.2 ns/op   0.663  [0.662, 0.663]   0.0%  Win
+sx.rd.t2                   56.3 ns/op     25.4 ns/op   0.452  [0.430, 0.465]   2.8%  Noisy
+sx.rd.t4                   70.0 ns/op     26.7 ns/op   0.382  [0.372, 0.394]   2.4%  Noisy
+sx.wr.t1                   23.7 ns/op     16.5 ns/op   0.698  [0.698, 0.699]   0.0%  Win
+sx.wr.t2                   56.1 ns/op     21.1 ns/op   0.376  [0.340, 0.574]  23.2%  Noisy
+sx.wr.t4                   47.0 ns/op     21.4 ns/op   0.456  [0.390, 0.552]  16.9%  Noisy
+tlb.shootdown             321.8 ns/op    320.5 ns/op   0.996  [0.995, 0.997]   0.0%  Win
+wakeup.latency.p50          1510.0 ns      1360.0 ns   0.901  [0.854, 0.913]   0.8%  Win
+wakeup.latency.p99          3070.0 ns      1490.0 ns   0.485  [0.457, 0.926]  33.0%  Noisy
+
+geometric mean ratio 0.588; 2 pass, 9 win, 1 slower, 16 noisy, 0 missing
+
+components (gate: geometric mean <= 1.02):
+callout                  3 benchmarks   0.507  pass
+ctxsw                    2 benchmarks   0.995  pass
+ipi                      1 benchmarks   0.751  pass
+malloc                   2 benchmarks   1.008  pass
+mtx                      3 benchmarks   0.447  pass
+page                     2 benchmarks   0.674  pass
+rw                       6 benchmarks   0.494  pass
+sx                       6 benchmarks   0.489  pass
+tlb                      1 benchmarks   0.996  pass
+wakeup                   2 benchmarks   0.661  pass
+
+core class mid, AbyssBSD 6b587a1 vs FreeBSD 16.0-CURRENT f12c9f4ee6 GENERIC-HMP-IOMMU-NODEBUG, 3/3 runs
+ratio = median(AbyssBSD) / median(FreeBSD); pass <= 1.02; noisy = FreeBSD CV > 1%
+
+benchmark                     FreeBSD       AbyssBSD   ratio  95% CI              CV  verdict
+callout.armcancel          63.1 ns/op     69.4 ns/op   1.100  [1.099, 1.100]   0.0%  Slower
+callout.latency.p50         6100.0 ns       420.0 ns   0.069  [0.067, 0.069]   0.3%  Win
+callout.latency.p99         6740.0 ns       580.0 ns   0.086  [0.086, 0.100]   0.3%  Win
+ctxsw.cross               978.1 ns/op   1092.1 ns/op   1.117  [1.028, 1.145]   3.8%  Noisy
+ctxsw.same                329.2 ns/op    291.8 ns/op   0.886  [0.886, 0.887]   0.0%  Win
+ipi.rtt                   748.0 ns/op    586.0 ns/op   0.783  [0.779, 0.785]   0.4%  Win
+malloc.hit.t1              46.8 ns/op     46.6 ns/op   0.995  [0.995, 0.998]   0.1%  Win
+malloc.miss.t1             47.3 ns/op     47.6 ns/op   1.007  [1.007, 1.013]   0.0%  Pass
+mtx.t1                     26.7 ns/op     18.2 ns/op   0.681  [0.681, 0.681]   0.0%  Win
+mtx.t2                     38.4 ns/op     21.8 ns/op   0.568  [0.476, 0.643]  13.6%  Noisy
+mtx.t4                     34.0 ns/op     26.3 ns/op   0.772  [0.760, 0.799]   0.9%  Win
+page.hit.t1                57.0 ns/op     41.7 ns/op   0.731  [0.718, 0.749]   1.3%  Noisy
+page.miss.t1               61.1 ns/op     74.6 ns/op   1.221  [0.290, 1.226]  89.1%  Noisy
+rw.rd.t1                   27.6 ns/op     18.3 ns/op   0.662  [0.661, 0.663]   0.0%  Win
+rw.rd.t2                   72.7 ns/op     28.9 ns/op   0.397  [0.377, 0.454]   9.1%  Noisy
+rw.rd.t4                   88.1 ns/op     29.8 ns/op   0.338  [0.318, 0.368]   6.9%  Noisy
+rw.wr.t1                   26.7 ns/op     18.6 ns/op   0.697  [0.696, 0.697]   0.0%  Win
+rw.wr.t2                   49.7 ns/op     23.7 ns/op   0.478  [0.438, 0.545]  10.0%  Noisy
+rw.wr.t4                   34.4 ns/op     27.1 ns/op   0.786  [0.759, 0.789]   0.2%  Win
+sx.rd.t1                   27.6 ns/op     18.2 ns/op   0.660  [0.659, 0.660]   0.0%  Win
+sx.rd.t2                   76.7 ns/op     28.7 ns/op   0.374  [0.365, 0.415]   6.6%  Noisy
+sx.rd.t4                   82.2 ns/op     29.6 ns/op   0.360  [0.324, 0.371]   6.5%  Noisy
+sx.wr.t1                   26.8 ns/op     18.7 ns/op   0.697  [0.697, 0.697]   0.0%  Win
+sx.wr.t2                   52.5 ns/op     22.1 ns/op   0.421  [0.407, 0.515]  11.7%  Noisy
+sx.wr.t4                   34.5 ns/op     26.8 ns/op   0.777  [0.767, 0.801]   0.1%  Win
+tlb.shootdown             319.2 ns/op    316.4 ns/op   0.991  [0.991, 0.991]   0.0%  Win
+wakeup.latency.p50          1580.0 ns      1390.0 ns   0.880  [0.856, 0.897]   1.3%  Noisy
+wakeup.latency.p99          1640.0 ns      1540.0 ns   0.939  [0.915, 0.957]   0.9%  Win
+
+geometric mean ratio 0.597; 1 pass, 15 win, 1 slower, 11 noisy, 0 missing
+
+components (gate: geometric mean <= 1.02):
+callout                  3 benchmarks   0.187  pass
+ctxsw                    2 benchmarks   0.995  pass
+ipi                      1 benchmarks   0.783  pass
+malloc                   2 benchmarks   1.001  pass
+mtx                      3 benchmarks   0.669  pass
+page                     2 benchmarks   0.945  pass
+rw                       6 benchmarks   0.534  pass
+sx                       6 benchmarks   0.522  pass
+tlb                      1 benchmarks   0.991  pass
+wakeup                   2 benchmarks   0.909  pass
+
+core class little, AbyssBSD 6b587a1 vs FreeBSD 16.0-CURRENT f12c9f4ee6 GENERIC-HMP-IOMMU-NODEBUG, 3/3 runs
+ratio = median(AbyssBSD) / median(FreeBSD); pass <= 1.02; noisy = FreeBSD CV > 1%
+
+benchmark                     FreeBSD       AbyssBSD   ratio  95% CI              CV  verdict
+callout.armcancel         278.5 ns/op    187.3 ns/op   0.673  [0.670, 0.673]   0.2%  Win
+callout.latency.p50         6950.0 ns       890.0 ns   0.128  [0.121, 0.129]   0.7%  Win
+callout.latency.p99         7810.0 ns      1830.0 ns   0.234  [0.219, 0.243]   3.6%  Noisy
+ctxsw.cross              2939.4 ns/op   2221.8 ns/op   0.756  [0.750, 0.764]   0.2%  Win
+ctxsw.same               1192.0 ns/op    844.9 ns/op   0.709  [0.698, 0.714]   0.7%  Win
+ipi.rtt                  1145.9 ns/op    701.7 ns/op   0.612  [0.612, 0.625]   0.0%  Win
+malloc.hit.t1             180.6 ns/op    162.3 ns/op   0.899  [0.896, 0.901]   0.3%  Win
+malloc.miss.t1            202.5 ns/op    171.7 ns/op   0.848  [0.836, 0.856]   0.6%  Win
+mtx.t1                     28.0 ns/op     23.3 ns/op   0.833  [0.833, 0.833]   0.0%  Win
+mtx.t2                     33.0 ns/op     32.9 ns/op   0.996  [0.946, 1.105]   7.5%  Noisy
+mtx.t4                     30.3 ns/op     36.1 ns/op   1.190  [1.008, 1.203]   0.7%  Slower
+page.hit.t1               174.4 ns/op    142.8 ns/op   0.819  [0.818, 0.824]   0.4%  Win
+page.miss.t1              270.4 ns/op    258.1 ns/op   0.954  [0.931, 0.984]   2.0%  Noisy
+rw.rd.t1                   35.3 ns/op     14.4 ns/op   0.409  [0.409, 0.409]   0.0%  Win
+rw.rd.t2                   70.2 ns/op     22.1 ns/op   0.315  [0.302, 0.341]   5.9%  Noisy
+rw.rd.t4                   78.2 ns/op     23.0 ns/op   0.294  [0.289, 0.305]   2.7%  Noisy
+rw.wr.t1                   28.0 ns/op     22.2 ns/op   0.794  [0.794, 0.794]   0.0%  Win
+rw.wr.t2                   31.6 ns/op     33.6 ns/op   1.065  [0.963, 1.082]   1.1%  Noisy
+rw.wr.t4                   30.3 ns/op     31.2 ns/op   1.028  [1.022, 1.136]   0.2%  Slower
+sx.rd.t1                   36.8 ns/op     14.4 ns/op   0.393  [0.392, 0.393]   0.1%  Win
+sx.rd.t2                   67.4 ns/op     22.9 ns/op   0.339  [0.300, 0.355]   8.5%  Noisy
+sx.rd.t4                   78.5 ns/op     23.5 ns/op   0.300  [0.295, 0.306]   1.7%  Noisy
+sx.wr.t1                   28.6 ns/op     22.8 ns/op   0.798  [0.797, 0.798]   0.0%  Win
+sx.wr.t2                   32.0 ns/op     27.2 ns/op   0.850  [0.815, 0.921]   1.6%  Noisy
+sx.wr.t4                   30.9 ns/op     26.5 ns/op   0.857  [0.836, 0.868]   0.4%  Win
+tlb.shootdown             328.5 ns/op    323.2 ns/op   0.984  [0.984, 0.984]   0.0%  Win
+wakeup.latency.p50          3140.0 ns      2720.0 ns   0.866  [0.829, 0.885]   1.4%  Noisy
+wakeup.latency.p99          3720.0 ns      3060.0 ns   0.823  [0.804, 0.861]   1.9%  Noisy
+
+geometric mean ratio 0.627; 0 pass, 15 win, 2 slower, 11 noisy, 0 missing
+
+components (gate: geometric mean <= 1.02):
+callout                  3 benchmarks   0.272  pass
+ctxsw                    2 benchmarks   0.732  pass
+ipi                      1 benchmarks   0.612  pass
+malloc                   2 benchmarks   0.873  pass
+mtx                      3 benchmarks   0.996  pass
+page                     2 benchmarks   0.884  pass
+rw                       6 benchmarks   0.566  pass
+sx                       6 benchmarks   0.534  pass
+tlb                      1 benchmarks   0.984  pass
+wakeup                   2 benchmarks   0.844  pass
+
+core class all, AbyssBSD 6b587a1 vs FreeBSD 16.0-CURRENT f12c9f4ee6 GENERIC-HMP-IOMMU-NODEBUG, 3/3 runs
+ratio = median(AbyssBSD) / median(FreeBSD); pass <= 1.02; noisy = FreeBSD CV > 1%
+
+benchmark                     FreeBSD       AbyssBSD   ratio  95% CI              CV  verdict
+callout.armcancel          55.9 ns/op     63.0 ns/op   1.127  [1.126, 1.162]   0.0%  Slower
+callout.latency.p50         5900.0 ns       380.0 ns   0.064  [0.064, 0.068]   3.0%  Noisy
+callout.latency.p99         6890.0 ns       700.0 ns   0.102  [0.096, 0.110]   2.8%  Noisy
+ctxsw.cross              2500.9 ns/op   2207.8 ns/op   0.883  [0.739, 0.909]   2.9%  Noisy
+ctxsw.same                291.2 ns/op    260.9 ns/op   0.896  [0.892, 0.896]   0.2%  Win
+ipi.rtt                   808.7 ns/op    571.4 ns/op   0.707  [0.706, 0.769]   0.1%  Win
+malloc.hit.t1              41.1 ns/op     41.2 ns/op   1.002  [1.000, 1.011]   0.1%  Pass
+malloc.miss.t1             41.6 ns/op     42.0 ns/op   1.011  [1.010, 1.011]   0.1%  Pass
+mtx.t1                     23.6 ns/op     16.1 ns/op   0.680  [0.680, 0.680]   0.0%  Win
+mtx.t2                     34.1 ns/op     22.5 ns/op   0.658  [0.550, 0.668]   8.5%  Noisy
+mtx.t4                     30.4 ns/op     30.5 ns/op   1.002  [0.827, 1.123]   2.4%  Noisy
+page.hit.t1                49.0 ns/op     36.8 ns/op   0.752  [0.748, 0.755]   0.4%  Win
+page.miss.t1               53.0 ns/op     66.1 ns/op   1.249  [1.241, 1.257]   0.1%  Slower
+rw.rd.t1                   24.4 ns/op     16.1 ns/op   0.661  [0.661, 0.662]   0.0%  Win
+rw.rd.t2                   66.5 ns/op     24.7 ns/op   0.370  [0.366, 0.389]   1.2%  Noisy
+rw.rd.t4                   83.0 ns/op     24.3 ns/op   0.293  [0.283, 0.298]   1.2%  Noisy
+rw.wr.t1                   23.6 ns/op     16.5 ns/op   0.697  [0.697, 0.697]   0.0%  Win
+rw.wr.t2                   33.7 ns/op     21.7 ns/op   0.645  [0.598, 0.711]   6.4%  Noisy
+rw.wr.t4                   31.2 ns/op     26.7 ns/op   0.855  [0.790, 0.861]   0.8%  Win
+sx.rd.t1                   24.4 ns/op     16.1 ns/op   0.661  [0.660, 0.662]   0.0%  Win
+sx.rd.t2                   64.8 ns/op     25.0 ns/op   0.385  [0.368, 0.389]   1.8%  Noisy
+sx.rd.t4                   83.9 ns/op     24.2 ns/op   0.289  [0.284, 0.294]   0.9%  Win
+sx.wr.t1                   23.7 ns/op     16.5 ns/op   0.697  [0.696, 0.697]   0.0%  Win
+sx.wr.t2                   34.1 ns/op     20.7 ns/op   0.607  [0.594, 0.678]   5.1%  Noisy
+sx.wr.t4                   31.7 ns/op     22.0 ns/op   0.692  [0.678, 0.847]   1.3%  Noisy
+tlb.shootdown             309.8 ns/op    307.0 ns/op   0.991  [0.991, 0.991]   0.0%  Win
+wakeup.latency.p50          2170.0 ns      2070.0 ns   0.954  [0.906, 0.958]   1.7%  Noisy
+wakeup.latency.p99          2630.0 ns      2200.0 ns   0.837  [0.811, 0.867]   1.8%  Noisy
+
+geometric mean ratio 0.606; 2 pass, 11 win, 2 slower, 13 noisy, 0 missing
+
+components (gate: geometric mean <= 1.02):
+callout                  3 benchmarks   0.195  pass
+ctxsw                    2 benchmarks   0.889  pass
+ipi                      1 benchmarks   0.707  pass
+malloc                   2 benchmarks   1.006  pass
+mtx                      3 benchmarks   0.765  pass
+page                     2 benchmarks   0.969  pass
+rw                       6 benchmarks   0.550  pass
+sx                       6 benchmarks   0.527  pass
+tlb                      1 benchmarks   0.991  pass
+wakeup                   2 benchmarks   0.893  pass
