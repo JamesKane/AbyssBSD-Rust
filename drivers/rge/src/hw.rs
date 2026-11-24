@@ -65,7 +65,7 @@ impl MacType {
     /// Whether the driver can program it yet.
     #[must_use]
     pub const fn supported(self) -> bool {
-        matches!(self, Self::R26_1 | Self::R26_2 | Self::R25D1)
+        matches!(self, Self::R26_1 | Self::R26_2 | Self::R25D1 | Self::R25D2)
     }
 
     /// An RTL8126 (5 GbE).
@@ -497,6 +497,10 @@ impl<R: Regs> Chip<R> {
     /// pages, then its breakpoints (`rge_mac_config_mcu`, `MAC_R25D_1`).
     /// FreeBSD leaves page 2 selected, and so does this.
     fn mac_config_mcu(&mut self) {
+        if self.mac == MacType::R25D2 {
+            self.mac_config_mcu_d2();
+            return;
+        }
         // Page 0 holds the patch; the others are cleared.
         const PATCH: [u16; 9] = [
             0xe002, 0xe006, 0x4166, 0x9cf6, 0xc002, 0xb800, 0x14a4, 0xc102, 0xb900,
@@ -517,6 +521,28 @@ impl<R: Regs> Chip<R> {
         }
         self.write_mac_ocp(0xfc26, 0x8000);
         self.write_mac_ocp(0xfc28, 0x14a2);
+        self.write_mac_ocp(0xfc48, 0x0001);
+    }
+
+    /// The RTL8125D's second revision: its breakpoint table on page 0, the
+    /// other pages cleared, and its own version words on page 2.
+    fn mac_config_mcu_d2(&mut self) {
+        const VERSION: [u16; 4] = [0x6938, 0x0a19, 0x030e, 0x0b2f];
+        let bps = generated::R25D_2_MAC_BPS;
+        for page in 0..3 {
+            self.switch_mcu_ram_page(page);
+            for &(reg, v) in bps {
+                self.write_mac_ocp(reg, if page == 0 { v } else { 0 });
+            }
+            for reg in (0xf884..=0xf9f6).step_by(2) {
+                self.write_mac_ocp(reg, 0);
+            }
+            for (k, &v) in VERSION.iter().enumerate() {
+                self.write_mac_ocp(0xf9f8 + 2 * k as u16, if page == 2 { v } else { 0 });
+            }
+        }
+        self.write_mac_ocp(0xfc26, 0x8000);
+        self.write_mac_ocp(0xfc28, 0x2382);
         self.write_mac_ocp(0xfc48, 0x0001);
     }
 
@@ -622,6 +648,7 @@ impl<R: Regs> Chip<R> {
         let config = match self.mac {
             MacType::R26_1 => generated::R26_1_PHY_CONFIG,
             MacType::R25D1 => generated::R25D_1_PHY_CONFIG,
+            MacType::R25D2 => generated::R25D_2_PHY_CONFIG,
             _ => generated::R26_2_PHY_CONFIG,
         };
         program::run(config, &mut &*self);
@@ -674,6 +701,19 @@ impl<R: Regs> Chip<R> {
             MacType::R26_1 => {
                 // In two parts, the patch window reopened between them.
                 let (first, rest) = generated::R26_1_PHY_MCU.split_at(6989);
+                for &(r, v) in first {
+                    self.write_phy_ocp(r, v);
+                }
+                self.patch_phy_mcu(false);
+                self.patch_phy_mcu(true);
+                for &(r, v) in rest {
+                    self.write_phy_ocp(r, v);
+                }
+            }
+            MacType::R25D2 => {
+                // In two parts (1269 words, then the rest), the patch
+                // window reopened between them.
+                let (first, rest) = generated::R25D_2_PHY_MCU.split_at(1269);
                 for &(r, v) in first {
                     self.write_phy_ocp(r, v);
                 }
