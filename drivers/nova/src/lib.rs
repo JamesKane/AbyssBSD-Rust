@@ -19,7 +19,55 @@ use core::any::Any;
 
 use bus::{AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, StopCx, StopReason};
 use nvgpu::chip::{self, ChipError, Identity};
-use vgapci::Registers;
+use nvgpu::vbios::{self, Descriptor, WordSource};
+use vgapci::{Aperture, Registers};
+
+/// The Video BIOS window of the register aperture, read as the parser
+/// wants it.
+struct Prom<'a>(&'a Aperture);
+
+impl WordSource for Prom<'_> {
+    fn read32(&self, offset: usize) -> Option<u32> {
+        if offset >= vbios::WINDOW {
+            return None;
+        }
+        self.0.read32(vbios::WINDOW_BASE.checked_add(offset)?)
+    }
+}
+
+/// Says what the Video BIOS holds, or why it could not be read.
+fn report_vbios(aperture: &Aperture, log: &dyn Fn(core::fmt::Arguments<'_>)) {
+    match vbios::read(&Prom(aperture)) {
+        Ok(v) => {
+            for i in &v.images {
+                log(format_args!(
+                    "drmn0: video BIOS image at {:#x}, {:#x} bytes, code type {:#04x}",
+                    i.offset, i.size, i.code_type
+                ));
+            }
+            match v.descriptor {
+                Descriptor::V3(d) => log(format_args!(
+                    "drmn0: firmware security microcode, descriptor version 3 at {:#x}: \
+                     {:#x} bytes of instructions, {:#x} of data, engines {:#06x}, microcode {}, \
+                     {} signature(s), signature patch at data offset {:#x}",
+                    v.descriptor_offset,
+                    d.imem_load_size,
+                    d.dmem_load_size,
+                    d.engine_id_mask,
+                    d.ucode_id,
+                    d.signature_count,
+                    d.pkc_data_offset,
+                )),
+                Descriptor::V2(d) => log(format_args!(
+                    "drmn0: firmware security microcode, descriptor version 2 at {:#x}: \
+                     {:#x} bytes of instructions, {:#x} of data",
+                    v.descriptor_offset, d.imem_load_size, d.dmem_load_size,
+                )),
+            }
+        }
+        Err(e) => log(format_args!("drmn0: video BIOS not read: {e:?}")),
+    }
+}
 
 /// `drmnN`.
 #[derive(Debug)]
@@ -60,6 +108,7 @@ impl Driver for Nova {
                     identity.major,
                     identity.minor,
                 ));
+                report_vbios(&aperture, &log);
                 Ok(Self { identity })
             }
             Err(ChipError::Unsupported { id }) => {
