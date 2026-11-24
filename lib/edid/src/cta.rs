@@ -77,7 +77,7 @@ const VICS: &[Vic] = &[
 ];
 
 /// The mode of video identification code `code`, if this reads it.
-fn mode_of(code: u8) -> Option<Mode> {
+pub(crate) fn mode_of(code: u8) -> Option<Mode> {
     let t = VICS.iter().find(|t| t.code == code)?;
     let sync = if t.positive {
         DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC

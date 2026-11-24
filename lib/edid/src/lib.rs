@@ -159,6 +159,13 @@ pub fn parse(data: &[u8]) -> Result<Edid, Error> {
     })
 }
 
+/// The timing of CTA-861 video identification code `vic` (the progressive
+/// codes this crate knows), for a driver that sets a mode by its code.
+#[must_use]
+pub fn mode_for_vic(vic: u8) -> Option<Mode> {
+    cta::mode_of(vic)
+}
+
 /// A detailed timing descriptor (EDID 1.3 §3.10.2). `None` for one whose
 /// numbers cannot be a mode (zero or out of order).
 fn detailed(d: &[u8], clock_10khz: u32) -> Option<Mode> {

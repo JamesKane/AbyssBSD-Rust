@@ -72,6 +72,9 @@ pub(crate) struct Amd {
     psp: SpinLock<Option<crate::psp::Brought>>,
     /// Whether the audio side of HDMI is prepared (stage R3.4).
     hdmi_prepared: core::sync::atomic::AtomicBool,
+    /// The pixel clock now running, in kHz (the firmware's, until a mode
+    /// change that moves it).
+    clock_khz: core::sync::atomic::AtomicU32,
 }
 
 /// Where the GART's page table is in video memory (BAR0 offset): past the
@@ -115,6 +118,7 @@ impl Amd {
             dummy: SpinLock::new(None),
             psp: SpinLock::new(None),
             hdmi_prepared: core::sync::atomic::AtomicBool::new(false),
+            clock_khz: core::sync::atomic::AtomicU32::new(amdgpu::modeset::FIRMWARE_CLOCK_KHZ),
         }
     }
 
@@ -510,7 +514,7 @@ impl Amd {
         let frames = flip::frames_between(first, second);
         match flip::refresh_millihz(frames, micros) {
             Some(mhz) => self.log(format_args!(
-                "refresh: {frames} frames in {micros} us is {}.{:03} Hz (the mode says 60.000)",
+                "refresh: {frames} frames in {micros} us is {}.{:03} Hz",
                 mhz / 1000,
                 mhz % 1000
             )),
@@ -802,7 +806,78 @@ impl Amd {
         Ok(())
     }
 
-    /// Reads the DDC engine's and pins' registers, writing nothing (stage
+    /// Changes the mode to CTA video identification code `vic` on the running
+    /// pipe (stage R3.4, 08 section 3.7): the pixel clock stays, so only
+    /// modes at the firmware's clock and size. A plan is checked and logged
+    /// before anything is written; the picture goes while the generator is
+    /// stopped.
+    pub(crate) fn set_mode(&self, vic: i32) -> Result<(), abi::errno::Errno> {
+        use abi::errno::Errno;
+        use amdgpu::{flip, hdmi, modeset};
+        use core::sync::atomic::Ordering;
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        let pause = |us: u32| bus::manager().delay_us(u64::from(us));
+        let Some(mode) = u8::try_from(vic).ok().and_then(edid::mode_for_vic) else {
+            self.log(format_args!("mode: no timing for code {vic}"));
+            return Err(Errno::EINVAL);
+        };
+        if let Err(e) = modeset::preflight(&w) {
+            self.log(format_args!("mode: the pipe is not as expected: {e:?}"));
+            return Err(Errno::EINVAL);
+        }
+        let clock = self.clock_khz.load(Ordering::Acquire);
+        let plan = match modeset::plan(&w, &mode, clock) {
+            Ok(p) => p,
+            Err(e) => {
+                self.log(format_args!("mode: code {vic} not set: {e:?}"));
+                return Err(Errno::ENOTSUP);
+            }
+        };
+        self.log(format_args!(
+            "mode: code {vic}: {}x{} total {}x{} at {} kHz; the writes:",
+            mode.hdisplay, mode.vdisplay, mode.htotal, mode.vtotal, mode.clock_khz
+        ));
+        let mut any = false;
+        for (name, at, old, new) in plan.changes() {
+            any = true;
+            self.log(format_args!(
+                "  {name} @{at:#07x}: {old:#010x} -> {new:#010x}"
+            ));
+        }
+        if !any {
+            self.log(format_args!("mode: already running"));
+            return Ok(());
+        }
+        let wide = u32::from(mode.hdisplay) * 9 == u32::from(mode.vdisplay) * 16;
+        let before = flip::frame_count(&w);
+        if let Err(e) = modeset::stop(&w, &pause) {
+            self.log(format_args!("mode: stop: {e:?}"));
+            return Err(Errno::EIO);
+        }
+        self.log(format_args!("mode: generator stopped"));
+        modeset::apply(&w, &plan);
+        let started = modeset::start(&w, &pause);
+        self.irq.rearm_frame_start();
+        let clear = hdmi::write_packet(
+            &w,
+            0,
+            &hdmi::avi_for(u8::try_from(vic).unwrap_or(0), wide),
+            &pause,
+        );
+        if let Err(e) = started {
+            self.log(format_args!("mode: start: {e:?} (the plane stays blanked)"));
+            return Err(Errno::EIO);
+        }
+        self.log(format_args!(
+            "mode: generator running, AVI info frame for code {vic} written (no conflict: {clear}); frames {before} -> {}",
+            flip::frame_count(&w)
+        ));
+        let _ = self.refresh();
+        Ok(())
+    }
+
+    /// Reads the DDC engine's and pins' registers, writing nothing    /// Reads the DDC engine's and pins' registers, writing nothing (stage
     /// R3.4: the EDID over the HDMI connector's DDC line).
     pub(crate) fn ddc_probe(&self) -> Result<(), abi::errno::Errno> {
         use amdgpu::ddc;
@@ -1017,6 +1092,14 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             .map(|_| ())
             .map_err(|_| abi::errno::Errno::EAGAIN)
         },
+    );
+    let r = Arc::clone(a);
+    crate::control::trigger_with(
+        t,
+        node,
+        "mode",
+        "Write a CTA video identification code (16 = 1080p60, 31 = 1080p50) to change the mode at the firmware's pixel clock; the picture goes while the generator restarts",
+        move |vic| r.set_mode(vic),
     );
     for (name, help, f) in [
         (

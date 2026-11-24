@@ -35,6 +35,7 @@ pub mod hdmi;
 pub mod ih;
 pub mod memory;
 mod memory_regs;
+pub mod modeset;
 pub mod psp;
 pub mod regs;
 pub mod timing;

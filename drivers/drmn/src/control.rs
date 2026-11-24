@@ -304,6 +304,25 @@ pub(crate) fn trigger(
     );
 }
 
+/// A sysctl that runs `action` with the number written (and shows 0).
+pub(crate) fn trigger_with(
+    t: &mut sysctl::Tree,
+    node: sysctl::NodeId,
+    name: &str,
+    description: &str,
+    action: impl Fn(i32) -> Result<(), abi::errno::Errno> + Send + Sync + 'static,
+) {
+    let _ = t.add_writable(
+        node,
+        sysctl::Number::Auto,
+        name,
+        description,
+        0,
+        sysctl::Value::Int(Box::new(|| 0)),
+        sysctl::int_writer(action),
+    );
+}
+
 /// The sysctls for `c`, under `node`.
 pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, c: &Arc<Control>) {
     let r = Arc::clone(c);

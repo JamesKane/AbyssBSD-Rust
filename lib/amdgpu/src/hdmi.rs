@@ -299,6 +299,34 @@ pub fn video_mode<W: Window + ?Sized>(w: &W, pause_us: &dyn Fn(u32)) {
 /// the header dword and the eight body dwords.
 pub const AVI_1080P60: [u32; 9] = [0x000d_0282, 0x0028_1027, 0x0000_0010, 0, 0, 0, 0, 0, 0];
 
+/// The AVI info frame for video identification code `vic`, RGB, with the
+/// aspect (08 section 4.5 and 3.7.6): header `0x000d0282`; PB1 `0x10`, PB2
+/// the aspect (`0x28` for 16:9, `0x18` for 4:3), PB3 0, PB4 the code; PB0 the
+/// checksum that makes the header and body sum to 0 modulo 256.
+#[must_use]
+pub fn avi_for(vic: u8, wide: bool) -> [u32; 9] {
+    let (pb1, pb2, pb3, pb4) = (0x10u8, if wide { 0x28u8 } else { 0x18 }, 0u8, vic);
+    let sum = 0x82u8
+        .wrapping_add(0x02)
+        .wrapping_add(0x0d)
+        .wrapping_add(pb1)
+        .wrapping_add(pb2)
+        .wrapping_add(pb3)
+        .wrapping_add(pb4);
+    let pb0 = 0u8.wrapping_sub(sum);
+    [
+        0x000d_0282,
+        u32::from_le_bytes([pb0, pb1, pb2, pb3]),
+        u32::from(pb4),
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ]
+}
+
 /// Writes the packet at index `n` (the dwords at `n * 9`), as the reference
 /// does: wait for no conflict, clear it, set the index, write, ask for an
 /// immediate update. Returns whether the conflict flag cleared in time.
@@ -599,6 +627,30 @@ mod tests {
         write_packet(&m, 1, &[7; 9], &|_| {});
         assert_eq!(m.wrote(VPG_ACCESS), [0, 9]);
         assert_eq!(m.packets.borrow()[9], 7);
+    }
+
+    #[test]
+    fn the_avi_frames_for_the_modes_are_the_specifications() {
+        // (code, 16:9, checksum, body dword 0, body dword 1)
+        for (vic, wide, sum, d0, d1) in [
+            (16u8, true, 0x27u32, 0x0028_1027u32, 0x10u32),
+            (31, true, 0x18, 0x0028_1018, 0x1f),
+            (4, true, 0x33, 0x0028_1033, 0x04),
+            (19, true, 0x24, 0x0028_1024, 0x13),
+            (3, true, 0x34, 0x0028_1034, 0x03),
+            (2, false, 0x45, 0x0018_1045, 0x02),
+            (1, false, 0x46, 0x0018_1046, 0x01),
+            (18, true, 0x25, 0x0028_1025, 0x12),
+            (17, false, 0x36, 0x0018_1036, 0x11),
+        ] {
+            let f = avi_for(vic, wide);
+            assert_eq!(f[0], 0x000d_0282);
+            assert_eq!(f[1] & 0xff, sum, "VIC {vic}");
+            assert_eq!(f[1], d0, "VIC {vic}");
+            assert_eq!(f[2], d1, "VIC {vic}");
+            assert!(f[3..].iter().all(|d| *d == 0));
+        }
+        assert_eq!(avi_for(16, true), AVI_1080P60);
     }
 
     #[test]

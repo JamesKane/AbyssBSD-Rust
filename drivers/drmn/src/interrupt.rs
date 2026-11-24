@@ -171,6 +171,21 @@ impl Irq {
         Ok(())
     }
 
+    /// Turns the display's frame-start event back on after the timing
+    /// generator was stopped and started (a mode change), if the handler runs.
+    pub(crate) fn rearm_frame_start(&self) {
+        if !self.active() {
+            return;
+        }
+        if let Some(gpu) = self.gpu.upgrade() {
+            let w = Bar5(&gpu);
+            w.write32(
+                OTG0_GLOBAL_SYNC_STATUS,
+                (w.read32(OTG0_GLOBAL_SYNC_STATUS) & FRAME_START_ENABLE) | FRAME_START_ENABLE,
+            );
+        }
+    }
+
     /// Moves the read pointer to the doorbell (stage R2.4): the aperture
     /// enabled, the bus interface's range for the handler, and the handler's
     /// doorbell register. Returns the read pointer the driver holds and the
