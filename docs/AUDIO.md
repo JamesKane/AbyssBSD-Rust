@@ -312,6 +312,10 @@ Drivers are `forbid(unsafe)` and use the DMA layer's buffers for hardware rings.
 | 5 | `uaudio` (USB Audio Class 1 and 2) | Any | FreeBSD `snd_uaudio` | Needs isochronous transfers, which [USB.md](USB.md) left out. The first consumer of §4.5's converter |
 | 6 | `sky1-audio`: the High Definition Audio controller and ALC269VC, then I²S serial audio with the DMA-350 into the DisplayPort transmitters | Orange Pi 6 Plus | None: FreeBSD has no driver | From `specs/sky1-audio`. The specification marks the signal processor optional, so the first driver leaves it in reset |
 
+The controller slice of row 2 landed ahead of A0 and A1 (2026-11-24): `drivers/hda` has `hdac`, `hdacc`
+and `hdaa` attach in QEMU (`x86_64-audio`, `aarch64-audio`), with the controller's rings polled, no streams, and the
+widget graph read through `lib/hda`. Streams, the mixer and `pcmN` wait for the engine.
+
 High Definition Audio codecs are parsed the way FreeBSD's `hdaa` does it: walk the widget graph,
 group pins into associations, and derive devices and mixer controls from them, with per-board
 corrections as data. The device names, `dev.hdaa` trees, and `sndstat` lines must match

@@ -551,6 +551,35 @@ fn rtl8125d_phy_microcode_and_config() {
     assert_eq!(c.read_phy_ocp(0xa5d4) & 0x0180, 0x0080);
 }
 
+/// The RTL8125D's second revision loads its PHY microcode in two parts
+/// (1269 words, then the rest), the patch window reopened between them;
+/// the configuration follows, and the version is recorded.
+#[test]
+fn rtl8125d_2_phy_microcode_and_config() {
+    let mut c = Chip::new(Model::default(), MacType::R25D2);
+    c.phy_config().unwrap();
+    let ev = log(&c);
+    let mcu = generated::R25D_2_PHY_MCU;
+    let evs: Vec<(u16, u16)> = ev
+        .iter()
+        .filter_map(|e| match *e {
+            Ev::Phy(r, v) => Some((r, v)),
+            _ => None,
+        })
+        .collect();
+    let at = evs.iter().position(|&w| w == mcu[0]).unwrap();
+    assert_eq!(&evs[at..at + 1269], &mcu[..1269]);
+    let gap: Vec<u16> = evs[at + 1269..at + 1271].iter().map(|w| w.0).collect();
+    assert_eq!(gap, [0xb820, 0xb820], "release and reopen");
+    let rest = &mcu[1269..];
+    assert_eq!(&evs[at + 1271..at + 1271 + rest.len()], rest);
+    let s = c.regs.0.borrow();
+    assert_eq!(s.ind.get(&0x801e), Some(&0x0031), "version recorded");
+    // The configuration ran to its end, and EEE ended off.
+    assert_eq!(s.phy.get(&0xa442).copied().unwrap_or(0) & 0x0080, 0x0080);
+    assert_eq!(s.phy.get(&0xa432).copied().unwrap_or(0) & 0x0010, 0x0010);
+}
+
 /// The MAC setup the RTL8125D differs in (`rge_init_locked`).
 #[test]
 fn rtl8125d_configure() {

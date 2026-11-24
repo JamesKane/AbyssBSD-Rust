@@ -13,7 +13,7 @@ pub(crate) fn controller(vendor: u16, device: u16) -> String {
     let exact = match (vendor, device) {
         (0x8086, 0x293e) => Some("Intel 82801I"),
         (0x8086, 0x7ad0) => Some("Intel Alder Lake"),
-        (0x1022, 0x15e3) => Some("AMD Ryzen"),
+        (0x1022, 0x15e3) => Some("AMD Raven"),
         _ => None,
     };
     if let Some(n) = exact {
@@ -42,7 +42,7 @@ pub(crate) fn codec(vendor: u16, device: u16) -> String {
         (0x10ec, 0x0897) => Some("Realtek ALC897"),
         (0x10ec, 0x1168 | 0x1220) => Some("Realtek ALC1220"),
         (0x10ec, 0x0269) => Some("Realtek ALC269"),
-        (0x8086, 0x2882) => Some("Intel Alder Lake"),
+        (0x8086, 0x2815) => Some("Intel Alder Lake"),
         _ => None,
     };
     if let Some(n) = exact {

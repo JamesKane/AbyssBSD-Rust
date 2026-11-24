@@ -5,10 +5,9 @@
 //!
 //! It maps nothing and changes nothing: the firmware's decoding and the
 //! boot framebuffer it set up stay as they are, which is how the boot
-//! display (the UEFI GOP framebuffer, `gop-kms`) keeps working. It does list
-//! the function's memory BARs as held, as FreeBSD's `devinfo -rv` shows them
-//! under `vgapciN`, so nothing else is offered them. It gives
-//! the function's place in the tree (`vgapciN`, as `devinfo` shows it on
+//! display (the UEFI GOP framebuffer, `gop-kms`) keeps working. (The bus
+//! already lists the function's BARs as held, as FreeBSD's `devinfo -rv`
+//! shows them under `vgapciN`.) It gives the function's place in the tree (`vgapciN`, as `devinfo` shows it on
 //! FreeBSD), at the generic rank, which a native display driver (M-G.6)
 //! outranks by matching the vendor and device.
 //!
@@ -20,12 +19,8 @@
 extern crate alloc;
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
-use bus::{
-    AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, Resource, RmanKind, StartCx, StopCx,
-    StopReason,
-};
+use bus::{AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, StartCx, StopCx, StopReason};
 use devtree::ids::PciId;
 
 /// PCI class 03h, subclass 00h: a VGA-compatible controller.
@@ -36,21 +31,7 @@ const OLD_VGA: PciId = PciId::subclass(0x00, 0x01);
 
 /// `vgapciN`.
 #[derive(Debug)]
-pub struct VgaPci {
-    /// The function's memory BARs, first to last address.
-    bars: Vec<(u64, u64)>,
-}
-
-/// The inclusive ranges of the memory resources among `resources`.
-fn memory_ranges(resources: &[Resource]) -> Vec<(u64, u64)> {
-    resources
-        .iter()
-        .filter_map(|r| match *r {
-            Resource::Memory { base, len, .. } if len > 0 => Some((base, base + (len - 1))),
-            _ => None,
-        })
-        .collect()
-}
+pub struct VgaPci;
 
 impl Driver for VgaPci {
     const NAME: &'static str = "vgapci";
@@ -60,16 +41,11 @@ impl Driver for VgaPci {
         "VGA-compatible display".into()
     }
 
-    fn attach(cx: &mut AttachCx<'_>) -> Result<Self, AttachError> {
-        Ok(Self {
-            bars: memory_ranges(cx.resources()),
-        })
+    fn attach(_: &mut AttachCx<'_>) -> Result<Self, AttachError> {
+        Ok(Self)
     }
 
-    fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
-        for &range in &self.bars {
-            cx.hold(RmanKind::Memory, range, None);
-        }
+    fn start(&self, _: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
         Ok(())
     }
 
@@ -94,31 +70,6 @@ mod tests {
             class,
             revision: 0xa1,
         }
-    }
-
-    #[test]
-    fn holds_the_memory_bars_only() {
-        let r = [
-            Resource::Memory {
-                base: 0x8000_0000,
-                len: 0x100_0000,
-                prefetchable: true,
-            },
-            Resource::IoPort {
-                base: 0x3c0,
-                len: 32,
-            },
-            Resource::Memory {
-                base: 0x8121_4000,
-                len: 0x1000,
-                prefetchable: false,
-            },
-        ];
-        // The QEMU VGA's, as FreeBSD's devinfo shows them.
-        assert_eq!(
-            memory_ranges(&r),
-            [(0x8000_0000, 0x80ff_ffff), (0x8121_4000, 0x8121_4fff)]
-        );
     }
 
     #[test]
