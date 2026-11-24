@@ -1,0 +1,434 @@
+AbyssBSD on the Orange Pi 6 Plus, p4, with and without strict-align (2026-11-24)
+base = 9c95277's kernel (target default, +strict-align); new = 8c3a7ae (-strict-align).
+Three runs of each, alternated, the board rebooted between runs (each kernel installed on the Samsung's root, BootNext).
+ratio = median(new) / median(base) per benchmark, geometric mean per component and core class; below 1 is faster.
+
+runs 3 3
+big io 1.012 pipe 1.025 proc 0.979 sig 0.977 syscall 0.967 vm 0.982
+mid io 1.006 pipe 0.974 proc 0.982 sig 0.981 syscall 0.962 vm 0.984
+little io 0.987 pipe 0.943 proc 0.962 sig 0.939 syscall 0.977 vm 0.924
+all io 1.015 pipe 0.968 proc 0.980 sig 0.977 syscall 0.962 vm 0.980
+overall 0.977
+('all', 'pipe.pingpong') 8252.8 7705.8 0.934
+('all', 'sig.deliver') 910.3 889.6 0.977
+('all', 'syscall.getpid') 66.1 63.6 0.962
+('big', 'pipe.pingpong') 2981.1 3095.5 1.038
+('big', 'sig.deliver') 910.6 889.5 0.977
+('big', 'syscall.getpid') 65.8 63.6 0.967
+('little', 'pipe.pingpong') 10080.1 9439.4 0.936
+('little', 'sig.deliver') 3913.4 3673.3 0.939
+('little', 'syscall.getpid') 205.3 200.6 0.977
+('mid', 'pipe.pingpong') 3349.3 3188.7 0.952
+('mid', 'sig.deliver') 1031.2 1011.6 0.981
+('mid', 'syscall.getpid') 75.4 72.5 0.962
+worst [('1.04', ('big', 'pipe.pingpong')), ('1.03', ('big', 'io.null.write')), ('1.03', ('all', 'io.null.write')), ('1.02', ('mid', 'io.null.write')), ('1.01', ('big', 'vm.fault.cow'))]
+
+Per-run logs (kbench lines) follow.
+== base-1
+kbench env side=abyss ident=ABYSSBSD 15.1-RELEASE
+kbench env cpu2 freq=1800 cx=none
+kbench env cpu8 freq=2200 cx=none
+kbench env cpu6 freq=2300 cx=none
+kbench env cpu10 freq=2500 cx=none
+kbench env cpu0 freq=2600 cx=none
+kbench env processes=31 load={ 0.10 0.03 0.01 }
+kbench class big 0,1,10,11
+kbench begin p4 cpus=12
+kbench syscall.getpid 65.8 ns/op
+kbench io.null.write 89.9 ns/op
+kbench io.zero.read 220.7 ns/op
+kbench proc.fork 41510.8 ns/op
+kbench proc.vfork_exec 105032.5 ns/op
+kbench proc.exec 89798.7 ns/op
+kbench vm.fault.anon 575.6 ns/op
+kbench vm.fault.cow 945.8 ns/op
+kbench vm.mmap 314.1 ns/op
+kbench sig.deliver 917.1 ns/op
+kbench pipe.pingpong 2942.6 ns/op
+kbench pipe.bw 8745.4 ns/op
+kbench end p4
+kbench class mid 6,7,8,9
+kbench begin p4 cpus=12
+kbench syscall.getpid 75.2 ns/op
+kbench io.null.write 102.8 ns/op
+kbench io.zero.read 249.9 ns/op
+kbench proc.fork 44056.7 ns/op
+kbench proc.vfork_exec 123790.0 ns/op
+kbench proc.exec 109030.7 ns/op
+kbench vm.fault.anon 646.1 ns/op
+kbench vm.fault.cow 1042.1 ns/op
+kbench vm.mmap 355.4 ns/op
+kbench sig.deliver 1044.4 ns/op
+kbench pipe.pingpong 3349.3 ns/op
+kbench pipe.bw 9777.3 ns/op
+kbench end p4
+kbench class little 2,3,4,5
+kbench begin p4 cpus=12
+kbench syscall.getpid 205.3 ns/op
+kbench io.null.write 288.7 ns/op
+kbench io.zero.read 1177.9 ns/op
+kbench proc.fork 187986.7 ns/op
+kbench proc.vfork_exec 552088.7 ns/op
+kbench proc.exec 462856.5 ns/op
+kbench vm.fault.anon 2051.1 ns/op
+kbench vm.fault.cow 3454.1 ns/op
+kbench vm.mmap 1372.2 ns/op
+kbench sig.deliver 3913.4 ns/op
+kbench pipe.pingpong 10080.1 ns/op
+kbench pipe.bw 28441.9 ns/op
+kbench end p4
+kbench class all 0-7
+kbench begin p4 cpus=12
+kbench syscall.getpid 66.1 ns/op
+kbench io.null.write 90.2 ns/op
+kbench io.zero.read 220.4 ns/op
+kbench proc.fork 41230.6 ns/op
+kbench proc.vfork_exec 105286.7 ns/op
+kbench proc.exec 91408.0 ns/op
+kbench vm.fault.anon 583.8 ns/op
+kbench vm.fault.cow 977.9 ns/op
+kbench vm.mmap 315.9 ns/op
+kbench sig.deliver 910.3 ns/op
+kbench pipe.pingpong 8252.8 ns/op
+kbench pipe.bw 18391.8 ns/op
+kbench end p4
+== base-2
+kbench env side=abyss ident=ABYSSBSD 15.1-RELEASE
+kbench env cpu2 freq=1800 cx=none
+kbench env cpu8 freq=2200 cx=none
+kbench env cpu6 freq=2300 cx=none
+kbench env cpu10 freq=2500 cx=none
+kbench env cpu0 freq=2600 cx=none
+kbench env processes=31 load={ 0.12 0.03 0.01 }
+kbench class big 0,1,10,11
+kbench begin p4 cpus=12
+kbench syscall.getpid 65.9 ns/op
+kbench io.null.write 89.6 ns/op
+kbench io.zero.read 221.5 ns/op
+kbench proc.fork 41099.1 ns/op
+kbench proc.vfork_exec 104987.0 ns/op
+kbench proc.exec 92354.4 ns/op
+kbench vm.fault.anon 571.4 ns/op
+kbench vm.fault.cow 939.0 ns/op
+kbench vm.mmap 314.6 ns/op
+kbench sig.deliver 910.6 ns/op
+kbench pipe.pingpong 2981.1 ns/op
+kbench pipe.bw 8669.4 ns/op
+kbench end p4
+kbench class mid 6,7,8,9
+kbench begin p4 cpus=12
+kbench syscall.getpid 75.4 ns/op
+kbench io.null.write 102.5 ns/op
+kbench io.zero.read 250.6 ns/op
+kbench proc.fork 44246.5 ns/op
+kbench proc.vfork_exec 127465.8 ns/op
+kbench proc.exec 104015.3 ns/op
+kbench vm.fault.anon 645.1 ns/op
+kbench vm.fault.cow 1050.5 ns/op
+kbench vm.mmap 354.8 ns/op
+kbench sig.deliver 1030.9 ns/op
+kbench pipe.pingpong 3378.7 ns/op
+kbench pipe.bw 9828.5 ns/op
+kbench end p4
+kbench class little 2,3,4,5
+kbench begin p4 cpus=12
+kbench syscall.getpid 205.3 ns/op
+kbench io.null.write 288.4 ns/op
+kbench io.zero.read 1237.5 ns/op
+kbench proc.fork 188037.4 ns/op
+kbench proc.vfork_exec 560575.8 ns/op
+kbench proc.exec 469558.9 ns/op
+kbench vm.fault.anon 1977.7 ns/op
+kbench vm.fault.cow 3441.9 ns/op
+kbench vm.mmap 1338.1 ns/op
+kbench sig.deliver 3887.1 ns/op
+kbench pipe.pingpong 10103.6 ns/op
+kbench pipe.bw 28504.1 ns/op
+kbench end p4
+kbench class all 0-7
+kbench begin p4 cpus=12
+kbench syscall.getpid 65.8 ns/op
+kbench io.null.write 89.8 ns/op
+kbench io.zero.read 220.5 ns/op
+kbench proc.fork 41214.8 ns/op
+kbench proc.vfork_exec 106446.4 ns/op
+kbench proc.exec 92482.5 ns/op
+kbench vm.fault.anon 586.4 ns/op
+kbench vm.fault.cow 972.1 ns/op
+kbench vm.mmap 314.2 ns/op
+kbench sig.deliver 910.6 ns/op
+kbench pipe.pingpong 8122.6 ns/op
+kbench pipe.bw 18432.7 ns/op
+kbench end p4
+== base-3
+kbench env side=abyss ident=ABYSSBSD 15.1-RELEASE
+kbench env cpu2 freq=1800 cx=none
+kbench env cpu8 freq=2200 cx=none
+kbench env cpu6 freq=2300 cx=none
+kbench env cpu10 freq=2500 cx=none
+kbench env cpu0 freq=2600 cx=none
+kbench env processes=31 load={ 0.12 0.03 0.01 }
+kbench class big 0,1,10,11
+kbench begin p4 cpus=12
+kbench syscall.getpid 65.8 ns/op
+kbench io.null.write 89.5 ns/op
+kbench io.zero.read 219.7 ns/op
+kbench proc.fork 41074.5 ns/op
+kbench proc.vfork_exec 100640.1 ns/op
+kbench proc.exec 91999.8 ns/op
+kbench vm.fault.anon 576.6 ns/op
+kbench vm.fault.cow 939.1 ns/op
+kbench vm.mmap 313.9 ns/op
+kbench sig.deliver 910.3 ns/op
+kbench pipe.pingpong 3052.9 ns/op
+kbench pipe.bw 8752.8 ns/op
+kbench end p4
+kbench class mid 6,7,8,9
+kbench begin p4 cpus=12
+kbench syscall.getpid 75.5 ns/op
+kbench io.null.write 102.0 ns/op
+kbench io.zero.read 250.1 ns/op
+kbench proc.fork 44233.7 ns/op
+kbench proc.vfork_exec 127913.7 ns/op
+kbench proc.exec 107921.7 ns/op
+kbench vm.fault.anon 648.3 ns/op
+kbench vm.fault.cow 1049.3 ns/op
+kbench vm.mmap 356.0 ns/op
+kbench sig.deliver 1031.2 ns/op
+kbench pipe.pingpong 3219.3 ns/op
+kbench pipe.bw 9859.8 ns/op
+kbench end p4
+kbench class little 2,3,4,5
+kbench begin p4 cpus=12
+kbench syscall.getpid 198.0 ns/op
+kbench io.null.write 288.6 ns/op
+kbench io.zero.read 1108.5 ns/op
+kbench proc.fork 186563.9 ns/op
+kbench proc.vfork_exec 553133.3 ns/op
+kbench proc.exec 452135.3 ns/op
+kbench vm.fault.anon 2098.9 ns/op
+kbench vm.fault.cow 3470.8 ns/op
+kbench vm.mmap 1364.1 ns/op
+kbench sig.deliver 3951.6 ns/op
+kbench pipe.pingpong 10055.3 ns/op
+kbench pipe.bw 28463.9 ns/op
+kbench end p4
+kbench class all 0-7
+kbench begin p4 cpus=12
+kbench syscall.getpid 66.1 ns/op
+kbench io.null.write 89.4 ns/op
+kbench io.zero.read 219.8 ns/op
+kbench proc.fork 40976.8 ns/op
+kbench proc.vfork_exec 103590.6 ns/op
+kbench proc.exec 89360.7 ns/op
+kbench vm.fault.anon 582.7 ns/op
+kbench vm.fault.cow 967.4 ns/op
+kbench vm.mmap 314.6 ns/op
+kbench sig.deliver 909.9 ns/op
+kbench pipe.pingpong 8337.9 ns/op
+kbench pipe.bw 18455.0 ns/op
+kbench end p4
+== new-1
+kbench env side=abyss ident=ABYSSBSD 15.1-RELEASE
+kbench env cpu2 freq=1800 cx=none
+kbench env cpu8 freq=2200 cx=none
+kbench env cpu6 freq=2300 cx=none
+kbench env cpu10 freq=2500 cx=none
+kbench env cpu0 freq=2600 cx=none
+kbench env processes=31 load={ 0.07 0.03 0.01 }
+kbench class big 0,1,10,11
+kbench begin p4 cpus=12
+kbench syscall.getpid 63.6 ns/op
+kbench io.null.write 92.3 ns/op
+kbench io.zero.read 219.4 ns/op
+kbench proc.fork 40432.6 ns/op
+kbench proc.vfork_exec 102767.4 ns/op
+kbench proc.exec 90180.4 ns/op
+kbench vm.fault.anon 577.6 ns/op
+kbench vm.fault.cow 955.1 ns/op
+kbench vm.mmap 292.4 ns/op
+kbench sig.deliver 889.5 ns/op
+kbench pipe.pingpong 3054.1 ns/op
+kbench pipe.bw 8714.3 ns/op
+kbench end p4
+kbench class mid 6,7,8,9
+kbench begin p4 cpus=12
+kbench syscall.getpid 72.5 ns/op
+kbench io.null.write 104.5 ns/op
+kbench io.zero.read 248.1 ns/op
+kbench proc.fork 43257.2 ns/op
+kbench proc.vfork_exec 119764.1 ns/op
+kbench proc.exec 106192.4 ns/op
+kbench vm.fault.anon 653.0 ns/op
+kbench vm.fault.cow 1045.4 ns/op
+kbench vm.mmap 334.8 ns/op
+kbench sig.deliver 1011.6 ns/op
+kbench pipe.pingpong 3184.3 ns/op
+kbench pipe.bw 9754.8 ns/op
+kbench end p4
+kbench class little 2,3,4,5
+kbench begin p4 cpus=12
+kbench syscall.getpid 200.6 ns/op
+kbench io.null.write 291.6 ns/op
+kbench io.zero.read 1144.7 ns/op
+kbench proc.fork 183701.4 ns/op
+kbench proc.vfork_exec 528361.0 ns/op
+kbench proc.exec 441402.8 ns/op
+kbench vm.fault.anon 2002.0 ns/op
+kbench vm.fault.cow 3488.3 ns/op
+kbench vm.mmap 1089.5 ns/op
+kbench sig.deliver 3673.3 ns/op
+kbench pipe.pingpong 9439.4 ns/op
+kbench pipe.bw 26467.0 ns/op
+kbench end p4
+kbench class all 0-7
+kbench begin p4 cpus=12
+kbench syscall.getpid 63.8 ns/op
+kbench io.null.write 92.7 ns/op
+kbench io.zero.read 219.8 ns/op
+kbench proc.fork 40441.6 ns/op
+kbench proc.vfork_exec 102817.5 ns/op
+kbench proc.exec 89415.6 ns/op
+kbench vm.fault.anon 588.8 ns/op
+kbench vm.fault.cow 968.7 ns/op
+kbench vm.mmap 292.4 ns/op
+kbench sig.deliver 889.3 ns/op
+kbench pipe.pingpong 7705.8 ns/op
+kbench pipe.bw 18479.2 ns/op
+kbench end p4
+== new-2
+kbench env side=abyss ident=ABYSSBSD 15.1-RELEASE
+kbench env cpu2 freq=1800 cx=none
+kbench env cpu8 freq=2200 cx=none
+kbench env cpu6 freq=2300 cx=none
+kbench env cpu10 freq=2500 cx=none
+kbench env cpu0 freq=2600 cx=none
+kbench env processes=31 load={ 0.12 0.03 0.01 }
+kbench class big 0,1,10,11
+kbench begin p4 cpus=12
+kbench syscall.getpid 63.6 ns/op
+kbench io.null.write 92.5 ns/op
+kbench io.zero.read 219.0 ns/op
+kbench proc.fork 40404.9 ns/op
+kbench proc.vfork_exec 101966.6 ns/op
+kbench proc.exec 90411.2 ns/op
+kbench vm.fault.anon 579.6 ns/op
+kbench vm.fault.cow 947.7 ns/op
+kbench vm.mmap 293.4 ns/op
+kbench sig.deliver 889.1 ns/op
+kbench pipe.pingpong 3104.7 ns/op
+kbench pipe.bw 8841.0 ns/op
+kbench end p4
+kbench class mid 6,7,8,9
+kbench begin p4 cpus=12
+kbench syscall.getpid 72.5 ns/op
+kbench io.null.write 104.6 ns/op
+kbench io.zero.read 248.1 ns/op
+kbench proc.fork 43614.8 ns/op
+kbench proc.vfork_exec 125399.0 ns/op
+kbench proc.exec 107585.2 ns/op
+kbench vm.fault.anon 651.5 ns/op
+kbench vm.fault.cow 1051.7 ns/op
+kbench vm.mmap 332.7 ns/op
+kbench sig.deliver 1010.8 ns/op
+kbench pipe.pingpong 3350.6 ns/op
+kbench pipe.bw 9901.0 ns/op
+kbench end p4
+kbench class little 2,3,4,5
+kbench begin p4 cpus=12
+kbench syscall.getpid 195.3 ns/op
+kbench io.null.write 289.3 ns/op
+kbench io.zero.read 1140.7 ns/op
+kbench proc.fork 182983.4 ns/op
+kbench proc.vfork_exec 571226.4 ns/op
+kbench proc.exec 472995.2 ns/op
+kbench vm.fault.anon 2004.1 ns/op
+kbench vm.fault.cow 3485.6 ns/op
+kbench vm.mmap 1094.3 ns/op
+kbench sig.deliver 3731.4 ns/op
+kbench pipe.pingpong 9100.2 ns/op
+kbench pipe.bw 27491.1 ns/op
+kbench end p4
+kbench class all 0-7
+kbench begin p4 cpus=12
+kbench syscall.getpid 63.6 ns/op
+kbench io.null.write 92.7 ns/op
+kbench io.zero.read 226.6 ns/op
+kbench proc.fork 40475.5 ns/op
+kbench proc.vfork_exec 102392.1 ns/op
+kbench proc.exec 90875.2 ns/op
+kbench vm.fault.anon 589.2 ns/op
+kbench vm.fault.cow 977.8 ns/op
+kbench vm.mmap 292.4 ns/op
+kbench sig.deliver 889.6 ns/op
+kbench pipe.pingpong 7787.0 ns/op
+kbench pipe.bw 18273.5 ns/op
+kbench end p4
+== new-3
+kbench env side=abyss ident=ABYSSBSD 15.1-RELEASE
+kbench env cpu2 freq=1800 cx=none
+kbench env cpu8 freq=2200 cx=none
+kbench env cpu6 freq=2300 cx=none
+kbench env cpu10 freq=2500 cx=none
+kbench env cpu0 freq=2600 cx=none
+kbench env processes=31 load={ 0.06 0.01 0.00 }
+kbench class big 0,1,10,11
+kbench begin p4 cpus=12
+kbench syscall.getpid 63.8 ns/op
+kbench io.null.write 92.8 ns/op
+kbench io.zero.read 219.0 ns/op
+kbench proc.fork 40738.3 ns/op
+kbench proc.vfork_exec 98416.9 ns/op
+kbench proc.exec 90514.4 ns/op
+kbench vm.fault.anon 578.2 ns/op
+kbench vm.fault.cow 950.3 ns/op
+kbench vm.mmap 293.0 ns/op
+kbench sig.deliver 895.8 ns/op
+kbench pipe.pingpong 3095.5 ns/op
+kbench pipe.bw 9063.7 ns/op
+kbench end p4
+kbench class mid 6,7,8,9
+kbench begin p4 cpus=12
+kbench syscall.getpid 72.5 ns/op
+kbench io.null.write 104.5 ns/op
+kbench io.zero.read 247.9 ns/op
+kbench proc.fork 43958.9 ns/op
+kbench proc.vfork_exec 123943.5 ns/op
+kbench proc.exec 106691.8 ns/op
+kbench vm.fault.anon 649.5 ns/op
+kbench vm.fault.cow 1052.7 ns/op
+kbench vm.mmap 335.0 ns/op
+kbench sig.deliver 1012.3 ns/op
+kbench pipe.pingpong 3188.7 ns/op
+kbench pipe.bw 9789.7 ns/op
+kbench end p4
+kbench class little 2,3,4,5
+kbench begin p4 cpus=12
+kbench syscall.getpid 204.9 ns/op
+kbench io.null.write 287.4 ns/op
+kbench io.zero.read 1144.7 ns/op
+kbench proc.fork 183239.2 ns/op
+kbench proc.vfork_exec 529989.3 ns/op
+kbench proc.exec 430743.4 ns/op
+kbench vm.fault.anon 2011.3 ns/op
+kbench vm.fault.cow 3497.7 ns/op
+kbench vm.mmap 1089.7 ns/op
+kbench sig.deliver 3504.2 ns/op
+kbench pipe.pingpong 9604.3 ns/op
+kbench pipe.bw 27057.5 ns/op
+kbench end p4
+kbench class all 0-7
+kbench begin p4 cpus=12
+kbench syscall.getpid 63.6 ns/op
+kbench io.null.write 92.2 ns/op
+kbench io.zero.read 219.0 ns/op
+kbench proc.fork 40529.1 ns/op
+kbench proc.vfork_exec 103593.9 ns/op
+kbench proc.exec 89830.5 ns/op
+kbench vm.fault.anon 586.4 ns/op
+kbench vm.fault.cow 976.9 ns/op
+kbench vm.mmap 293.3 ns/op
+kbench sig.deliver 895.6 ns/op
+kbench pipe.pingpong 7663.6 ns/op
+kbench pipe.bw 18544.2 ns/op
+kbench end p4
