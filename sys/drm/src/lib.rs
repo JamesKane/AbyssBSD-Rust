@@ -29,6 +29,7 @@ pub mod gem;
 mod ioctl;
 pub mod kms;
 mod kms_ioctl;
+pub mod resv;
 pub mod sync_file;
 pub mod syncobj;
 #[cfg(test)]
@@ -40,7 +41,7 @@ pub use card::{Card, Open, panic_restore, register, retire_firmware_cards};
 pub use dmabuf::DmaBuf;
 pub use driver::{DriverInfo, DrmDriver, DumbLimits, IoctlCx};
 pub use sync_file::SyncFile;
-pub use syncobj::{Done, Fence};
+pub use syncobj::{Done, Fence, Signal, SyncObj};
 
 use abi::errno::Errno;
 use sync::Once;
@@ -95,7 +96,21 @@ pub struct Env {
     /// The sync file the calling process's descriptor names: `EBADF` for
     /// no such descriptor, `EINVAL` for one that is not a sync file.
     pub import_syncfile: fn(&sched::Sleepable, i32) -> Result<alloc::sync::Arc<SyncFile>, Errno>,
+    /// Gives the calling process a descriptor for a synchronisation object:
+    /// close on exec if the flag is set.
+    pub export_syncobj:
+        fn(&sched::Sleepable, alloc::sync::Arc<SyncObj>, bool) -> Result<i32, Errno>,
+    /// The synchronisation object the calling process's descriptor names:
+    /// `EBADF` for no such descriptor, `EINVAL` for one that is not one.
+    pub import_syncobj: fn(&sched::Sleepable, i32) -> Result<alloc::sync::Arc<SyncObj>, Errno>,
+    /// The eventfd the calling process's descriptor names, as something to
+    /// signal: `EBADF` for no such descriptor, `EINVAL` for one that is not
+    /// an eventfd.
+    pub import_eventfd: ImportEventfd,
 }
+
+/// See [`Env::import_eventfd`].
+pub type ImportEventfd = fn(&sched::Sleepable, i32) -> Result<alloc::sync::Arc<dyn Signal>, Errno>;
 
 static ENV: Once<Env> = Once::new();
 

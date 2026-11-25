@@ -350,6 +350,12 @@ pub(crate) fn file_record(
             k.kf_status |= KF_ATTR_VALID;
             out!(k)
         }
+        FileKind::SyncObj(_) => {
+            let mut k: Box<KinfoFile<KfFile>> = record(fd, fflags);
+            k.kf_type = abi::kinfo::KF_TYPE_SYNCOBJ;
+            k.kf_status |= KF_ATTR_VALID;
+            out!(k)
+        }
         FileKind::SyncFile(_) => {
             let mut k: Box<KinfoFile<KfFile>> = record(fd, fflags);
             k.kf_type = abi::kinfo::KF_TYPE_SYNCFILE;
@@ -534,6 +540,7 @@ fn xfile(p: &Process, fd: i32, f: &Arc<File>) -> [u8; XFILE_LEN] {
         FileKind::DmaBuf(d) => (17, identity(d.as_ref()), 0),
         // `DTYPE_SYNCFILE`, likewise.
         FileKind::SyncFile(f) => (18, identity(f.as_ref()), 0),
+        FileKind::SyncObj(o) => (19, identity(o.as_ref()), 0),
     };
     let mut b = [0u8; XFILE_LEN];
     b[0..8].copy_from_slice(&(XFILE_LEN as u64).to_ne_bytes());

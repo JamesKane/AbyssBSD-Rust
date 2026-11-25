@@ -307,11 +307,11 @@ const TABLE: &[Def] = &[
 fn render_allowed(n: u8) -> bool {
     // 0x00 VERSION, 0x0c GET_CAP, 0x0d SET_CLIENT_CAP, 0x09 GEM_CLOSE,
     // 0x2d and 0x2e PRIME handle-to-fd and fd-to-handle, 0x01 GET_UNIQUE
-    // (read only), the synchronisation objects 0xbf to 0xcd, and the
+    // (read only), the synchronisation objects 0xbf to 0xcd and 0xcf, and the
     // driver's own range.
     matches!(
         n,
-        0x00 | 0x01 | 0x09 | 0x0c | 0x0d | 0x2d | 0x2e | 0xbf..=0xcd
+        0x00 | 0x01 | 0x09 | 0x0c | 0x0d | 0x2d | 0x2e | 0xbf..=0xcd | 0xcf
     ) || (DRM_COMMAND_BASE..DRM_COMMAND_END).contains(&n)
 }
 
@@ -464,7 +464,8 @@ fn get_cap(f: &Open, a: &mut DrmGetCap) -> Result<usize, Errno> {
         DRM_CAP_CURSOR_WIDTH | DRM_CAP_CURSOR_HEIGHT => 64,
         DRM_CAP_ADDFB2_MODIFIERS | DRM_CAP_CRTC_IN_VBLANK_EVENT => u64::from(d.has_kms()),
         DRM_CAP_SYNCOBJ => 1,
-        DRM_CAP_SYNCOBJ_TIMELINE | DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP => 0,
+        DRM_CAP_SYNCOBJ_TIMELINE => 1,
+        DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP => 0,
         other => d.cap(other).ok_or(Errno::EINVAL)?,
     };
     Ok(0)

@@ -259,6 +259,8 @@ pub(crate) enum FileKind {
     /// A sync file: it is readable once its fences have finished (an
     /// AbyssBSD addition, as the dma-buf is).
     SyncFile(Arc<drm::SyncFile>),
+    /// A synchronisation object, shared (an AbyssBSD addition too).
+    SyncObj(Arc<drm::SyncObj>),
 }
 
 /// An open file.
@@ -364,6 +366,7 @@ impl File {
             | FileKind::Inotify(_)
             | FileKind::DmaBuf(_)
             | FileKind::SyncFile(_)
+            | FileKind::SyncObj(_)
             | FileKind::Pts(_) => None,
         }
     }
@@ -438,7 +441,9 @@ impl File {
             FileKind::Inotify(i) => i.read(s, uio, self.nonblock()),
             // Memory is reached by mapping it, and a sync file is waited
             // for with `poll`.
-            FileKind::DmaBuf(_) | FileKind::SyncFile(_) => Err(Errno::EINVAL),
+            FileKind::DmaBuf(_) | FileKind::SyncFile(_) | FileKind::SyncObj(_) => {
+                Err(Errno::EINVAL)
+            }
         }
     }
 
@@ -475,6 +480,7 @@ impl File {
             | FileKind::Inotify(_)
             | FileKind::DmaBuf(_)
             | FileKind::SyncFile(_)
+            | FileKind::SyncObj(_)
             | FileKind::Pts(_) => Err(Errno::ESPIPE),
         }
     }
@@ -522,7 +528,9 @@ impl File {
             FileKind::Eventfd(e) => e.write(s, uio, self.nonblock()),
             // `invfo_rdwr`.
             FileKind::Inotify(_) => Err(Errno::EOPNOTSUPP),
-            FileKind::DmaBuf(_) | FileKind::SyncFile(_) => Err(Errno::EINVAL),
+            FileKind::DmaBuf(_) | FileKind::SyncFile(_) | FileKind::SyncObj(_) => {
+                Err(Errno::EINVAL)
+            }
         }
     }
 
@@ -550,6 +558,7 @@ impl File {
             | FileKind::Inotify(_)
             | FileKind::DmaBuf(_)
             | FileKind::SyncFile(_)
+            | FileKind::SyncObj(_)
             | FileKind::Pts(_) => Err(Errno::ESPIPE),
             FileKind::Shm(m) => {
                 let at = u64::try_from(offset).map_err(|_| Errno::EINVAL)?;
@@ -656,7 +665,7 @@ impl File {
                 st_blksize: 4096,
                 ..Stat::default()
             }),
-            FileKind::SyncFile(_) => Ok(Stat {
+            FileKind::SyncFile(_) | FileKind::SyncObj(_) => Ok(Stat {
                 st_mode: abi::stat::S_IFREG | 0o600,
                 ..Stat::default()
             }),
@@ -714,6 +723,7 @@ impl File {
             // Memory is always ready.
             FileKind::DmaBuf(_) => vfs::node::poll_no_poll(events),
             FileKind::SyncFile(f) => f.poll(events, w),
+            FileKind::SyncObj(_) => vfs::node::poll_no_poll(events),
             FileKind::Pts(m) => m.poll(events, w),
         }
     }
@@ -743,9 +753,11 @@ impl File {
             FileKind::Inet(so) => inet::filter(&so.so, kev),
             FileKind::Netlink(nl) => nl.kqfilter(kev),
             // No `EVFILT_JAILDESC` yet (docs/compat-deviations.md).
-            FileKind::Process(_) | FileKind::Jail(_) | FileKind::Shm(_) | FileKind::DmaBuf(_) => {
-                Err(Errno::EINVAL)
-            }
+            FileKind::Process(_)
+            | FileKind::Jail(_)
+            | FileKind::Shm(_)
+            | FileKind::DmaBuf(_)
+            | FileKind::SyncObj(_) => Err(Errno::EINVAL),
             FileKind::SyncFile(f) if kev.filter == abi::event::EVFILT_READ => {
                 Ok(alloc::boxed::Box::new(SyncFileFilter(Arc::clone(f))))
             }
@@ -875,9 +887,17 @@ impl File {
             // Non-blocking and asynchronous mean nothing to memory. The
             // sync request brackets CPU access to a buffer a device uses;
             // memory the CPU shares coherently needs no maintenance.
-            FileKind::DmaBuf(_) => match req {
+            FileKind::DmaBuf(d) => match req {
                 FIONBIO | FIOASYNC => Ok(0),
                 abi::drm::DMA_BUF_IOCTL_SYNC => Ok(0),
+                // The fences of the jobs using the buffer, as a sync file and
+                // back.
+                abi::drm::DMA_BUF_IOCTL_EXPORT_SYNC_FILE
+                | abi::drm::DMA_BUF_IOCTL_IMPORT_SYNC_FILE => drm::dmabuf::ioctl(d, s, req, arg),
+                _ => Err(Errno::ENOTTY),
+            },
+            FileKind::SyncObj(_) => match req {
+                FIONBIO | FIOASYNC => Ok(0),
                 _ => Err(Errno::ENOTTY),
             },
             // The sync file's own requests: merge, and describe.

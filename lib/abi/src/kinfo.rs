@@ -916,6 +916,8 @@ pub const KF_TYPE_JAILDESC: i32 = 16;
 pub const KF_TYPE_DMABUF: i32 = 17;
 /// A sync file (an AbyssBSD addition, as the dma-buf is).
 pub const KF_TYPE_SYNCFILE: i32 = 18;
+/// A synchronisation object (likewise).
+pub const KF_TYPE_SYNCOBJ: i32 = 19;
 pub const KF_TYPE_UNKNOWN: i32 = 255;
 
 /// `kf_file_type` / `kf_vnode_type` (`KF_VTYPE_*`).
