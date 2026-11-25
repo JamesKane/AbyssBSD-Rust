@@ -492,12 +492,6 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
     it;
   - after `p5` has run in the same boot, `kevent.pipe1000` is 7% slower until a reboot. Each
     knote's filter is still its own allocation.
-- **The `aarch64-el2` hang in `tests/user/cam` is reproduced** (2026-11-25: 3 of 14 runs, one captured
-  live on an idle machine, in `tests/corpus/hangs/aarch64-el2-cam-2026-11-25/`). QEMU at EL2, INTx
-  (`hw.pci.enable_msix=0`): after `bpfwriter` the guest's CPU 0 takes interrupts as fast as it can return
-  from them (the GIC acknowledge and end-of-interrupt path, `irq::dispatch`, the `virtio_blk` and
-  `virtio_input` filters on a shared line), CPUs 1 to 3 idle. Which device keeps the line asserted is
-  not yet known; `cam`'s NVMe and SATA commands are the first suspects.
 - **`devinfo` against the board's FreeBSD** (tests/corpus/opi6p/freebsd/devinfo-rv.txt): the RX8900,
   the PD controllers, `hcons` and `hsctrl` attach on the board with FreeBSD's names. What FreeBSD
   has that AbyssBSD's tree does not is in compat-deviations (Device tree). The media keys deliver

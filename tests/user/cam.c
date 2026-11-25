@@ -20,7 +20,8 @@
  * - /dev/nvme0 (if there is one) is root:wheel 0600 and answers
  *   NVME_PASSTHROUGH_CMD (identify, the SMART/health log page, a READ on
  *   its namespace node matching the node's own read), NVME_GET_NSID,
- *   NVME_GET_MAX_XFER_SIZE, NVME_GET_CONTROLLER_DATA; a transfer past
+ *   NVME_GET_MAX_XFER_SIZE, NVME_GET_CONTROLLER_DATA, and identify run
+ *   back to back (ADMIN_BURST times); a transfer past
  *   the largest fails with EIO, a buffer it cannot hold with ENOMEM.
  *
  * Runs on FreeBSD too (as root). Exits 0 on success; prints what failed
@@ -45,6 +46,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/* Admin pass-through commands run back to back on /dev/nvme0. */
+#define ADMIN_BURST 200
 
 static int failed;
 
@@ -371,6 +375,18 @@ check_nvme_nodes(void)
 	CHECK(pt(fd, NVME_OPC_IDENTIFY, 0, 1, &cd, sizeof(cd), &p) == 0 &&
 	    !nvme_completion_is_error(&p.cpl), "identify: %s status %#x",
 	    strerror(errno), p.cpl.status);
+	/*
+	 * Admin commands back to back: under INTx each completion asserts
+	 * the line its I/O queue shares until the admin queue's head moves.
+	 */
+	for (int i = 0; i < ADMIN_BURST; i++) {
+		if (pt(fd, NVME_OPC_IDENTIFY, 0, 1, &cd2, sizeof(cd2), &p) != 0 ||
+		    nvme_completion_is_error(&p.cpl)) {
+			CHECK(0, "identify %d of %d: %s status %#x", i,
+			    ADMIN_BURST, strerror(errno), p.cpl.status);
+			break;
+		}
+	}
 	CHECK(ioctl(fd, NVME_GET_CONTROLLER_DATA, &cd2) == 0 &&
 	    memcmp(&cd, &cd2, sizeof(cd)) == 0,
 	    "GET_CONTROLLER_DATA is not identify's");

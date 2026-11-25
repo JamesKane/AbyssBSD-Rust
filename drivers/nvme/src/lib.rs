@@ -295,6 +295,15 @@ struct Regs {
     mmio: MmioGrant<Bytes>,
     /// Doorbell stride in bytes.
     stride: usize,
+    /// Interrupts by INTx (no MSI-X): the admin queue and the I/O queue
+    /// share the one input, which the controller's own mask (`INTMS`,
+    /// `INTMC`) holds while either is served.
+    intx: bool,
+    /// Holders of that mask: the interrupt thread while it reaps
+    /// (`nvme_ctrlr_shared_handler`), a polled admin command until its
+    /// completion is taken, and attach until it is done. The controller is
+    /// unmasked when the last lets go.
+    masks: SpinLock<u32>,
 }
 
 impl Regs {
@@ -309,6 +318,43 @@ impl Regs {
 
     fn csts(&self) -> u32 {
         self.mmio.read32(reg::CSTS)
+    }
+
+    /// Masks the controller's INTx interrupt until [`Regs::unmask`] (no
+    /// effect with MSI-X, where `INTMS` is undefined).
+    fn mask(&self) {
+        if !self.intx {
+            return;
+        }
+        let mut n = self.masks.lock();
+        if *n == 0 {
+            self.mmio.write32(reg::INTMS, 1);
+        }
+        *n += 1;
+    }
+
+    /// Lets go of a [`Regs::mask`]; the last holder unmasks. Unmasking
+    /// also has the controller look again at what is left unreaped: it
+    /// may have raised the input after the last head doorbell with nothing
+    /// new posted, and would hold it there (QEMU's does).
+    fn unmask(&self) {
+        if !self.intx {
+            return;
+        }
+        let mut n = self.masks.lock();
+        *n -= 1;
+        if *n == 0 {
+            self.mmio.write32(reg::INTMC, 1);
+        }
+    }
+
+    /// Unmasks every vector unless something holds the INTx mask (the end
+    /// of attach, or of a reset).
+    fn unmask_unheld(&self) {
+        let n = self.masks.lock();
+        if *n == 0 {
+            self.mmio.write32(reg::INTMC, u32::MAX);
+        }
     }
 
     fn sq_doorbell(&self, q: u16, tail: u16) {
@@ -943,7 +989,7 @@ impl Controller {
                 .run(regs, s, &create_sq, t)
                 .map_err(|_| "nvme_create_io_sq failed!")?;
         }
-        regs.mmio.write32(reg::INTMC, u32::MAX);
+        regs.unmask_unheld();
         Ok(())
     }
 
@@ -1267,6 +1313,21 @@ impl Admin {
         c: &Command,
         timeout_ms: u64,
     ) -> Result<u32, Status> {
+        // Under INTx the admin completion would hold the input the I/O
+        // queue shares until it is polled: masked until then.
+        regs.mask();
+        let r = self.poll(regs, s, c, timeout_ms);
+        regs.unmask();
+        r
+    }
+
+    fn poll(
+        &mut self,
+        regs: &Regs,
+        s: &Sleepable,
+        c: &Command,
+        timeout_ms: u64,
+    ) -> Result<u32, Status> {
         let cid = self.next_cid;
         self.next_cid = self.next_cid.wrapping_add(1);
         self.rings.push(c, cid);
@@ -1390,6 +1451,8 @@ fn completions(d: &Nvme, vector: usize, s: &Sleepable) {
     if fault::ignoring(ctrl.unit) {
         return;
     }
+    // `nvme_ctrlr_shared_handler`: under INTx, masked while reaping.
+    ctrl.regs.mask();
     for q in 0..ctrl.queues.len() {
         if ctrl.vectors[q] != vector {
             continue;
@@ -1398,6 +1461,7 @@ fn completions(d: &Nvme, vector: usize, s: &Sleepable) {
         ctrl.deliver(r);
         ctrl.resume(s, q);
     }
+    ctrl.regs.unmask();
 }
 
 /// The watchdog thread: every half second while commands are
@@ -1577,7 +1641,13 @@ impl Driver for Nvme {
         let mmio = cx.mmio_bytes(0)?;
         child.enable_memory();
         child.set_bus_master(true);
-        let mut regs = Regs { mmio, stride: 4 };
+        // Attach holds the INTx mask until it is done.
+        let mut regs = Regs {
+            mmio,
+            stride: 4,
+            intx: false,
+            masks: SpinLock::new(1),
+        };
         let cap = regs.read64(reg::CAP);
         if cap == u64::MAX {
             return Err(AttachError::Device("registers read all ones"));
@@ -1679,6 +1749,7 @@ impl Driver for Nvme {
             Err(_) => (Vec::new(), None),
         };
         let msix = lines.len();
+        regs.intx = msix == 0;
         if lines.is_empty() {
             lines.push(cx.irq(0)?);
         }
@@ -1770,7 +1841,8 @@ impl Driver for Nvme {
             .coherent::<u64>(PRP_LIST / 8)
             .map_err(|_| AttachError::NoMemory)?;
         // Unmask (INTx and MSI; MSI-X ignores the masks).
-        regs.mmio.write32(reg::INTMC, u32::MAX);
+        *regs.masks.lock() -= 1;
+        regs.unmask_unheld();
         let unit = cx.unit();
         Ok(Self {
             model: nda_model,

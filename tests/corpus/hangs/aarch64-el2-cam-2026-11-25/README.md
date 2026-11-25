@@ -17,7 +17,29 @@ otherwise idle one, which is what this captures, five minutes into the hang, ove
   filters on it being asked each time.
 - `symbolized.txt`: the addresses (slide 0x1e800000 taken off) against the kernel built for the run.
 
-What this does not show: which device keeps the line asserted. The monitor's reads of the GIC
-distributor came back zero (the secure view), so they were dropped. `cam` drives the SCSI, SATA, and
-NVMe pass devices, so the NVMe controller and the AHCI one are the first to look at: under INTx a
-level interrupt stays asserted until the driver's filter or handler quiets the device.
+## What it was (found the same day, fixed in `drivers/nvme`)
+
+Later captures of the same hang, over QEMU's gdb stub and the monitor:
+
+- The storm is on interrupt ID 35 (PCI INTx pin A). On it, `virtio_blk` and `virtio_input` answer
+  stray every time; `nvme`'s filter claims every interrupt and schedules its thread.
+- Of every PCI function, only `00:04.0`, the first NVMe controller, has its config-space Interrupt
+  Status bit set; its `INTMS` is 0.
+- The driver has taken everything: the admin completion queue holds only attach's 7 completions;
+  I/O queue 1 has head = tail (42), nothing in flight, the entry at the head from the previous lap.
+  Its reaper, single-stepped, finds nothing new and so writes no head doorbell.
+- Writing the queue's head doorbell again, with the same value, from the debugger dropped the
+  controller's INTx at once: it had raised the input after the last head doorbell with nothing new
+  posted, and lowers it only on a later doorbell or mask change. Nothing in the driver's INTx path
+  did either, so the interrupt thread (which outranks the `cam` process, pinned to the same CPU, as
+  the user tests are) ran forever.
+- A burst of 2000 admin identifies in `cam` hung on the first run.
+
+The fix is FreeBSD's INTx handling (`nvme_ctrlr_shared_handler`): under INTx the interrupt thread
+masks the controller (`INTMS`) while it reaps and unmasks it (`INTMC`) after, which makes it look
+again; a polled admin command holds the same mask until its completion is taken, so an admin
+completion never holds the input the I/O queue shares. After it, 10 of 10 runs of `aarch64-el2`
+with the 2000-identify burst passed (before: 1 of 1 hung, and 3 of 14 without the burst). `cam`
+keeps a 200-identify burst.
+
+QEMU's NVMe model is GPL and was not read: what it does is known only by these experiments.
