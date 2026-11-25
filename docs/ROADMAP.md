@@ -470,25 +470,25 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
 
 **Open:**
 - **Performance** (the exit's gate: every suite within 2% of FreeBSD on the board, per core class,
-  P7's over `rge`). Last reports, three runs against the golden FreeBSD sets
-  (`tests/perf/board/golden/`), AbyssBSD's kernel at `8c3a7ae`: `p4`, `p5`, `p6`
-  (`2026-11-24-8c3a7ae.txt`) and `p7` (`2026-11-24-8c3a7ae-p7.txt`) pass every component on every
-  class; `p2` (`2026-11-24-8c3a7ae-p2.txt`) passes all but `mtx` on the little cores (1.058: `mtx.t4`
-  1.27 and `mtx.t2` 1.12, 31 to 39 ns against FreeBSD's 31; it was 0.979 at `ae38a29`, and the little
-  cores' code layout moves such a result). To do:
-  - `p2`'s `mtx` on the little cores: not the code path. `abyss.bench=mtxpmu` (PMU counts per
-    operation, three boots each of `cb14683` with the suite, and `8c3a7ae` with and without
-    `-strict-align`) shows the same 84.0 instructions an operation at two threads on all three
-    (27.8, 30.4 and 28.2 ns, each 24 to 31 across boots). At four threads the mutex is unfair: two
-    of the four workers take nearly every operation, which two varies, and the time swings from 26
-    to 81 ns with it, on every kernel. The ten-run gate will say whether the component passes;
-    a fairer benchmark or FreeBSD's own spread at four threads is the next thing to measure;
-  - the 10-run gate on every class, for `p2` and `p4` to `p7`;
+  P7's over `rge`). Last reports, ten AbyssBSD runs, each on a fresh boot, against the three
+  golden FreeBSD runs (`tests/perf/board/golden/`), AbyssBSD's kernel at `8c3a7ae`: `p4`, `p5`, `p6`
+  (`2026-11-25-8c3a7ae-gate10-p456.txt`, overall 0.55 to 0.57) and `p2`
+  (`2026-11-25-8c3a7ae-gate10-p2.txt`, 0.58 to 0.63) pass every component on every core class. `p2`'s
+  `mtx` on the little cores read 1.058 at three runs and is 1.006 at ten: the PMU counts
+  (`abyss.bench=mtxpmu`) show the same 84 instructions an operation at two threads on every kernel,
+  and at four threads the mutex is unfair (two of the four workers take nearly every operation, which
+  two varies), so its time is a coin. To do:
+  - `p7`'s ten runs, on the kernel with the TCP fix (`77c4e93`): at `8c3a7ae` the seventh run
+    died in `tcp.connect.lo` when a SYN met a connection that had just ended (a reset, so
+    `ECONNREFUSED` to a live listener, about one loopback run in twenty-five); 150 runs after the fix
+    had none;
   - the SMMU's stage 6 (IOMMU.md §10: sync once per unmap, range invalidation, `rge` and `vtnet`
     transmit bounce, the low-memory check), each after its audit against FreeBSD's design;
   - benchmarks behind inside passing components: `p7` `tcp.rr.lo.p50` (1.40 on the big cores),
-    `tcp.lo.s4` (1.17 at `1f04988`, 1.27 at `8c3a7ae`), `tcp.connect.lo` (1.04); `p6` `pty.raw` (1.04 on the big cores); `p2` `page.miss.t1`
-    (1.04 to 1.05 on the big and all cores) and `rw.wr.t4` (1.055 little);
+    `tcp.lo.s4` (1.17 at `1f04988`, 1.27 at `8c3a7ae`), `tcp.connect.lo` (1.04); `p6` `pty.raw` (1.04
+    on the big cores) and `thr.rwlock.t2` (1.23 on the little); `p2` `page.miss.t1` (1.04 to 1.05 on
+    the big and all cores), and on the little cores `mtx.t4` (1.26), `rw.wr.t4` (1.15), and `sx.wr.t4`
+    (1.03);
   - the little cores' code layout: where the linker puts the kernel's functions moves a benchmark
     20 to 60% either way (ordering the hot functions was measured and dropped). A small change is
     compared there by instructions executed (PMU event `0x08`), not time, until something controls
