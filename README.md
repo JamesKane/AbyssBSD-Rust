@@ -46,10 +46,9 @@ desktop that runs as FreeBSD userland ([ADR-0026](docs/adr/0026-desktop-scoria.m
 
 ## Status
 
-Phases 0 through 8 and the QEMU exit of the USB and input track (U.0–U.6) are complete:
+Phases 0 through 9 and the QEMU exit of the USB and input track (U.0–U.6) are complete:
 unmodified FreeBSD 15.1 boots multi-user and networked on both architectures in QEMU and bhyve,
-and on the Orange Pi 6 Plus (CIX Sky1, ARM64) from its own NVMe. Phase 9 (Sky1 hardening) is under
-way, and the Ryzen 9 7900X / X870E (AMD64) has had its first AbyssBSD boots (Phase 10). See
+and on the Orange Pi 6 Plus (CIX Sky1, ARM64) from its own NVMe, hardened (Phase 9). The Ryzen 9 7900X / X870E (AMD64) has had its first AbyssBSD boots (Phase 10). See
 [docs/ROADMAP.md](docs/ROADMAP.md) for the detail.
 
 - **Boot (Phase 1):** our UEFI loader boots our kernel on x86_64 and aarch64, in QEMU and bhyve.
@@ -105,7 +104,7 @@ way, and the Ryzen 9 7900X / X870E (AMD64) has had its first AbyssBSD boots (Pha
   990 PRO NVMe, root over `ssh`, kernel updated in place, with CPU frequency (`acpi_cppc`) and
   thermal zones as under FreeBSD. AbyssBSD's own drivers cover its firmware-described clocks,
   resets, and power domains, GPIO and I2C, the RX8900 RTC, the PD controllers, and the Realtek NIC.
-- **Sky1 hardening (Phase 9, in progress):**
+- **Sky1 hardening (Phase 9, done 2026-11-25):**
   - An SMMUv3 ended the silent hangs, which were untranslated PCIe DMA: the board uses all its
     RAM, and fsx with `fsck_ffs` passes on its NVMe and a USB disk.
   - The device interfaces and system calls that desktop and development software need run
@@ -121,7 +120,8 @@ way, and the Ryzen 9 7900X / X870E (AMD64) has had its first AbyssBSD boots (Pha
     recorded results, with the SMMU translating. At ten runs every component of `p2` and `p4` to `p7`
     passes on every class (`p4` to `p6` take 0.55 to 0.57 of FreeBSD's time overall, `p2` 0.58 to 0.63,
     and `p7` over the physical NIC 0.43 to 0.49). In bhyve every component of `p2` to `p7` passes.
-    Open: the little cores' code-layout sensitivity.
+    Deferred until needed: single benchmarks behind inside passing components, and the little
+    cores' code-layout sensitivity.
   - The board occasionally does not return from a reboot (four times in about a hundred and forty,
     from both kernels; the firmware's reset path is the suspect), and a power cycle recovers it. It is
     recorded in [docs/compat-deviations.md](docs/compat-deviations.md) with what a next sighting needs.
@@ -144,7 +144,7 @@ way, and the Ryzen 9 7900X / X870E (AMD64) has had its first AbyssBSD boots (Pha
   the EDID. The RTX 4070 is identified, its Video BIOS and firmware read, and the first firmware
   step (FRTS) has run.
 
-Next: finish Phase 9's open items and Phase 10, then self-hosting and hardening (Phase 11, v1.0),
+Next: Phase 10, then self-hosting and hardening (Phase 11, v1.0),
 then RV64, the Rust userland, and the desktop.
 
 ## License

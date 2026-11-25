@@ -452,58 +452,44 @@ EFI `Boot0007` by BootNext from FreeBSD, which stays the default boot), root ove
 kernel updated in place; CPU frequency (`acpi_cppc`) and thermal zones as under FreeBSD. kyua,
 fsx, the `devinfo` comparison, and the performance gate moved to P9; the X870E to P10.
 
-## Phase 9: Sky1 hardening (L)
+## Phase 9: Sky1 hardening (L) — done 2026-11-25
 
 **Goal:** the Orange Pi 6 Plus as dependable as FreeBSD on it, before the second machine comes up:
 no hangs, no reboot loops, nothing that needs the screen, and P8's remaining exit criteria met.
 
-This section lists only what is open. What was built, how it was checked, and the numbers are in git
-(`git log` on the paths named below), in [IOMMU.md](IOMMU.md) §18, in
-[BUILD-AND-TEST.md](BUILD-AND-TEST.md), and in `tests/perf/board/results/`. Done: the bring-up
-defects, the SMMUv3 (stages 0 to 5), the rest of the board (GPIO, I2C, RTC, PD controllers), driver
-selection ([ADR-0021](adr/0021-driver-selection-and-modules.md)), the desktop and development
-software's device interfaces, system calls, and subsystems, kyua on the board (all four areas met),
-and the board's performance harness. Left where they are, as compat-deviations or later milestones:
-graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the AC adapter,
-`/dev/acpi` (M-D); GELI and `crypto(9)` (M-Z); video codec and NPU (post Day 1). Not planned: `pf`,
-`ipfw`, `vlan`, `lagg`, IPsec, NFS, `procfs`, `spigen`, kernel dumps, swap (P11).
+Met. What was built, how it was checked, and the numbers are in git (`git log` on the paths
+named), in [IOMMU.md](IOMMU.md) §18 and §19, in [BUILD-AND-TEST.md](BUILD-AND-TEST.md), and in
+`tests/perf/board/results/`: the bring-up defects, the SMMUv3, the rest of the board (GPIO, I2C,
+RTC, PD controllers, `hcons`/`hsctrl`, `apei`, `sky1_gpt`), driver selection
+([ADR-0021](adr/0021-driver-selection-and-modules.md)), the desktop and development software's
+device interfaces, system calls and subsystems, kyua on the board (all four areas met), the board's
+performance harness and gate (ten fresh-boot runs of `p2` and `p4` to `p7` against the golden
+FreeBSD runs in `tests/perf/board/golden/`: every component passes on every core class), and the
+defects the gate and the boot tier found (the TCP reset to a live listener, `77c4e93`; the
+`aarch64-el2` NVMe INTx hang, `81b276a`). Defects seen once and not reproduced (the board's reset
+failure, the held-key `vt` hang) are recorded in compat-deviations with what a next sighting needs.
+Left where they were: graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery,
+the AC adapter, `/dev/acpi` (M-D); GELI and `crypto(9)` (M-Z); video codec and NPU (post Day 1).
+Not planned: `pf`, `ipfw`, `vlan`, `lagg`, IPsec, NFS, `procfs`, `spigen`, kernel dumps, swap (P11).
 
-**Open:**
-- **Performance** (the exit's gate: every suite within 2% of FreeBSD on the board, per core class,
-  P7's over `rge`). Last reports, ten AbyssBSD runs, each on a fresh boot, against the three
-  golden FreeBSD runs (`tests/perf/board/golden/`): `p4`, `p5`, `p6`
-  (`2026-11-25-8c3a7ae-gate10-p456.txt`, overall 0.55 to 0.57), `p2`
-  (`2026-11-25-8c3a7ae-gate10-p2.txt`, 0.58 to 0.63) and `p7` over `rge`
-  (`2026-11-25-77c4e93-gate10-p7.txt`, 0.43 to 0.49) pass every component on every core class. `p2`'s
-  `mtx` on the little cores read 1.058 at three runs and is 1.006 at ten: the PMU counts
-  (`abyss.bench=mtxpmu`) show the same 84 instructions an operation at two threads on every kernel,
-  and at four threads the mutex is unfair (two of the four workers take nearly every operation, which
-  two varies), so its time is a coin. The ten-run gate also found a TCP defect, fixed in `77c4e93`:
-  a SYN that met a connection which had just ended got a reset (`ECONNREFUSED` to a live listener,
-  about one loopback run in twenty-five; 150 runs after the fix had none). To do:
-  - benchmarks behind inside passing components: `p7` `tcp.rr.lo.p50` (1.40 on the big cores),
-    `tcp.lo.s4` (1.17 at `1f04988`, 1.27 at `8c3a7ae`), `tcp.connect.lo` (1.04); `p6` `pty.raw` (1.04
-    on the big cores) and `thr.rwlock.t2` (1.23 on the little); `p2` `page.miss.t1` (1.04 to 1.05 on
-    the big and all cores), and on the little cores `mtx.t4` (1.26), `rw.wr.t4` (1.15), and `sx.wr.t4`
-    (1.03);
-  - the little cores' code layout: where the linker puts the kernel's functions moves a benchmark
-    20 to 60% either way (ordering the hot functions was measured and dropped). A small change is
-    compared there by instructions executed (PMU event `0x08`), not time, until something controls
-    it;
-  - after `p5` has run in the same boot, `kevent.pipe1000` is 7% slower until a reboot. Each
-    knote's filter is still its own allocation.
-- **`devinfo` against the board's FreeBSD** (tests/corpus/opi6p/freebsd/devinfo-rv.txt): the RX8900,
-  the PD controllers, `hcons` and `hsctrl` attach on the board with FreeBSD's names. What FreeBSD
-  has that AbyssBSD's tree does not is in compat-deviations (Device tree). The media keys deliver
-  events (2026-11-25, a Keychron K2 HE on the board: `hcons0`'s `event5` gave volume up and down,
-  mute, play/pause, next and previous track, and brightness up and down, each as a press and a
-  release; `hsctrl0` saw no key, none being pressed). `apei0` and `sky1_gpt0` attach (2026-11-25; compat-deviations says what is not done).
-- **Small gaps** (compat-deviations): `ichsmb` names, the old `mount(2)` for cd9660, writing BSD
-  labels, `glabel`'s `label/` names, USB isochronous transfers and alternate settings.
-
-**Exit:** the P8 exit criteria on the Orange Pi 6 Plus, every known defect above fixed or recorded in
-compat-deviations with a reason, and kyua and the performance suites run on the board without a
-hang.
+**Deferred, to pick up when something needs them** (none gates a phase; each is recorded where
+named):
+- Benchmarks behind inside passing components: `p7` `tcp.rr.lo.p50` (1.40 on the big cores),
+  `tcp.lo.s4` (1.17 to 1.27), `tcp.connect.lo` (1.04); `p6` `pty.raw` (1.04, big) and `thr.rwlock.t2`
+  (1.23, little); `p2` `page.miss.t1` (1.04 to 1.05), and on the little cores `mtx.t4` (1.26, an unfair
+  mutex at four threads: the time is a coin), `rw.wr.t4` (1.15) and `sx.wr.t4` (1.03). Pick up when a
+  component's geometric mean nears its 2% gate.
+- The little cores' code layout: the linker's placement moves a benchmark 20 to 60% either way.
+  Until something controls it, small changes there are compared by instructions executed (PMU event
+  `0x08`), not time.
+- `kevent.pipe1000` is 7% slower after `p5` in the same boot (each knote's filter is its own
+  allocation).
+- `apei`'s `hest` (error-source records) when a machine with a HEST arrives; `sky1_gpt` as an event
+  timer when an idle state stops the cores' timers; its interrupt (compat-deviations, Device tree).
+- nvme(4) under INTx: an admin command that times out, and a queue in recovery (compat-deviations,
+  Drivers). Pick up with interrupt-driven admin commands, or when a controller without MSI-X turns up.
+- Small gaps (compat-deviations): `ichsmb` names, the old `mount(2)` for cd9660, writing BSD labels,
+  `glabel`'s `label/` names, USB isochronous transfers and alternate settings.
 
 ## Phase 10: Board bring-up, X870E (L)
 
