@@ -741,10 +741,10 @@ Mesa's `radeonsi` on a render node, and runs Sway with hardware rendering. The N
   need the host-data-path flush before the display reads them.
 - **A flip** writes the surface address (high half, then the low half that latches it,
   `HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH` `0xeb2c` and `_ADDRESS` `0xeb28`) with the flip-type bit, and
-  polls the flip-pending bit; it takes 3 to 10 ms and never blanks the panel. Scan-out in place is not possible
-  (buffer objects are system memory and the display reads system memory only through GART pages), so a commit
-  **copies** the client's pixels (forced opaque) into the back one of two video-memory surfaces and flips to it.
-  A plane smaller than the screen is refused.
+  polls the flip-pending bit; it takes 3 to 10 ms and never blanks the panel. A commit **copies** the client's
+  pixels (forced opaque) into the back one of two video-memory surfaces and flips to it, **unless the buffer
+  is the firmware's surface exactly** (the plane at the corner, 1920x1080, pitch 7,680, offset 0): then it is
+  shown in place (§16.14). A plane smaller than the screen is refused.
 - **Vertical blanking** comes from the display's frame-start interrupt (§16.3); the core's timer is the fallback
   while the interrupts are off. Measured 59.998 Hz against the mode's 60.000 Hz.
 - **The console comes back.** Turning the controller off, or the last client on the card's own node closing
@@ -775,8 +775,13 @@ Mesa's `radeonsi` on a render node, and runs Sway with hardware rendering. The N
   is told with the notification drm-kmod sends (`drm_sysfs_connector_hotplug_event` in `AbyssBSD/kmod/drm`):
   `!system=DRM subsystem=CONNECTOR type=HOTPLUG cdev=dri/card<N> connector=<connector id>`, sent after the link
   is trained again. libudev-devd turns it into a "change" event, which wlroots takes as a hot-plug (FreeBSD's
-  linuxkpi makes `kobject_uevent_env` do nothing, so this is the only path). Polling, not the hot-plug interrupt (08 section 2.5,
-  source 9, enable `INT_CONTROL` bit 16): the interrupt control register's offset is not in the specification.
+  linuxkpi makes `kobject_uevent_env` do nothing, so this is the only path). The line's interrupt (IH client 4, source 9, the line in
+  the entry's first data word; `INT_CONTROL` at `0x14f54`, enable bit 16, acknowledge bit 0, polarity bit 8)
+  wakes the watcher at once: the handler acknowledges and flips the polarity to the opposite of the filtered
+  sense (`INT_STATUS` bit 4), the interrupt being level-type, and re-arms after a chip reset (`Irq::restart`).
+  The watcher also looks every second, so a lost interrupt costs a second; a changed sense must hold for half a
+  second. The other four lines are read once a second and a change is logged (no other connector is wired on
+  the boards we have).
   Verified on the X870E: unplug and replug of the HDMI cable (disconnect and connect logged, EDID read, link
   retrained, the console normal afterwards), and with Sway 1.12 (gles2, render node) running: wlroots logs both
   "udev event for card1 (change)" and its hot-plug scans, turns the output off on unplug, sets a mode on replug,
@@ -857,8 +862,11 @@ Mesa's `radeonsi` on a render node, and runs Sway with hardware rendering. The N
   not write it; and with the stream running `AFMT_STATUS` reads `0x40000010` (bit 4, audio enabled),
   `AFMT_AUDIO_PACKET_CONTROL` bit 0 (sample send) set, `HDMI_INFOFRAME_CONTROL0` bit 4 set and
   `AFMT_INFOFRAME_CONTROL0` 0. Which of the three clock-regeneration pairs the hardware picks for a 48 kHz
-  stream is still not established (all three are programmed; 48 kHz works). The audio clock is fixed at
-  148.5 MHz, so audio is 1080p60 only.
+  stream is still not established (all three are programmed; 48 kHz works). **Audio follows the pixel
+  clock:** a mode set redoes the audio clock module (the pixel clock in 100 Hz units) and the three clock
+  regeneration pairs (`hdmi::acr_values`: the HDMI table's N and CTS for 25.175, 25.2, 27, 27.027, 74.25 and
+  148.5 MHz, the formula N 4096/6272/6144 with CTS = clock x N / (128 x rate) for any other) when the audio
+  side is set up; tones were heard clean at 1080p60, 720p60 and 640x480 on the X870E.
 - **EDID over DDC** (`lib/amdgpu/src/ddc.rs`): the display core's hardware I2C engine (08 section 4.7):
   arbitration, pin hand-over (all restored on every path), up to four transactions per run (segment pointer,
   offset write, read). `MICROSECOND_TIME_BASE_DIV` reads `0x00120218` rather than the `0x00120264` the
@@ -881,7 +889,7 @@ Mesa's `radeonsi` on a render node, and runs Sway with hardware rendering. The N
   platform firmware retrains the link) recovers it.
 - **Verified on the X870E** (Dell ST2421L, user-observed): 1080p60, 1080p50 (50.332 Hz), 720p60 and 720p50
   (74.25 MHz), 480p (27 MHz), 576p50, 640x480 (25.175 MHz), each stable, each returning to 1080p60. Not done:
-  modes above 148.5 MHz or interlaced; a different active size beyond the plane's top-left crop; in-driver
+  modes above 148.5 MHz (§16.14) or interlaced (§16.14); a different active size beyond the plane's top-left crop; in-driver
   recovery of a lost signal; hot-plug.
 - **A process rule from this work:** a display-changing command runs only after the user has agreed to it, one
   command at a time; never bundle one with its harmless pre-check.
@@ -989,13 +997,12 @@ reboot (always set `BootNext` first so the board does not boot Fedora).
 
 ### 16.10 Not built
 
-- Fence dependencies between jobs of this driver on different rings (the job's buffers carry its fence, and a
-  job waits only for fences that came from outside; two of the driver's own rings that share a buffer are not
-  ordered), and `DRM_IOCTL_SYNCOBJ_*` deadline hints (`deadline_nsec` is read and ignored).
-- Hot-plug by interrupt (needs the line's interrupt control offset from the specification); the hot-plug
-  event for the other connector types (only HDMI-A-1 is watched).
+- Interlaced modes and pixel clocks above 148.5 MHz (§16.14); a clock action for deadline hints.
+- Hot-plug events for connectors other than HDMI-A-1 (no other is wired on the X870E; their lines' senses are
+  logged).
 - Compute and graphics preemption verification; the wave-kill soft recovery; the DMA reset's freeze step.
-- Scanning out clients' buffers in place (a GART-mapped scan-out path) instead of copying.
+- Scan-out in place for buffers that are not exactly the firmware's surface (other sizes, pitches, modes
+  other than 1080p60); they are copied.
 - Sound over HDMI through the sound engine (`/dev/dsp`, docs/AUDIO.md); the Navi 22 (Z690-A) bring-up; the half-speed-after-reset cause (§16.8).
 
 ### 16.11 HDMI audio: the stream half
@@ -1079,4 +1086,47 @@ the refusals (a plain syncobj descriptor, an empty syncobj, a bad descriptor) ar
   transferred to a binary object), an eventfd signalled when a job finishes and when a fence arrives, and a
   dma-buf whose job fence is exported as a sync file, imported back and exported again; three runs in a row
   with `amdrender`, glmark2 (terrain 425 FPS) and `amdhang` unchanged.
+
+### 16.14 Scan-out in place, ordering, deadlines, modes and link health
+
+- **Scan-out in place** (`lib/amdgpu/src/scanout.rs`, `drivers/drmn/src/kms.rs`, `drivers/amd-kms`; 08 section
+  2.3.1). The display hub's context 0 is programmed as a copy of the GART (`DCN_VM_CONTEXT0_CNTL` `0xe864` 0,
+  start 0, end `0x3ffff`, base `0xe868`/`0xe86c` the table's physical address with VALID, the low half last and
+  polled; `HUBPREQ0_DCN_VM_MX_L1_TLB_CNTL` `0xec0c` = `0x19`), once, after the hubs are set up. A buffer that is
+  exactly the firmware's surface (`in_place_fits`) has its pages mapped into one of two 16 MiB slots of the GART
+  (at `0x2000_0000` and `0x2100_0000`; entries valid, system, readable, writeable, executable, **uncached and
+  not snooped**), written back from the processor's caches (`DmaMemory::clean`, which is now `clflush` on x86),
+  the hubs' VMID 0 invalidated, and the surface address flipped to the slot's GART address. The slot not on
+  show is the one written. The `Gem` is held (its pages with it) until the display has moved off it; the console
+  restore and the panic path write the firmware's surface address as before, and the copy path takes every
+  buffer that does not fit. Verified on the X870E: a gradient from 8 MiB of system memory
+  (`dev.drmn.1.scanout_test`, no hub fault, 180 frames in 3 s), then Sway 1.12 with the glmark2 jellyfish
+  (13,661 pictures shown in place by `dev.drmn.1.scanout`), drawn correctly, console back on exit. Open: the
+  specification's start of the display's rIOMMU and the programming of context 15 are not needed on this board;
+  buffers of other sizes or pitches, and modes other than 1080p60, are still copied.
+- **Cross-ring ordering.** A reservation entry carries the ring that owns the fence (or `EXTERNAL`); a job waits
+  for the unfinished fences on its buffers except those of its own ring (which orders its own jobs). The buffers
+  come from the `BO_LIST` entries or, as Mesa sends them, the inline `BO_HANDLES` chunk (`render` sysctl: 1,722
+  of 1,811 submissions in a glmark2 run). `tests/graphics/amdsync.c`: a long graphics job and then a compute job
+  on the same buffer, 20 of 20 times the first job is finished when the second submission returns (0 of 20 with
+  no list).
+- **Deadline hints.** `WAIT_DEADLINE` (flag 8, the `deadline_nsec` after the padding of both wait layouts;
+  other flags are `EINVAL`) tells each unfinished fence the deadline once (`Fence::set_deadline`). The Radeon
+  counts them (`render` sysctl) and has no clock to raise: the power firmware runs the engine at its top clock
+  (2,200 MHz) under load.
+- **Hot-plug** is by interrupt (§16.2), and the watcher also keeps a link's health.
+- **Lost-link recovery.** Once a second, if the link was healthy since the last mode set, the encoder's FIFO
+  (`DIG_FIFO_STATUS` `0x15544`: bit 29 calibrated, bit 0 level error; `0x22099000` healthy) is read; three bad
+  looks in a row train the link again (`relink_now`), up to three times, then it is left alone and logged.
+  `dev.drmn.<unit>.link_break` (the transmitter off through the display firmware) makes the test: the driver
+  found the link down within 3 s and brought the picture back. The recovery uses the working link's saved front
+  end connection (a link already taken down has none; the first version restored an empty one and stayed blank).
+- **Interlaced modes: not supported.** DCN 3.1.5 has no progressive-to-interlace converter and the HUBP no field
+  fetch (08 section 3.7.9, which also records that the reference never drives interlace and leaves the field
+  line values, the second field's half line and the per-field fetch open); the panel's 1080i, 480i and 576i
+  modes would need the surface address switched every field by software with the field timing of an unverified
+  register path. The card does not offer them.
+- **Pixel clocks above 148.5 MHz: not built, unverified.** The sink on the X870E (a Dell ST2421L) takes at most
+  1080p60, and no other display is available; a 4K mode would also need larger surfaces than the card makes
+  and, above 340 MHz, the SCDC scrambling handshake (08 section 3.7.8). Nothing was run for it.
 
