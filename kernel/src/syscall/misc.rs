@@ -1045,6 +1045,7 @@ fn kcmp_object(f: &Arc<crate::fs::file::File>) -> (u8, usize) {
         K::Kqueue(_) => (10, file),
         K::Inotify(_) => (11, file),
         K::DmaBuf(d) => (12, Arc::as_ptr(d).addr()),
+        K::SyncFile(d) => (13, Arc::as_ptr(d).addr()),
     }
 }
 

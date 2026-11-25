@@ -147,6 +147,16 @@ fn setup() {
                 t.push((buf, cloexec, rdwr));
                 Ok(100 + i32::try_from(t.len()).unwrap())
             },
+            export_syncfile: |_, file, _| {
+                let mut t = SYNC_FILES.lock().unwrap();
+                t.push(file);
+                Ok(200 + i32::try_from(t.len()).unwrap())
+            },
+            import_syncfile: |_, fd| {
+                let t = SYNC_FILES.lock().unwrap();
+                let i = usize::try_from(fd - 201).map_err(|_| Errno::EBADF)?;
+                t.get(i).cloned().ok_or(Errno::EBADF)
+            },
             import_dmabuf: |_, fd| {
                 let t = DESCRIPTORS.lock().unwrap();
                 let i = usize::try_from(fd - 101).map_err(|_| Errno::EBADF)?;
@@ -162,6 +172,9 @@ static USER: std::sync::OnceLock<&'static Arena> = std::sync::OnceLock::new();
 
 /// The descriptors the mock kernel has handed out for dma-bufs, from 101.
 static DESCRIPTORS: Mutex<Vec<(Arc<crate::DmaBuf>, bool, bool)>> = Mutex::new(Vec::new());
+
+/// The descriptors the mock kernel has handed out for sync files, from 201.
+static SYNC_FILES: Mutex<Vec<Arc<crate::SyncFile>>> = Mutex::new(Vec::new());
 
 type Timer = (usize, fn(&Sleepable, usize));
 static TIMERS: Mutex<Vec<Timer>> = Mutex::new(Vec::new());
@@ -2644,4 +2657,194 @@ fn the_console_comes_back_when_the_last_file_on_the_cards_own_node_closes() {
     drop(b);
     assert_eq!(*lasts.lock().unwrap(), 1);
     c.unregister(&s());
+}
+
+/// A fence a test finishes by hand, and that wakes whoever asked to be told.
+#[derive(Default)]
+struct Gate {
+    open: std::sync::atomic::AtomicBool,
+    wakers: Mutex<Vec<Arc<dyn vfs::event::Wake>>>,
+}
+
+impl Gate {
+    fn finish(&self) {
+        self.open.store(true, std::sync::atomic::Ordering::SeqCst);
+        let ws: Vec<_> = self.wakers.lock().unwrap().drain(..).collect();
+        for w in ws {
+            w.wake();
+        }
+    }
+}
+
+impl crate::Fence for Gate {
+    fn signaled(&self) -> bool {
+        self.open.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn register(&self, w: &Arc<dyn vfs::event::Wake>) {
+        self.wakers.lock().unwrap().push(Arc::clone(w));
+    }
+}
+
+/// Counts the times it was woken.
+#[derive(Default)]
+struct Counter(std::sync::atomic::AtomicU32);
+
+impl vfs::event::Wake for Counter {
+    fn wake(&self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn a_sync_file_is_readable_once_its_fence_finishes_and_wakes_the_poller() {
+    use abi::event::{POLLIN, POLLRDNORM};
+    let gate = Arc::new(Gate::default());
+    let sf = crate::SyncFile::new(std::vec![gate.clone() as Arc<dyn crate::Fence>]);
+    let count = Arc::new(Counter::default());
+    let waker: Arc<dyn vfs::event::Wake> = count.clone();
+    // Not ready; the poller is recorded.
+    assert_eq!(sf.poll(POLLIN | POLLRDNORM, Some(&waker)), 0);
+    assert!(!sf.signaled());
+    assert_eq!(count.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    gate.finish();
+    // The fence announced itself; the poller was woken, and it is ready.
+    assert_eq!(count.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(sf.poll(POLLIN | POLLRDNORM, None), POLLIN | POLLRDNORM);
+    // A sync file of nothing is done.
+    assert!(crate::SyncFile::new(Vec::new()).signaled());
+}
+
+#[test]
+fn a_merged_sync_file_waits_for_every_fence_and_drops_repeats() {
+    use abi::event::POLLIN;
+    let (g1, g2) = (Arc::new(Gate::default()), Arc::new(Gate::default()));
+    let a = crate::SyncFile::new(std::vec![g1.clone() as Arc<dyn crate::Fence>]);
+    let b = crate::SyncFile::new(std::vec![
+        g1.clone() as Arc<dyn crate::Fence>,
+        g2.clone() as Arc<dyn crate::Fence>
+    ]);
+    let m = crate::SyncFile::merge(&a, &b).unwrap();
+    assert_eq!(m.len(), 2);
+    let count = Arc::new(Counter::default());
+    let waker: Arc<dyn vfs::event::Wake> = count.clone();
+    assert_eq!(m.poll(POLLIN, Some(&waker)), 0);
+    // One of two: not ready, and no wake.
+    g1.finish();
+    assert_eq!(m.poll(POLLIN, None), 0);
+    assert_eq!(count.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    g2.finish();
+    assert_eq!(count.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(m.poll(POLLIN, None), POLLIN);
+}
+
+#[test]
+fn a_synchronisation_object_exports_a_sync_file_and_takes_one_back() {
+    let c = card(true, true);
+    let f = open(&c);
+    let req = |nr: u32, size: u32| 0xc000_0000u32 | (size << 16) | (0x64 << 8) | nr;
+    let gate = Arc::new(Gate::default());
+    // A syncobj holding the gate's fence (as a driver's submission puts it).
+    let mut create = [0u8; 8];
+    call(&f, req(0xbf, 8), &mut create).unwrap();
+    let h = u32::from_le_bytes(create[..4].try_into().unwrap());
+    *f.syncobjs.lock().get(h).unwrap().lock() = Some(gate.clone() as Arc<dyn crate::Fence>);
+    // Export: handle, flags EXPORT_SYNC_FILE, then the descriptor.
+    let mut e = [0u8; 24];
+    e[..4].copy_from_slice(&h.to_le_bytes());
+    e[4..8].copy_from_slice(&1u32.to_le_bytes());
+    call(&f, req(0xc1, 24), &mut e).unwrap();
+    let fd = i32::from_le_bytes(e[8..12].try_into().unwrap());
+    let sf = SYNC_FILES.lock().unwrap()[usize::try_from(fd - 201).unwrap()].clone();
+    assert!(!sf.signaled());
+    gate.finish();
+    assert!(sf.signaled());
+    // No descriptor of the syncobj itself, and no unknown flag.
+    e[4..8].copy_from_slice(&0u32.to_le_bytes());
+    assert_eq!(call(&f, req(0xc1, 24), &mut e), Err(Errno::EOPNOTSUPP));
+    e[4..8].copy_from_slice(&4u32.to_le_bytes());
+    assert_eq!(call(&f, req(0xc1, 24), &mut e), Err(Errno::EINVAL));
+    // An empty syncobj has nothing to export.
+    let mut create = [0u8; 8];
+    call(&f, req(0xbf, 8), &mut create).unwrap();
+    let empty = u32::from_le_bytes(create[..4].try_into().unwrap());
+    let mut e2 = [0u8; 24];
+    e2[..4].copy_from_slice(&empty.to_le_bytes());
+    e2[4..8].copy_from_slice(&1u32.to_le_bytes());
+    assert_eq!(call(&f, req(0xc1, 24), &mut e2), Err(Errno::EINVAL));
+    // Import into a new syncobj, and into the empty one.
+    let mut i = [0u8; 24];
+    i[4..8].copy_from_slice(&1u32.to_le_bytes());
+    i[8..12].copy_from_slice(&fd.to_le_bytes());
+    call(&f, req(0xc2, 24), &mut i).unwrap();
+    let new = u32::from_le_bytes(i[..4].try_into().unwrap());
+    assert!(
+        f.syncobjs
+            .lock()
+            .get(new)
+            .unwrap()
+            .lock()
+            .as_ref()
+            .unwrap()
+            .signaled()
+    );
+    let mut j = [0u8; 24];
+    j[..4].copy_from_slice(&empty.to_le_bytes());
+    j[4..8].copy_from_slice(&1u32.to_le_bytes());
+    j[8..12].copy_from_slice(&fd.to_le_bytes());
+    call(&f, req(0xc2, 24), &mut j).unwrap();
+    assert!(f.syncobjs.lock().get(empty).unwrap().lock().is_some());
+    // A descriptor that is not one.
+    j[8..12].copy_from_slice(&999i32.to_le_bytes());
+    assert_eq!(call(&f, req(0xc2, 24), &mut j), Err(Errno::EBADF));
+}
+
+#[test]
+fn the_sync_file_requests_merge_and_describe() {
+    let (g1, g2) = (Arc::new(Gate::default()), Arc::new(Gate::default()));
+    let a = crate::SyncFile::new(std::vec![g1.clone() as Arc<dyn crate::Fence>]);
+    let b = crate::SyncFile::new(std::vec![g2.clone() as Arc<dyn crate::Fence>]);
+    setup();
+    // The other file is in the mock's table.
+    let base = SYNC_FILES.lock().unwrap().len();
+    SYNC_FILES.lock().unwrap().push(b.clone());
+    let fd2 = i32::try_from(201 + base).unwrap();
+    // Merge.
+    let mut m = [0u8; 48];
+    m[32..36].copy_from_slice(&fd2.to_le_bytes());
+    crate::sync_file::ioctl(&a, &s(), abi::drm::SYNC_IOC_MERGE, &mut m).unwrap();
+    let out = i32::from_le_bytes(m[36..40].try_into().unwrap());
+    let merged = SYNC_FILES.lock().unwrap()[usize::try_from(out - 201).unwrap()].clone();
+    assert_eq!(merged.len(), 2);
+    // Flags and padding must be zero.
+    m[40] = 1;
+    assert_eq!(
+        crate::sync_file::ioctl(&a, &s(), abi::drm::SYNC_IOC_MERGE, &mut m),
+        Err(Errno::EINVAL)
+    );
+    // Info: the first call says how many; status 0 while going.
+    let mut info = [0u8; 56];
+    crate::sync_file::ioctl(&merged, &s(), abi::drm::SYNC_IOC_FILE_INFO, &mut info).unwrap();
+    assert_eq!(u32_of(&info, 40), 2);
+    assert_eq!(u32_of(&info, 32), 0);
+    assert_eq!(&info[..4], b"sync");
+    // With room for two, they are written (to the mock's user memory).
+    info[40..44].copy_from_slice(&2u32.to_le_bytes());
+    info[48..56].copy_from_slice(&(BASE + 0xa000).to_le_bytes());
+    crate::sync_file::ioctl(&merged, &s(), abi::drm::SYNC_IOC_FILE_INFO, &mut info).unwrap();
+    g1.finish();
+    g2.finish();
+    let mut info = [0u8; 56];
+    crate::sync_file::ioctl(&merged, &s(), abi::drm::SYNC_IOC_FILE_INFO, &mut info).unwrap();
+    assert_eq!(u32_of(&info, 32), 1);
+    // Too little room, and an unknown request.
+    info[40..44].copy_from_slice(&1u32.to_le_bytes());
+    info[48..56].copy_from_slice(&(BASE + 0xa000).to_le_bytes());
+    assert_eq!(
+        crate::sync_file::ioctl(&merged, &s(), abi::drm::SYNC_IOC_FILE_INFO, &mut info),
+        Err(Errno::EINVAL)
+    );
+    assert_eq!(
+        crate::sync_file::ioctl(&merged, &s(), 0x1234, &mut info),
+        Err(Errno::ENOTTY)
+    );
 }

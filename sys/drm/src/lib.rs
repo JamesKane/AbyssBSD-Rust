@@ -29,6 +29,7 @@ pub mod gem;
 mod ioctl;
 pub mod kms;
 mod kms_ioctl;
+pub mod sync_file;
 pub mod syncobj;
 #[cfg(test)]
 mod tests;
@@ -38,6 +39,7 @@ pub use build::{KmsBuilder, in_formats_blob};
 pub use card::{Card, Open, panic_restore, register, retire_firmware_cards};
 pub use dmabuf::DmaBuf;
 pub use driver::{DriverInfo, DrmDriver, DumbLimits, IoctlCx};
+pub use sync_file::SyncFile;
 pub use syncobj::{Done, Fence};
 
 use abi::errno::Errno;
@@ -86,6 +88,13 @@ pub struct Env {
     /// The dma-buf the calling process's descriptor names: `EBADF` for
     /// no such descriptor, `EINVAL` for one that is not a dma-buf.
     pub import_dmabuf: fn(&sched::Sleepable, i32) -> Result<alloc::sync::Arc<DmaBuf>, Errno>,
+    /// Gives the calling process a descriptor for a sync file: close on
+    /// exec if the flag is set.
+    pub export_syncfile:
+        fn(&sched::Sleepable, alloc::sync::Arc<SyncFile>, bool) -> Result<i32, Errno>,
+    /// The sync file the calling process's descriptor names: `EBADF` for
+    /// no such descriptor, `EINVAL` for one that is not a sync file.
+    pub import_syncfile: fn(&sched::Sleepable, i32) -> Result<alloc::sync::Arc<SyncFile>, Errno>,
 }
 
 static ENV: Once<Env> = Once::new();

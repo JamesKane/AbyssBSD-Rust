@@ -409,6 +409,7 @@ dependencies = [
  "sched",
  "sync",
  "sysctl",
+ "vfs",
  "vgapci",
  "vm",
 ]

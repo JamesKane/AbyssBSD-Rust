@@ -256,6 +256,9 @@ pub(crate) enum FileKind {
     /// AbyssBSD addition: FreeBSD's `drm-kmod` keeps these inside its
     /// Linux compatibility layer).
     DmaBuf(Arc<drm::DmaBuf>),
+    /// A sync file: it is readable once its fences have finished (an
+    /// AbyssBSD addition, as the dma-buf is).
+    SyncFile(Arc<drm::SyncFile>),
 }
 
 /// An open file.
@@ -360,6 +363,7 @@ impl File {
             | FileKind::Eventfd(_)
             | FileKind::Inotify(_)
             | FileKind::DmaBuf(_)
+            | FileKind::SyncFile(_)
             | FileKind::Pts(_) => None,
         }
     }
@@ -432,8 +436,9 @@ impl File {
             FileKind::Timerfd(t) => t.read(s, uio, self.nonblock()),
             FileKind::Eventfd(e) => e.read(s, uio, self.nonblock()),
             FileKind::Inotify(i) => i.read(s, uio, self.nonblock()),
-            // Memory is reached by mapping it.
-            FileKind::DmaBuf(_) => Err(Errno::EINVAL),
+            // Memory is reached by mapping it, and a sync file is waited
+            // for with `poll`.
+            FileKind::DmaBuf(_) | FileKind::SyncFile(_) => Err(Errno::EINVAL),
         }
     }
 
@@ -469,6 +474,7 @@ impl File {
             | FileKind::Eventfd(_)
             | FileKind::Inotify(_)
             | FileKind::DmaBuf(_)
+            | FileKind::SyncFile(_)
             | FileKind::Pts(_) => Err(Errno::ESPIPE),
         }
     }
@@ -516,7 +522,7 @@ impl File {
             FileKind::Eventfd(e) => e.write(s, uio, self.nonblock()),
             // `invfo_rdwr`.
             FileKind::Inotify(_) => Err(Errno::EOPNOTSUPP),
-            FileKind::DmaBuf(_) => Err(Errno::EINVAL),
+            FileKind::DmaBuf(_) | FileKind::SyncFile(_) => Err(Errno::EINVAL),
         }
     }
 
@@ -543,6 +549,7 @@ impl File {
             | FileKind::Eventfd(_)
             | FileKind::Inotify(_)
             | FileKind::DmaBuf(_)
+            | FileKind::SyncFile(_)
             | FileKind::Pts(_) => Err(Errno::ESPIPE),
             FileKind::Shm(m) => {
                 let at = u64::try_from(offset).map_err(|_| Errno::EINVAL)?;
@@ -649,6 +656,10 @@ impl File {
                 st_blksize: 4096,
                 ..Stat::default()
             }),
+            FileKind::SyncFile(_) => Ok(Stat {
+                st_mode: abi::stat::S_IFREG | 0o600,
+                ..Stat::default()
+            }),
         }
     }
 
@@ -700,8 +711,9 @@ impl File {
             FileKind::Timerfd(t) => t.poll(events, w),
             FileKind::Eventfd(e) => e.poll(events, w),
             FileKind::Inotify(i) => i.poll(events, w),
-            // Always ready: there are no fences to wait on yet.
+            // Memory is always ready.
             FileKind::DmaBuf(_) => vfs::node::poll_no_poll(events),
+            FileKind::SyncFile(f) => f.poll(events, w),
             FileKind::Pts(m) => m.poll(events, w),
         }
     }
@@ -734,6 +746,10 @@ impl File {
             FileKind::Process(_) | FileKind::Jail(_) | FileKind::Shm(_) | FileKind::DmaBuf(_) => {
                 Err(Errno::EINVAL)
             }
+            FileKind::SyncFile(f) if kev.filter == abi::event::EVFILT_READ => {
+                Ok(alloc::boxed::Box::new(SyncFileFilter(Arc::clone(f))))
+            }
+            FileKind::SyncFile(_) => Err(Errno::EINVAL),
             FileKind::Kqueue(k) if kev.filter == abi::event::EVFILT_READ => Ok(
                 alloc::boxed::Box::new(event::KqueueFilter(Arc::clone(&k.kq))),
             ),
@@ -863,6 +879,11 @@ impl File {
                 FIONBIO | FIOASYNC => Ok(0),
                 abi::drm::DMA_BUF_IOCTL_SYNC => Ok(0),
                 _ => Err(Errno::ENOTTY),
+            },
+            // The sync file's own requests: merge, and describe.
+            FileKind::SyncFile(f) => match req {
+                FIONBIO | FIOASYNC => Ok(0),
+                _ => drm::sync_file::ioctl(f, s, req, arg),
             },
             FileKind::Fifo(f) => match req {
                 FIONREAD => {
@@ -1002,5 +1023,29 @@ impl File {
     /// A file back from a message in flight.
     pub(crate) fn from_passable(f: Arc<dyn socket::Passable>) -> Option<Arc<Self>> {
         f.into_any().downcast::<Self>().ok()
+    }
+}
+
+/// The filter for `EVFILT_READ` on a sync file: ready once its fences have
+/// finished.
+struct SyncFileFilter(Arc<drm::SyncFile>);
+
+impl event::Filter for SyncFileFilter {
+    fn attach(&self, kn: &Arc<event::Knote>) -> Result<(), Errno> {
+        self.0.notify().add(kn);
+        Ok(())
+    }
+
+    fn detach(&self, kn: &event::Knote) {
+        self.0.notify().remove(kn);
+    }
+
+    fn event(&self, _kn: &event::Knote, note: &mut event::Note, _hint: u64) -> bool {
+        note.kev.data = i64::from(self.0.signaled());
+        self.0.signaled()
+    }
+
+    fn fork(&self, _kn: &event::Knote) -> Option<alloc::boxed::Box<dyn event::Filter>> {
+        Some(alloc::boxed::Box::new(Self(Arc::clone(&self.0))))
     }
 }

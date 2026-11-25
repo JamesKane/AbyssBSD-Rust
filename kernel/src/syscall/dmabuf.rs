@@ -50,3 +50,39 @@ pub(crate) fn import(s: &Sleepable, fd: i32) -> Result<Arc<drm::DmaBuf>, Errno> 
         _ => Err(Errno::EINVAL),
     }
 }
+
+/// A new descriptor in the calling process for the sync file `file`: close
+/// on exec if `cloexec`.
+pub(crate) fn export_syncfile(
+    s: &Sleepable,
+    file: Arc<drm::SyncFile>,
+    cloexec: bool,
+) -> Result<i32, Errno> {
+    let p = process()?;
+    let limit = super::io::max_files(&p);
+    p.files.lock(s).alloc(
+        File::new(FileKind::SyncFile(file), FREAD)?,
+        FdFlags {
+            cloexec,
+            clofork: false,
+            resolve_beneath: false,
+        },
+        0,
+        limit,
+    )
+}
+
+/// The sync file the calling process's descriptor `fd` names.
+///
+/// # Errors
+///
+/// `EBADF` for no such descriptor; `EINVAL` for one that is not a sync
+/// file.
+pub(crate) fn import_syncfile(s: &Sleepable, fd: i32) -> Result<Arc<drm::SyncFile>, Errno> {
+    let fd = u64::try_from(fd).map_err(|_| Errno::EBADF)?;
+    let f = super::io::current_file(s, fd, &crate::capsicum::rights::EVENT)?;
+    match f.kind() {
+        FileKind::SyncFile(d) => Ok(Arc::clone(d)),
+        _ => Err(Errno::EINVAL),
+    }
+}

@@ -335,6 +335,13 @@ pub const DMA_BUF_SYNC_END: u64 = 1 << 2;
 /// 64-bit flags word.
 pub const DMA_BUF_IOCTL_SYNC: u32 = ioc_of(IOC_IN, DMA_BUF_BASE, 0, 8);
 
+/// `SYNC_IOC_MAGIC`: the group letter of the sync file requests.
+pub const SYNC_IOC_MAGIC: u8 = b'>';
+/// `SYNC_IOC_MERGE`: `_IOWR('>', 3, struct sync_merge_data)` (48 bytes).
+pub const SYNC_IOC_MERGE: u32 = ioc_of(IOC_IN | IOC_OUT, SYNC_IOC_MAGIC, 3, 48);
+/// `SYNC_IOC_FILE_INFO`: `_IOWR('>', 4, struct sync_file_info)` (56 bytes).
+pub const SYNC_IOC_FILE_INFO: u32 = ioc_of(IOC_IN | IOC_OUT, SYNC_IOC_MAGIC, 4, 56);
+
 pub const DRM_IOCTL_VERSION: u32 = iowr(0x00, size_of::<DrmVersion>());
 pub const DRM_IOCTL_GET_UNIQUE: u32 = iowr(0x01, size_of::<DrmUnique>());
 pub const DRM_IOCTL_GET_MAGIC: u32 = ior(0x02, size_of::<DrmAuth>());
