@@ -88,6 +88,8 @@ pub(crate) struct Amd {
     me: Weak<Amd>,
     /// A mode set is running (one at a time).
     modeset_busy: core::sync::atomic::AtomicBool,
+    /// The graphics ring, once started (stage R4).
+    gfx: SpinLock<Option<crate::gcring::Gfx>>,
 }
 
 /// Where the GART's page table is in video memory (BAR0 offset): past the
@@ -137,6 +139,7 @@ impl Amd {
             link_saved: SpinLock::new(None),
             me,
             modeset_busy: core::sync::atomic::AtomicBool::new(false),
+            gfx: SpinLock::new(None),
         }
     }
 
@@ -707,6 +710,30 @@ impl Amd {
             }
             Err(e) => self.log(format_args!("PSP: stopped: {e:?}")),
         }
+    }
+
+    /// Starts graphics ring 0 and runs the ring test (stages R4.2 to R4.4);
+    /// the engines' firmware must be loaded (`gc_fw`). Run again, it only
+    /// repeats the test.
+    pub(crate) fn gc_ring(&self) -> Result<(), abi::errno::Errno> {
+        use abi::errno::Errno;
+        let gpu = self.gpu()?;
+        let log = |args: core::fmt::Arguments<'_>| self.log(args);
+        let mut slot = self.gfx.lock().take();
+        if slot.is_none() {
+            match crate::gcring::start(&gpu, &log) {
+                Ok(g) => slot = Some(g),
+                Err(e) => {
+                    self.log(format_args!("GC: ring not started: {e:?}"));
+                    return Err(Errno::EIO);
+                }
+            }
+        }
+        let ok = slot
+            .as_mut()
+            .is_some_and(|g| crate::gcring::test(&gpu, g, &log));
+        *self.gfx.lock() = slot;
+        if ok { Ok(()) } else { Err(Errno::EIO) }
     }
 
     /// Logs the graphics block's state (reads only; see `gcload::snapshot`).
@@ -1508,6 +1535,11 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             "link_reconnect",
             "Write 1 to put the encoder's front end back as before the last clock change (an experiment on a lost signal)",
             Amd::link_reconnect,
+        ),
+        (
+            "gc_ring",
+            "Write 1 to start graphics ring 0 and run the ring test (after gc_fw); again, only the test",
+            Amd::gc_ring,
         ),
         (
             "gc_probe",

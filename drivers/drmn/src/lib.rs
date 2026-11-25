@@ -29,6 +29,7 @@ mod amd;
 mod control;
 mod dmcub;
 mod gcload;
+mod gcring;
 mod interrupt;
 mod kms;
 mod psp;

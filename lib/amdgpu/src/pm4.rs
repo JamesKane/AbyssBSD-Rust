@@ -110,7 +110,11 @@ impl Packets {
     }
 
     fn packet(&mut self, opcode: u8, compute: bool, body: &[u32]) -> &mut Self {
-        self.0.push(header(opcode, u32::try_from(body.len()).unwrap_or(0x4000), compute));
+        self.0.push(header(
+            opcode,
+            u32::try_from(body.len()).unwrap_or(0x4000),
+            compute,
+        ));
         self.0.extend_from_slice(body);
         self
     }
