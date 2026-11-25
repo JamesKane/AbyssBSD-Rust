@@ -12,6 +12,66 @@ use super::{Amd, Bar5};
 use amdgpu::{display, regs};
 
 impl Amd {
+    /// Preempts the DMA engine's queue and lets it run again (07 section 8),
+    /// and logs whether its fence appeared.
+    pub(crate) fn sdma_preempt(&self) -> Result<(), abi::errno::Errno> {
+        let gpu = self.gpu()?;
+        let mut g = self.sdma_lock();
+        let sdma = g.as_mut().ok_or(abi::errno::Errno::ENXIO)?;
+        let ok = sdma.preempt(&gpu, 0x7e57_d11a);
+        self.log(format_args!(
+            "SDMA: preempt: the fence was {}",
+            if ok { "written" } else { "NOT written" }
+        ));
+        if ok {
+            Ok(())
+        } else {
+            Err(abi::errno::Errno::EIO)
+        }
+    }
+
+    /// Preempts each compute queue without unmapping it (10 section 4.3,
+    /// action 3) and logs whether the processor wrote the queue's fence
+    /// word: the preemption primitive, run on idle queues.
+    pub(crate) fn gc_preempt(&self) -> Result<(), abi::errno::Errno> {
+        let gpu = self.gpu()?;
+        let mut g = self.gfx_lock();
+        let gfx = g.as_mut().ok_or(abi::errno::Errno::ENXIO)?;
+        let mut all = true;
+        for n in 0..gfx.compute_rings() {
+            let value = 0x7e57_0000 | u32::try_from(n).unwrap_or(0);
+            match gfx.preempt_compute(&gpu, n, value) {
+                Ok(true) => self.log(format_args!(
+                    "GC: compute queue {n} preempted (fence {value:#x})"
+                )),
+                Ok(false) => {
+                    all = false;
+                    self.log(format_args!(
+                        "GC: compute queue {n}: the preempt fence was NOT written"
+                    ));
+                }
+                Err(e) => {
+                    all = false;
+                    self.log(format_args!(
+                        "GC: compute queue {n}: preempt stopped: {e:?}"
+                    ));
+                }
+            }
+            // A preempted queue does not run again by itself: reset it.
+            let log = |args: core::fmt::Arguments<'_>| self.log(args);
+            if let Err(e) = gfx.reset_compute(&gpu, n, &log) {
+                self.log(format_args!(
+                    "GC: compute queue {n}: reset after it stopped: {e:?}"
+                ));
+            }
+        }
+        if all {
+            Ok(())
+        } else {
+            Err(abi::errno::Errno::EIO)
+        }
+    }
+
     /// Tests whether BAR0 is the same memory as the video memory the display
     /// and the index registers see: words at the firmware's framebuffer are
     /// compared between the two paths, and then two words in unused memory
@@ -741,6 +801,16 @@ pub(super) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             "gc_ring",
             "Write 1 to start graphics ring 0 and run the ring test (after gc_fw); again, only the test",
             Amd::gc_ring,
+        ),
+        (
+            "sdma_preempt",
+            "Write 1 to preempt the DMA engine's queue and let it run again, and log whether its fence was written",
+            Amd::sdma_preempt,
+        ),
+        (
+            "gc_preempt",
+            "Write 1 to preempt each compute queue without unmapping it, log whether the fence was written, then reset the queue (a preempted queue does not run again by itself)",
+            Amd::gc_preempt,
         ),
         (
             "gc_hang",

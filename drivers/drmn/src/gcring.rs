@@ -96,6 +96,7 @@ const COMPUTE_REPORT: u64 = 0x1_0000;
 const COMPUTE_POLL: u64 = 0x1_0100;
 const COMPUTE_SEQ: u64 = 0x1_0200;
 const COMPUTE_TEST: u64 = 0x1_0300;
+const COMPUTE_PREEMPT: u64 = 0x1_0380;
 const COMPUTE_MQD: u64 = 0x1_1000;
 const COMPUTE_EOP: u64 = 0x1_2000;
 const COMPUTE_QUEUES: u32 = 8;
@@ -406,6 +407,23 @@ pub(crate) fn start(
     })
 }
 
+/// Where compute queue `n`'s memory is (a video memory offset) and what the
+/// queue descriptor says about it.
+fn compute_queue(base: u64, n: u32) -> (Queue, u64) {
+    let at = COMPUTE_AT + u64::from(n) * COMPUTE_STRIDE;
+    let (_, _, doorbell, _) = mqd::kernel_compute_place(n);
+    let q = Queue {
+        mqd: base + at + COMPUTE_MQD,
+        ring: base + at,
+        ring_bytes: COMPUTE_RING_BYTES,
+        rptr_report: base + at + COMPUTE_REPORT,
+        wptr_poll: base + at + COMPUTE_POLL,
+        doorbell_dword: doorbell,
+        eop: base + at + COMPUTE_EOP,
+    };
+    (q, at)
+}
+
 /// Maps the eight kernel compute queues (06 section 8.1) and tests each with
 /// a word written through it; returns the rings that answered.
 fn start_compute(
@@ -419,20 +437,11 @@ fn start_compute(
     let mut map = mqd::set_resources(mqd::KERNEL_COMPUTE_MASK);
     let mut rings = Vec::new();
     for n in 0..COMPUTE_QUEUES {
-        let at = COMPUTE_AT + u64::from(n) * COMPUTE_STRIDE;
+        let (q, at) = compute_queue(base, n);
         let (pipe, queue, doorbell, _) = mqd::kernel_compute_place(n);
         for off in (0..0x1_1000u64).step_by(4) {
             gpu.vram_write32(usize::try_from(at + off).unwrap_or(0), 0);
         }
-        let q = Queue {
-            mqd: base + at + COMPUTE_MQD,
-            ring: base + at,
-            ring_bytes: COMPUTE_RING_BYTES,
-            rptr_report: base + at + COMPUTE_REPORT,
-            wptr_poll: base + at + COMPUTE_POLL,
-            doorbell_dword: doorbell,
-            eop: base + at + COMPUTE_EOP,
-        };
         put(gpu, at + COMPUTE_MQD, &mqd::kernel_compute_mqd(&q, n));
         map.0
             .extend(mqd::map_compute_queue(pipe, queue, doorbell, q.mqd, q.wptr_poll).0);
@@ -952,6 +961,326 @@ pub(crate) fn start_sdma(
     gpu.vram_write32(usize::try_from(SDMA_SEQ_AT).unwrap_or(0), 0);
     let _ = gpu.vram_read32(0);
     Ok(s)
+}
+
+// Recovery (10 sections 4.2 to 4.4): a ring whose job did not finish is reset
+// through the interface queue (graphics, compute) or by the engine's own
+// soft reset (DMA), mapped again, and the jobs it held are completed by
+// writing its fence word.
+
+/// Writes `value` to a fence word (a video memory offset).
+fn set_word(gpu: &Arc<Aperture>, at: u64, value: u32) {
+    gpu.vram_write32(usize::try_from(at).unwrap_or(0), value);
+    let _ = gpu.vram_read32(0);
+}
+
+impl Gfx {
+    /// Completes every job of the graphics ring: its fence word reads `seq`.
+    pub(crate) fn complete_gfx(&self, gpu: &Arc<Aperture>, seq: u32) {
+        set_word(gpu, SEQ_AT, seq);
+    }
+
+    /// Completes every job of compute queue `n`.
+    pub(crate) fn complete_compute(&self, gpu: &Arc<Aperture>, n: usize, seq: u32) {
+        if let Some(r) = self.compute.get(n) {
+            set_word(gpu, r.at + COMPUTE_SEQ, seq);
+        }
+    }
+
+    /// Resets compute queue `n` (10 section 4.3) and maps it again: an
+    /// unmap with the reset action through the interface queue, the queue
+    /// seen inactive, its descriptor and ring made new.
+    ///
+    /// # Errors
+    ///
+    /// [`Stopped`] where it stopped.
+    pub(crate) fn reset_compute(
+        &mut self,
+        gpu: &Arc<Aperture>,
+        n: usize,
+        log: &dyn Fn(core::fmt::Arguments<'_>),
+    ) -> Result<(), Stopped> {
+        let w = Bar5(gpu);
+        let base = self.base;
+        let mem = crate::psp::vram_memory(gpu, base);
+        let hw = u32::try_from(n).unwrap_or(0);
+        let (pipe, queue, doorbell, _) = mqd::kernel_compute_place(hw);
+        let seq = self.compute.get(n).map_or(0, |r| r.at + COMPUTE_SEQ);
+        let kept = if seq == 0 {
+            0
+        } else {
+            mem.invalidate();
+            mem.read32(base + seq)
+        };
+        // 1. Unmap with the reset action, and see the queue inactive.
+        let p = mqd::unmap_queues(mqd::Unmap::Reset, false, doorbell, None);
+        self.kiq.submit(gpu, &mem, &p.0);
+        self.kiq.drain("KIQ unmap", base, &mem, 200)?;
+        gc::select(&w, 1, pipe, queue, 0);
+        let mut active = true;
+        for _ in 0..200 {
+            if w.read32(mqd::hqd_register(mqd::field::ACTIVE)) & 1 == 0 {
+                active = false;
+                break;
+            }
+            bus::manager().delay_us(1000);
+        }
+        gc::select(&w, 0, 0, 0, 0);
+        if active {
+            return Err(Stopped::Stalled("compute queue reset", 1, hw));
+        }
+        // 2. A new descriptor and ring, mapped again.
+        let (q, at) = compute_queue(base, hw);
+        for off in (0..0x1_0400u64).step_by(4) {
+            gpu.vram_write32(usize::try_from(at + off).unwrap_or(0), 0);
+        }
+        put(gpu, at + COMPUTE_MQD, &mqd::kernel_compute_mqd(&q, hw));
+        let _ = gpu.vram_read32(0);
+        amdgpu::flip::hdp_flush(&w);
+        let mut map = mqd::set_resources(mqd::KERNEL_COMPUTE_MASK);
+        map.0
+            .extend(mqd::map_compute_queue(pipe, queue, doorbell, q.mqd, q.wptr_poll).0);
+        self.kiq.submit(gpu, &mem, &map.0);
+        self.kiq.drain("KIQ map compute", base, &mem, 200)?;
+        if let Some(r) = self.compute.get_mut(n) {
+            r.wptr = 0;
+        }
+        // The fence word keeps its number (the caller completes the jobs).
+        set_word(gpu, at + COMPUTE_SEQ, kept);
+        // 3. The queue answers a test write.
+        let word = 0xc0de_1000 | hw;
+        let mut t = Packets::new();
+        t.write_data_mem(base + at + COMPUTE_TEST, &[word]);
+        if let Some(r) = self.compute.get_mut(n) {
+            r.submit(gpu, &mem, &t.0);
+        }
+        let mut seen = 0;
+        for _ in 0..200 {
+            mem.invalidate();
+            seen = mem.read32(base + at + COMPUTE_TEST);
+            if seen == word {
+                break;
+            }
+            bus::manager().delay_us(1000);
+        }
+        log(format_args!(
+            "GC: compute queue {n} reset: test word {seen:#010x} ({})",
+            if seen == word { "seen" } else { "NOT seen" }
+        ));
+        if seen == word {
+            Ok(())
+        } else {
+            Err(Stopped::Stalled("compute queue test", seen, word))
+        }
+    }
+
+    /// Resets the graphics queue (10 section 4.2) and maps it again: the
+    /// reset request for the user address spaces and queue 0, the queue
+    /// descriptor seen inactive and the request done, a new descriptor and
+    /// ring, the ring's start sequence again.
+    ///
+    /// # Errors
+    ///
+    /// [`Stopped`] where it stopped.
+    pub(crate) fn reset_gfx(
+        &mut self,
+        gpu: &Arc<Aperture>,
+        log: &dyn Fn(core::fmt::Arguments<'_>),
+    ) -> Result<(), Stopped> {
+        let w = Bar5(gpu);
+        let base = self.base;
+        let mem = crate::psp::vram_memory(gpu, base);
+        mem.invalidate();
+        let kept = mem.read32(base + SEQ_AT);
+        // 1. The reset request: the address spaces 1 to 7, queue 0 of pipe 0.
+        w.write32(gc::CP_VMID_RESET, gc::vmid_reset_value(0xfffe, 0));
+        // 2. The descriptor says inactive; 3. the request reads 0.
+        let mut inactive = false;
+        for _ in 0..200 {
+            mem.invalidate();
+            if mem.read32(base + GFX_MQD_AT + 0x208) & 1 == 0 {
+                inactive = true;
+                break;
+            }
+            bus::manager().delay_us(1000);
+        }
+        let mut done = false;
+        for _ in 0..200 {
+            if w.read32(gc::CP_VMID_RESET) == 0 {
+                done = true;
+                break;
+            }
+            bus::manager().delay_us(1000);
+        }
+        log(format_args!(
+            "GC: graphics queue reset: descriptor {}, request {}",
+            if inactive { "inactive" } else { "STILL ACTIVE" },
+            if done { "done" } else { "NOT done" }
+        ));
+        if !inactive || !done {
+            return Err(Stopped::Stalled("graphics queue reset", 0, 0));
+        }
+        // 4. A new descriptor and ring, mapped again.
+        let q = Queue {
+            mqd: base + GFX_MQD_AT,
+            ring: base + GFX_AT,
+            ring_bytes: GFX_RING_BYTES,
+            rptr_report: base + GFX_REPORT_AT,
+            wptr_poll: base + GFX_WPTR_POLL_AT,
+            doorbell_dword: GFX_DOORBELL_DWORD,
+            eop: 0,
+        };
+        for off in (0..0x1_1000u64).step_by(4) {
+            gpu.vram_write32(usize::try_from(GFX_AT + off).unwrap_or(0), 0);
+        }
+        put(gpu, GFX_MQD_AT, &mqd::gfx_mqd(&q));
+        let _ = gpu.vram_read32(0);
+        amdgpu::flip::hdp_flush(&w);
+        let mut map = mqd::set_resources(mqd::KERNEL_COMPUTE_MASK);
+        map.0
+            .extend(mqd::map_gfx_queue(0, GFX_DOORBELL_DWORD, q.mqd, q.wptr_poll).0);
+        self.kiq.submit(gpu, &mem, &map.0);
+        self.kiq.drain("KIQ map", base, &mem, 200)?;
+        gc::select(&w, 0, 0, 0, 0);
+        // 5. The ring's start sequence: the clear state and `SET_BASE`.
+        self.gfx.wptr = 0;
+        let mut p = gc::clear_state_buffer();
+        p.extend(gc::set_base_packets());
+        self.gfx.submit(gpu, &mem, &p);
+        self.gfx.drain("graphics", base, &mem, 200)?;
+        w.write32(
+            gc::CP_INT_CNTL_RING0,
+            w.read32(gc::CP_INT_CNTL_RING0) | gc::TIME_STAMP_INT_ENABLE,
+        );
+        set_word(gpu, SEQ_AT, kept);
+        log(format_args!("GC: graphics queue mapped again"));
+        Ok(())
+    }
+
+    /// Preempts compute queue `n` without unmapping it (10 section 4.3, the
+    /// action `3`): the processor writes `value` at a word of the queue's
+    /// memory when it is done. Returns whether the word was written.
+    pub(crate) fn preempt_compute(
+        &mut self,
+        gpu: &Arc<Aperture>,
+        n: usize,
+        value: u32,
+    ) -> Result<bool, Stopped> {
+        let base = self.base;
+        let mem = crate::psp::vram_memory(gpu, base);
+        let hw = u32::try_from(n).unwrap_or(0);
+        let (_, _, doorbell, _) = mqd::kernel_compute_place(hw);
+        let at = self.compute.get(n).map_or(0, |r| r.at) + COMPUTE_PREEMPT;
+        set_word(gpu, at, 0);
+        let p = mqd::unmap_queues(
+            mqd::Unmap::PreemptWithoutUnmapping,
+            false,
+            doorbell,
+            Some((base + at, value)),
+        );
+        self.kiq.submit(gpu, &mem, &p.0);
+        self.kiq.drain("KIQ preempt", base, &mem, 200)?;
+        let mut seen = 0;
+        for _ in 0..200 {
+            mem.invalidate();
+            seen = mem.read32(base + at);
+            if seen == value {
+                break;
+            }
+            bus::manager().delay_us(1000);
+        }
+        Ok(seen == value)
+    }
+}
+
+impl Sdma {
+    /// Preempts the queue in the middle of a buffer and lets it run again (07
+    /// section 8): a fence packet after what is queued, the preempt register
+    /// set, the fence seen, the register cleared. Returns whether the fence
+    /// appeared.
+    pub(crate) fn preempt(&mut self, gpu: &Arc<Aperture>, value: u32) -> bool {
+        let w = Bar5(gpu);
+        let base = self.base;
+        let mem = crate::psp::vram_memory(gpu, base);
+        let slot = SDMA_TEST_AT + 0x40;
+        set_word(gpu, slot, 0);
+        let mut p = amdgpu::sdma::Packets::new();
+        p.fence(base + slot, value);
+        self.submit(gpu, &mem, &p.0);
+        w.write32(amdgpu::sdma::GFX_PREEMPT, 1);
+        let mut seen = 0;
+        for _ in 0..200 {
+            mem.invalidate();
+            seen = mem.read32(base + slot);
+            if seen == value {
+                break;
+            }
+            bus::manager().delay_us(1000);
+        }
+        w.write32(amdgpu::sdma::GFX_PREEMPT, 0);
+        seen == value
+    }
+
+    /// Completes every job of the DMA engine.
+    pub(crate) fn complete(&self, gpu: &Arc<Aperture>, seq: u32) {
+        set_word(gpu, SDMA_SEQ_AT, seq);
+    }
+
+    /// Resets the engine (10 section 4.4) and starts its ring again, then
+    /// tests it with a written word.
+    ///
+    /// # Errors
+    ///
+    /// [`Stopped::Stalled`] if the test word is not written.
+    pub(crate) fn reset(
+        &mut self,
+        gpu: &Arc<Aperture>,
+        log: &dyn Fn(core::fmt::Arguments<'_>),
+    ) -> Result<(), Stopped> {
+        let w = Bar5(gpu);
+        let base = self.base;
+        let mem = crate::psp::vram_memory(gpu, base);
+        mem.invalidate();
+        let kept = mem.read32(base + SDMA_SEQ_AT);
+        amdgpu::sdma::stop(&w, SDMA_RING_BYTES);
+        for at in (0..0x1_0200u64).step_by(4) {
+            gpu.vram_write32(usize::try_from(SDMA_AT + at).unwrap_or(0), 0);
+        }
+        let _ = gpu.vram_read32(0);
+        amdgpu::flip::hdp_flush(&w);
+        let ring = amdgpu::sdma::Ring {
+            base: base + SDMA_AT,
+            bytes: SDMA_RING_BYTES,
+            rptr_report: base + SDMA_REPORT_AT,
+            wptr_poll: base + SDMA_POLL_AT,
+        };
+        amdgpu::sdma::recover(&w, &ring, &|us| bus::manager().delay_us(u64::from(us)));
+        self.wptr = 0;
+        set_word(gpu, SDMA_SEQ_AT, kept);
+        let word = 0x5d4a_0002;
+        set_word(gpu, SDMA_TEST_AT, 0);
+        let mut p = amdgpu::sdma::Packets::new();
+        p.write_linear(base + SDMA_TEST_AT, &[word]);
+        self.submit(gpu, &mem, &p.0);
+        let mut seen = 0;
+        for _ in 0..200 {
+            mem.invalidate();
+            seen = mem.read32(base + SDMA_TEST_AT);
+            if seen == word {
+                break;
+            }
+            bus::manager().delay_us(1000);
+        }
+        log(format_args!(
+            "SDMA: reset: test word {seen:#010x} ({})",
+            if seen == word { "seen" } else { "NOT seen" }
+        ));
+        if seen == word {
+            Ok(())
+        } else {
+            Err(Stopped::Stalled("SDMA reset", seen, word))
+        }
+    }
 }
 
 #[cfg(test)]

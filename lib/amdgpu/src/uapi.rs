@@ -58,6 +58,11 @@ pub mod cmd {
     pub const WAIT_FENCES: u8 = 0x12;
     pub const VM: u8 = 0x13;
     pub const FENCE_TO_HANDLE: u8 = 0x14;
+    /// The user-mode queue requests: none of them has work to do on this
+    /// hardware (09 section 1: no firmware scheduler, a user-queue mask of 0).
+    pub const USERQ: u8 = 0x16;
+    pub const USERQ_SIGNAL: u8 = 0x17;
+    pub const USERQ_WAIT: u8 = 0x18;
 }
 
 /// Memory domains (`AMDGPU_GEM_DOMAIN_*`).
@@ -117,6 +122,12 @@ pub fn gem_mmap_answer(b: &mut [u8], offset: u64) {
 
 /// `DRM_AMDGPU_CTX` operations.
 pub mod ctx_op {
+    /// The state flags of `QUERY2` (10 section 9): a reset happened since
+    /// the context was made; video memory was lost since; this context was
+    /// guilty of it.
+    pub const STATE_RESET: u64 = 1 << 0;
+    pub const STATE_VRAM_LOST: u64 = 1 << 1;
+    pub const STATE_GUILTY: u64 = 1 << 2;
     pub const ALLOC: u32 = 1;
     pub const FREE: u32 = 2;
     pub const QUERY: u32 = 3;
@@ -154,6 +165,15 @@ impl Ctx {
         b.iter_mut().for_each(|x| *x = 0);
         put32(b, 0, id);
         put32(b, 4, flags);
+    }
+
+    /// The answer to a state query: the flags (a 64-bit word), the number
+    /// of hangs and the reset status (09 section 4; 10 section 9).
+    pub fn answer_state(b: &mut [u8], flags: u64, hangs: u32, reset_status: u32) {
+        b.iter_mut().for_each(|x| *x = 0);
+        put64(b, 0, flags);
+        put32(b, 8, hangs);
+        put32(b, 12, reset_status);
     }
 }
 

@@ -278,6 +278,49 @@ pub fn map_gfx_queue(pipe: u32, doorbell_dword: u32, mqd: u64, wptr_poll: u64) -
     p
 }
 
+/// What `UNMAP_QUEUES` does (06 section 4.3, 10 section 4.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unmap {
+    /// Preempt the queue.
+    Preempt = 0,
+    /// Reset it.
+    Reset = 1,
+    /// Disable the process's queues.
+    DisableProcess = 2,
+    /// Preempt without unmapping: the processor writes `value` at `address`
+    /// when it is done.
+    PreemptWithoutUnmapping = 3,
+}
+
+/// `UNMAP_QUEUES` (opcode `0xa3`, 5 body dwords) for the queue with
+/// doorbell `doorbell_dword`: `graphics` picks the engine (graphics 4,
+/// compute 0). `fence` is the address and value of
+/// [`Unmap::PreemptWithoutUnmapping`]; zero otherwise.
+#[must_use]
+pub fn unmap_queues(
+    action: Unmap,
+    graphics: bool,
+    doorbell_dword: u32,
+    fence: Option<(u64, u32)>,
+) -> Packets {
+    let mut p = Packets::new();
+    p.0.push(header(0xa3, 5, true));
+    let engine = if graphics { 4 } else { 0 };
+    let d1 = (action as u32) | (engine << 26) | (1 << 29);
+    let (addr, value) = match (action, fence) {
+        (Unmap::PreemptWithoutUnmapping, Some(f)) => f,
+        _ => (0, 0),
+    };
+    p.0.extend([
+        d1,
+        (doorbell_dword & 0x03ff_ffff) << 2,
+        lo(addr),
+        hi(addr),
+        value,
+    ]);
+    p
+}
+
 /// `MAP_QUEUES` for one compute queue on the first micro engine (opcode
 /// `0xa2`): `pipe`, `queue`, engine select 0, one queue; the doorbell, the
 /// MQD's address and the write-pointer poll address.
@@ -431,6 +474,33 @@ mod tests {
         assert_eq!(other[0x244 / 4] >> 29 & 1, 0);
         // Otherwise the KIQ's.
         assert_eq!(other[0x23c / 4], compute_mqd(&q())[0x23c / 4]);
+    }
+
+    #[test]
+    fn unmapping_a_queue_names_the_action_the_engine_and_the_doorbell() {
+        // Reset a compute queue: action 1, engine 0, one queue.
+        let p = unmap_queues(Unmap::Reset, false, 0x0a, None);
+        assert_eq!(p.0.len(), 6);
+        assert_eq!(p.0[0], 0xc004_a302);
+        assert_eq!(p.0[1], 1 | (1 << 29));
+        assert_eq!(p.0[2], 0x0a << 2);
+        assert_eq!(p.0[3..], [0, 0, 0]);
+        // The graphics engine is 4.
+        assert_eq!(
+            unmap_queues(Unmap::Reset, true, 0x116, None).0[1],
+            1 | (4 << 26) | (1 << 29)
+        );
+        // Preempting without unmapping carries the fence; other actions do not.
+        let f = unmap_queues(
+            Unmap::PreemptWithoutUnmapping,
+            false,
+            6,
+            Some((0xf4_0ab0_1000, 0xabcd)),
+        );
+        assert_eq!(f.0[1] & 3, 3);
+        assert_eq!(f.0[3..], [0xab0_1000, 0xf4, 0xabcd]);
+        let r = unmap_queues(Unmap::Preempt, false, 6, Some((0x1000, 5)));
+        assert_eq!((r.0[1] & 3, r.0[3], r.0[5]), (0, 0, 0));
     }
 
     #[test]

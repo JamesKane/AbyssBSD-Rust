@@ -57,6 +57,16 @@ pub const CP_ME_CNTL: usize = 0x86d8;
 pub const CP_INT_CNTL_RING0: usize = 0xc1a8;
 /// Its time-stamp (fence) interrupt enable bit.
 pub const TIME_STAMP_INT_ENABLE: u32 = 1 << 26;
+/// `CP_VMID_RESET` (10 section 4.2): the graphics queue reset.
+pub const CP_VMID_RESET: usize = 0xc2cc;
+
+/// The value that resets the address spaces in `vmid_mask` (bits 15:0) and
+/// graphics queue `queue` of pipe 0 (bits 23:16).
+#[must_use]
+pub const fn vmid_reset_value(vmid_mask: u32, queue: u32) -> u32 {
+    (vmid_mask & 0xffff) | ((1 << queue) << 16)
+}
+
 /// `CP_STAT`: 0 when the command processor is idle.
 pub const CP_STAT: usize = 0x8680;
 /// `CP_RB0_RPTR`: the live read pointer.
@@ -270,6 +280,14 @@ mod tests {
             self.log.borrow_mut().push((o, v));
             self.regs.borrow_mut().insert(o, v);
         }
+    }
+
+    #[test]
+    fn the_graphics_queue_reset_names_the_address_spaces_and_the_queue() {
+        // Address spaces 1 to 7, queue 0 of pipe 0.
+        assert_eq!(vmid_reset_value(0xfe, 0), 0x0001_00fe);
+        assert_eq!(vmid_reset_value(1 << 3, 1), 0x0002_0008);
+        assert_eq!(CP_VMID_RESET, 0xc2cc);
     }
 
     #[test]

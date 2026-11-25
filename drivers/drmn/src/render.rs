@@ -20,7 +20,7 @@ use amdgpu::uapi::{self, InfoRequest, cmd};
 use amdgpu::vm::{Flags, MemoryType, Space, Tables};
 use core::sync::atomic::{AtomicU32, Ordering};
 use drm::IoctlCx;
-use sync::PreemptLock;
+use sync::{PreemptLock, SpinLock};
 use vgapci::Aperture;
 
 use crate::amd::Amd;
@@ -86,6 +86,13 @@ enum Engine {
     Compute(u8),
 }
 
+/// How long a job may go without the engine finishing anything (10 section
+/// 1: two seconds) before the ring is reset.
+const HANG_NS: u64 = 2_000_000_000;
+/// How many engines have state of their own (graphics, DMA, the compute
+/// queues).
+const ENGINES: usize = 2 + COMPUTE_QUEUES;
+
 /// How many compute slots are offered (09 section 3.2: the limit is four).
 const COMPUTE_RINGS: u32 = 4;
 /// The hardware queues behind them.
@@ -123,6 +130,16 @@ impl Engine {
         }
     }
 
+    /// The engine's place in the tables of per-engine state: graphics, DMA,
+    /// then the compute queues.
+    fn index(self) -> usize {
+        match self {
+            Self::Gfx => 0,
+            Self::Dma => 1,
+            Self::Compute(q) => 2 + usize::from(q),
+        }
+    }
+
     /// Which set of fence-packet pages the engine's jobs use.
     fn page_set(self) -> u64 {
         match self {
@@ -131,6 +148,11 @@ impl Engine {
             Self::Compute(r) => 2 + u64::from(r),
         }
     }
+}
+
+/// Whether a driver request number is one of the user-mode queue requests.
+fn is_user_queue(nr: u8) -> bool {
+    matches!(nr, cmd::USERQ | cmd::USERQ_SIGNAL | cmd::USERQ_WAIT)
 }
 
 /// The page-table flags of a mapping request's `AMDGPU_VM_PAGE_*` bits: every
@@ -180,7 +202,9 @@ struct FileState {
     slot: usize,
     space: Space<VramTables>,
     maps: Vec<Mapping>,
-    contexts: Vec<u32>,
+    /// The contexts, with how many ring resets had happened when each was
+    /// made.
+    contexts: BTreeMap<u32, u32>,
     /// The compute queue each (context, slot) is bound to.
     queues: BTreeMap<(u32, u8), u8>,
     lists: Vec<u32>,
@@ -224,6 +248,17 @@ pub(crate) struct Render {
     last_ctx: AtomicU32,
     /// Where waiters for a job sleep; the fence interrupt wakes it.
     queue: Arc<sched::WaitQueue>,
+    /// Itself, for the fences it hands out.
+    me: Weak<Render>,
+    /// For each engine, the number of the last job seen finished and when it
+    /// was first seen so (the time a job has gone without progress).
+    watch: SpinLock<[Option<(u32, u64)>; ENGINES]>,
+    /// The context that made the last job of each engine.
+    last_ctx_of: SpinLock<[u32; ENGINES]>,
+    /// How many times a ring was reset, and the contexts that were on a ring
+    /// when it was.
+    resets: AtomicU32,
+    guilty: SpinLock<Vec<u32>>,
     vram_bytes: u64,
 }
 
@@ -235,7 +270,12 @@ impl core::fmt::Debug for Render {
 
 impl Render {
     pub(crate) fn new(amd: Weak<Amd>, vram_bytes: u64) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(|me| Self {
+            me: me.clone(),
+            watch: SpinLock::new([None; ENGINES]),
+            last_ctx_of: SpinLock::new([0; ENGINES]),
+            resets: AtomicU32::new(0),
+            guilty: SpinLock::new(Vec::new()),
             amd,
             seq: AtomicU32::new(0),
             dma_seq: AtomicU32::new(0),
@@ -258,6 +298,88 @@ impl Render {
     /// The queue the fence interrupt wakes.
     pub(crate) fn queue(&self) -> Arc<sched::WaitQueue> {
         Arc::clone(&self.queue)
+    }
+
+    /// Whether `engine` has a job that has made no progress for two seconds;
+    /// if so the ring is reset (10 section 4: the queue's own reset) and the
+    /// jobs it held are completed. Returns whether it reset one. Called by
+    /// whoever waits for a job, and by a submission that finds its ring full.
+    fn hang_check(&self, amd: &Amd, engine: Engine) -> bool {
+        let Ok(gpu) = amd.gpu_arc() else {
+            return false;
+        };
+        let last = self.last_seq(engine);
+        let now = sched::now_ns();
+        let finished = match engine {
+            Engine::Gfx => amd.gfx_lock().as_ref().map(|g| g.finished(&gpu)),
+            Engine::Dma => amd.sdma_lock().as_ref().map(|d| d.finished(&gpu)),
+            Engine::Compute(q) => amd
+                .gfx_lock()
+                .as_ref()
+                .map(|g| g.compute_finished(&gpu, usize::from(q))),
+        };
+        let Some(finished) = finished else {
+            return false;
+        };
+        let i = engine.index();
+        {
+            let mut w = self.watch.lock();
+            // Idle, or progressing: start the clock again from now.
+            if finished == last || w[i].is_none_or(|(f, _)| f != finished) {
+                w[i] = Some((finished, now));
+                return false;
+            }
+            if w[i].is_some_and(|(_, since)| now.saturating_sub(since) < HANG_NS) {
+                return false;
+            }
+            w[i] = None;
+        }
+        self.recover(amd, &gpu, engine, last)
+    }
+
+    /// Resets `engine`'s ring and completes its jobs up to `last`.
+    fn recover(&self, amd: &Amd, gpu: &Arc<Aperture>, engine: Engine, last: u32) -> bool {
+        let log = |args: core::fmt::Arguments<'_>| amd.log(args);
+        log(format_args!(
+            "render: {engine:?}: job {last} did not finish in two seconds; resetting the ring"
+        ));
+        let done = match engine {
+            Engine::Gfx => {
+                let mut g = amd.gfx_lock();
+                g.as_mut().is_some_and(|g| {
+                    let ok = g.reset_gfx(gpu, &log).is_ok();
+                    g.complete_gfx(gpu, last);
+                    ok
+                })
+            }
+            Engine::Dma => {
+                let mut g = amd.sdma_lock();
+                g.as_mut().is_some_and(|d| {
+                    let ok = d.reset(gpu, &log).is_ok();
+                    d.complete(gpu, last);
+                    ok
+                })
+            }
+            Engine::Compute(q) => {
+                let mut g = amd.gfx_lock();
+                g.as_mut().is_some_and(|g| {
+                    let ok = g.reset_compute(gpu, usize::from(q), &log).is_ok();
+                    g.complete_compute(gpu, usize::from(q), last);
+                    ok
+                })
+            }
+        };
+        // The context that made the last job is the guilty one; every
+        // context sees that a reset happened.
+        let ctx = self.last_ctx_of.lock()[engine.index()];
+        self.guilty.lock().push(ctx);
+        self.resets.fetch_add(1, Ordering::AcqRel);
+        self.queue.wake_all();
+        log(format_args!(
+            "render: {engine:?}: ring {}; jobs up to {last} completed",
+            if done { "reset" } else { "reset FAILED" }
+        ));
+        done
     }
 
     /// Sleeps until job `seq` has finished or `ns` nanoseconds have passed
@@ -303,7 +425,7 @@ impl Render {
                     slot,
                     space,
                     maps: Vec::new(),
-                    contexts: Vec::new(),
+                    contexts: BTreeMap::new(),
                     queues: BTreeMap::new(),
                     lists: Vec::new(),
                     metadata: BTreeMap::new(),
@@ -606,6 +728,7 @@ impl Render {
             };
             Ok((vmid, fs.slot, root, user_fence))
         })?;
+        self.last_ctx_of.lock()[engine.index()] = ctx_id;
         let seq = match engine {
             Engine::Gfx => loop {
                 let mut g = amd.gfx_lock();
@@ -662,7 +785,13 @@ impl Render {
                 p.switch_buffer();
                 // The reference pads every commit to 256 dwords.
                 p.pad(256);
-                gfx.run(&gpu, &p.0, RING_WAIT_MS)?;
+                if let Err(e) = gfx.run(&gpu, &p.0, RING_WAIT_MS) {
+                    drop(g);
+                    if e == Errno::EAGAIN && self.hang_check(&amd, engine) {
+                        continue;
+                    }
+                    return Err(e);
+                }
                 self.seq.store(seq, Ordering::Release);
                 break seq;
             },
@@ -725,7 +854,13 @@ impl Render {
                 }
                 p.fence(sdma.seq_address(), seq);
                 p.trap(0);
-                sdma.run(&gpu, &p.0, RING_WAIT_MS)?;
+                if let Err(e) = sdma.run(&gpu, &p.0, RING_WAIT_MS) {
+                    drop(g);
+                    if e == Errno::EAGAIN && self.hang_check(&amd, engine) {
+                        continue;
+                    }
+                    return Err(e);
+                }
                 self.dma_seq.store(seq, Ordering::Release);
                 break seq;
             },
@@ -774,7 +909,13 @@ impl Render {
                     );
                 }
                 p.fence(gfx.compute_seq_address(r), u64::from(seq), false, true);
-                gfx.compute_run(&gpu, r, &p.0, RING_WAIT_MS)?;
+                if let Err(e) = gfx.compute_run(&gpu, r, &p.0, RING_WAIT_MS) {
+                    drop(g);
+                    if e == Errno::EAGAIN && self.hang_check(&amd, engine) {
+                        continue;
+                    }
+                    return Err(e);
+                }
                 self.comp_seq[r].store(seq, Ordering::Release);
                 break seq;
             },
@@ -783,6 +924,7 @@ impl Render {
             let slot = cx.syncobj(h).ok_or(Errno::ENOENT)?;
             *slot.lock() = Some(Arc::new(JobFence {
                 amd: self.amd.clone(),
+                render: self.me.clone(),
                 queue: Arc::clone(&self.queue),
                 engine,
                 seq,
@@ -841,6 +983,7 @@ impl Render {
             if sched::current().is_interrupted() {
                 return Err(Errno::EINTR);
             }
+            self.hang_check(&amd, engine);
             let left = r
                 .timeout_ns
                 .saturating_sub(sched::now_ns().saturating_sub(start));
@@ -895,28 +1038,56 @@ impl RenderApi for Render {
                 let r = uapi::Ctx::decode(arg).map_err(|_| Errno::EINVAL)?;
                 match r.op {
                     uapi::ctx_op::ALLOC => {
+                        let made_at = self.resets.load(Ordering::Acquire);
                         let id = self.with_file(&amd, cx.file_id(), |fs, c| {
                             let id = c.next_id;
                             c.next_id += 1;
-                            fs.contexts.push(id);
+                            fs.contexts.insert(id, made_at);
                             Ok(id)
                         })?;
                         uapi::Ctx::answer(arg, id, 0);
                     }
                     uapi::ctx_op::FREE => {
                         self.with_file(&amd, cx.file_id(), |fs, c| {
-                            fs.contexts.retain(|id| *id != r.id);
+                            fs.contexts.remove(&r.id);
                             unbind(fs, c, Some(r.id));
                             Ok(())
                         })?;
                         uapi::Ctx::answer(arg, 0, 0);
                     }
-                    // Query: no reset ever happened; the stable power state
-                    // and the rest are not supported.
-                    uapi::ctx_op::QUERY
-                    | uapi::ctx_op::QUERY2
-                    | uapi::ctx_op::GET_STABLE_PSTATE
-                    | uapi::ctx_op::SET_STABLE_PSTATE => uapi::Ctx::answer(arg, 0, 0),
+                    // The state: whether a ring was reset since the context
+                    // was made, and whether it was on it (10 section 9). Video
+                    // memory is never lost here. The older query reports 3
+                    // ("unknown") for a reset.
+                    uapi::ctx_op::QUERY | uapi::ctx_op::QUERY2 => {
+                        let made_at = self.with_file(&amd, cx.file_id(), |fs, _| {
+                            Ok(fs.contexts.get(&r.id).copied())
+                        })?;
+                        let made_at = made_at.ok_or(Errno::EINVAL)?;
+                        let resets = self.resets.load(Ordering::Acquire);
+                        let reset = resets > made_at;
+                        let guilty = reset && self.guilty.lock().contains(&r.id);
+                        if r.op == uapi::ctx_op::QUERY2 {
+                            let mut flags = 0;
+                            if reset {
+                                flags |= uapi::ctx_op::STATE_RESET;
+                            }
+                            if guilty {
+                                flags |= uapi::ctx_op::STATE_GUILTY;
+                            }
+                            uapi::Ctx::answer_state(arg, flags, u32::from(reset), 0);
+                        } else {
+                            uapi::Ctx::answer_state(
+                                arg,
+                                0,
+                                u32::from(reset),
+                                if reset { 3 } else { 0 },
+                            );
+                        }
+                    }
+                    uapi::ctx_op::GET_STABLE_PSTATE | uapi::ctx_op::SET_STABLE_PSTATE => {
+                        uapi::Ctx::answer(arg, 0, 0);
+                    }
                     _ => return Err(Errno::EINVAL),
                 }
                 Ok(0)
@@ -974,6 +1145,7 @@ impl RenderApi for Render {
                         if sched::current().is_interrupted() {
                             return Err(Errno::EINTR);
                         }
+                        self.hang_check(&amd, engine);
                         let left = timeout.saturating_sub(sched::now_ns().saturating_sub(start));
                         self.sleep_for(cx.sleepable(), &amd, engine, seq, left.min(50_000_000));
                     }
@@ -1013,6 +1185,10 @@ impl RenderApi for Render {
                 arg.iter_mut().for_each(|b| *b = 0);
                 Ok(0)
             }
+            // User-mode queues need a firmware scheduler this hardware does not
+            // have; the device information says so (a user-queue mask of 0), and
+            // the requests are refused as not supported.
+            n if is_user_queue(n) => Err(Errno::EOPNOTSUPP),
             _ => Err(Errno::ENOTTY),
         }
     }
@@ -1029,6 +1205,7 @@ impl RenderApi for Render {
 /// The completion of a job: the ring's fence word reaching its number.
 struct JobFence {
     amd: Weak<Amd>,
+    render: Weak<Render>,
     queue: Arc<sched::WaitQueue>,
     engine: Engine,
     seq: u32,
@@ -1046,6 +1223,10 @@ impl drm::Fence for JobFence {
     }
 
     fn wait(&self, s: &sched::Sleepable, ns: u64) -> bool {
+        // A job that never finishes is found here too: the ring is reset.
+        if let (Some(r), Some(amd)) = (self.render.upgrade(), self.amd.upgrade()) {
+            r.hang_check(&amd, self.engine);
+        }
         bus::manager().wait_timeout(s, &self.queue, &mut || self.signaled(), ns)
     }
 }
@@ -1219,5 +1400,13 @@ mod tests {
         assert!(compute_handle(5, 8) > compute_handle(5, 7));
         assert_eq!(compute_handle(5, 7) >> 32, 5);
         assert_eq!(compute_handle(5, 7) & 0xffff_ffff, 7);
+    }
+
+    #[test]
+    fn the_user_queue_requests_are_recognised_and_nothing_else_is() {
+        assert!(is_user_queue(0x16) && is_user_queue(0x17) && is_user_queue(0x18));
+        for nr in [0x00, 0x04, 0x13, 0x14, 0x15, 0x19, 0x40] {
+            assert!(!is_user_queue(nr), "{nr:#x}");
+        }
     }
 }

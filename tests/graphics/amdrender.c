@@ -50,7 +50,7 @@ int main(int argc, char **argv)
 
 	struct ctx c = { .op = 1 };
 	if (ioctl(fd, CMD(0x02, struct ctx), &c) < 0) { perror("CTX alloc"); return 1; }
-	uint32_t ctx = c.id;
+	uint32_t ctx = *(uint32_t *)&c; /* the id is the first dword of the answer */
 
 	uint32_t h[2];
 	void *map[2];
@@ -137,10 +137,10 @@ int main(int argc, char **argv)
 		struct ib cib = { .va = va_ib + 0x400, .bytes = 5 * 4, .ip = 1, .ring = 0 };
 		struct chunk cck = { .id = 1, .len = sizeof cib / 4, .data = (uintptr_t)&cib };
 		uint64_t cchunks[1] = { (uintptr_t)&cck };
-		struct cs ccs = { .ctx = c2.id, .nchunks = 1, .chunks = (uintptr_t)cchunks };
+		struct cs ccs = { .ctx = *(uint32_t *)&c2, .nchunks = 1, .chunks = (uintptr_t)cchunks };
 		if (ioctl(fd, CMD(0x04, struct cs), &ccs) < 0) { perror("CS (compute, context 2)"); return 1; }
 		uint64_t handle = *(uint64_t *)&ccs;
-		struct wait cw = { .handle = handle, .timeout = 2000000000ull, .ip = 1, .ring = 0, .ctx = c2.id };
+		struct wait cw = { .handle = handle, .timeout = 2000000000ull, .ip = 1, .ring = 0, .ctx = *(uint32_t *)&c2 };
 		if (ioctl(fd, CMD(0x09, struct wait), &cw) < 0) { perror("WAIT_CS (compute, context 2)"); return 1; }
 		uint32_t got = ((volatile uint32_t *)map[1])[64 / 4];
 		printf("compute slot 0, second context: queue %llu (want 4), written %#x\n",

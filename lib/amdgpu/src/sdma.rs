@@ -37,6 +37,9 @@ pub const GFX_DOORBELL_OFFSET: usize = 0x4c2c;
 pub const GFX_RB_WPTR_POLL_ADDR_HI: usize = 0x4c48;
 pub const GFX_RB_WPTR_POLL_ADDR_LO: usize = 0x4c4c;
 pub const GFX_MINOR_PTR_UPDATE: usize = 0x4c54;
+/// `SDMA0_GFX_PREEMPT` (07 section 8): 1 preempts the queue's current
+/// buffer, 0 lets it run again.
+pub const GFX_PREEMPT: usize = 0x4c40;
 /// `GRBM_SOFT_RESET` (graphics block) and engine 0's bit.
 pub const GRBM_SOFT_RESET: usize = 0x8020;
 pub const SOFT_RESET_SDMA0: u32 = 1 << 23;
@@ -150,6 +153,15 @@ pub fn start<W: Window + ?Sized>(w: &W, r: &Ring, pause_us: &dyn Fn(u32)) {
     w.write32(F32_CNTL, w.read32(F32_CNTL) & !1);
     w.write32(GFX_RB_CNTL, rb_cntl(r.bytes, true, true));
     w.write32(GFX_IB_CNTL, w.read32(GFX_IB_CNTL) | 1);
+}
+
+/// Resets the engine and starts it again (10 section 4.4): the ring stopped,
+/// the translation cache off, then the bring-up of [`start`], whose first step
+/// is the soft reset pulse. The pointers go back to zero.
+pub fn recover<W: Window + ?Sized>(w: &W, r: &Ring, pause_us: &dyn Fn(u32)) {
+    stop(w, r.bytes);
+    w.write32(CNTL, w.read32(CNTL) & !CNTL_UTC_L1_ENABLE);
+    start(w, r, pause_us);
 }
 
 /// Stops the engine (07 section 4): the ring and indirect buffers off, the
