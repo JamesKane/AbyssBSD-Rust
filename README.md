@@ -108,10 +108,16 @@ way, and the Ryzen 9 7900X / X870E (AMD64) has had its first AbyssBSD boots (Pha
     and the gaps in the system call table.
   - Display: the Sky1's own stack (the `linlondp` display processor, the DisplayPort transmitter
     and its USB-C PHY, EDID with CTA blocks) drives real monitors, and stock Sway runs on it.
-  - Performance is measured on the board per core class beside bhyve. Every component of `p4`,
-    `p5`, and `p6` passes on every class (overall about 0.56 to 0.62 of FreeBSD's time), and
-    the bhyve ten-run gate passes `p4` (0.657) and `p6` (0.508). Still open: `p2`, `p3`, `p5`,
-    and `p7` again, `p7` over the physical NIC, and the little cores' code-layout sensitivity.
+  - kyua against FreeBSD's own tests on the board meets its target in all four areas (`bin` 98.6%,
+    `lib/libc` 99.2%, `sys/kern` 98.5%, `usr.bin` 99.2%), with no hang. The arm64 kernel allows
+    unaligned access as FreeBSD's does, and the device tree's differences from FreeBSD's `devinfo`
+    are recorded in [docs/compat-deviations.md](docs/compat-deviations.md).
+  - Performance is measured on the board per core class (big, mid, little, all), against FreeBSD's
+    recorded results. At three runs a side every component of `p4` to `p7` passes on every class
+    (`p4` to `p6` take 0.52 to 0.57 of FreeBSD's time overall, `p7` over the physical NIC 0.43 to
+    0.48), and `p2` does too except contended mutexes on the little cores (1.058). In bhyve every
+    component of `p2` to `p7` passes. Open: the ten-run gate on the board (under way), the SMMU's
+    last stage, and the little cores' code-layout sensitivity.
   - Also open: the board occasionally does not return from a reset (suspected firmware), and a few
     hangs seen once.
 - **X870E (Phase 10, begun 2026-11-23):** the first boots on the AMD64 reference machine. The
