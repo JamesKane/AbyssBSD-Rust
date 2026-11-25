@@ -85,6 +85,8 @@ pub(crate) fn start(amd: &Arc<Amd>) {
             let Some(a) = me.upgrade() else {
                 return;
             };
+            // The link's own health: trained again if it was up and is not.
+            a.check_link(s);
             for (n, was) in others.iter_mut().enumerate().skip(1) {
                 if let Some(now) = a.hpd_line_sense(n)
                     && now != *was

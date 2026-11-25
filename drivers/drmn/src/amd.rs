@@ -115,6 +115,11 @@ pub(crate) struct Amd {
     pub(crate) connected: core::sync::atomic::AtomicBool,
     /// The code of the mode now running (16 = the firmware's 1080p60).
     pub(crate) current_vic: core::sync::atomic::AtomicU8,
+    /// Link health: consecutive bad looks, recoveries tried, and whether the
+    /// link has been seen healthy since the last mode set.
+    pub(crate) link_bad: core::sync::atomic::AtomicU8,
+    pub(crate) link_recoveries: core::sync::atomic::AtomicU8,
+    pub(crate) link_seen_healthy: core::sync::atomic::AtomicBool,
     /// The next mode set takes the full way off and on even at the pixel
     /// clock already running (a monitor plugged in again needs the link
     /// trained again).
@@ -176,6 +181,9 @@ impl Amd {
             connected: core::sync::atomic::AtomicBool::new(true),
             current_vic: core::sync::atomic::AtomicU8::new(16),
             relink: core::sync::atomic::AtomicBool::new(false),
+            link_bad: core::sync::atomic::AtomicU8::new(0),
+            link_recoveries: core::sync::atomic::AtomicU8::new(0),
+            link_seen_healthy: core::sync::atomic::AtomicBool::new(false),
             reset_busy: core::sync::atomic::AtomicBool::new(false),
             skip_asic_init: core::sync::atomic::AtomicBool::new(false),
             render: SpinLock::new(None),
@@ -867,6 +875,9 @@ impl Amd {
 
     fn set_mode_by_code(&self, vic: i32, measure: bool) -> Result<(), abi::errno::Errno> {
         use abi::errno::Errno;
+        // The link is not trusted healthy again until it reads so.
+        self.link_seen_healthy
+            .store(false, core::sync::atomic::Ordering::Release);
         use amdgpu::regs::Window;
         use amdgpu::{dmcub, flip, hdmi, modeset};
         use core::sync::atomic::Ordering;
@@ -970,7 +981,12 @@ impl Amd {
         // after the way on, step 12 of the reference).
         let front_end = w.read32(hdmi::DIG_FE_CNTL);
         if clock_change {
-            *self.link_saved.lock() = Some((front_end, w.read32(hdmi::DIG_BE_CNTL)));
+            // What the front end was connected to, saved to be put back. A
+            // link already taken down (the transmitter off) has no front end:
+            // the saved connection of the working link is kept then.
+            if front_end != 0 || self.link_saved.lock().is_none() {
+                *self.link_saved.lock() = Some((front_end, w.read32(hdmi::DIG_BE_CNTL)));
+            }
             // The way off (08 section 3.7.7): the packets stopped, the plane
             // blanked, the transmitter off, then the generator stopped.
             self.link_state(&w, "before");
@@ -1042,6 +1058,15 @@ impl Amd {
             "mode: generator running, AVI info frame for code {avi_code} written (no conflict: {clear}); frames {before} -> {}",
             flip::frame_count(&w)
         ));
+        // Audio follows the pixel clock: the audio clock's module and the
+        // clock regeneration pairs, if the audio side was set up.
+        if apply && hdmi::audio_prepared(&w) {
+            hdmi::audio_clock_for(&w, target_clock);
+            hdmi::audio_regeneration(&w, target_clock);
+            self.log(format_args!(
+                "mode: the audio clock and clock regeneration set for {target_clock} kHz"
+            ));
+        }
         if clock_change {
             bus::manager().delay_us(100_000);
             self.link_state(&w, "after");
@@ -1054,6 +1079,63 @@ impl Amd {
         }
         self.current_vic.store(code, Ordering::Release);
         Ok(())
+    }
+
+    /// Looks at the link's health once a second (the hot-plug watcher calls
+    /// it): the encoder's FIFO calibrated and error free. A link that was
+    /// healthy and reads bad three times running is trained again, up to
+    /// three times; one that stays bad after that is left alone and logged,
+    /// so a monitor that cannot be recovered does not flicker for ever.
+    pub(crate) fn check_link(&self, s: &sched::Sleepable) {
+        use amdgpu::hdmi;
+        use amdgpu::regs::Window;
+        use core::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+        if !self.connected() || self.modeset_busy.load(Acquire) {
+            return;
+        }
+        let Ok(gpu) = self.gpu() else {
+            return;
+        };
+        let fifo = Bar5(&gpu).read32(hdmi::DIG_FIFO_STATUS);
+        if fifo == u32::MAX {
+            return;
+        }
+        if hdmi::link_healthy(fifo) {
+            self.link_bad.store(0, Release);
+            self.link_seen_healthy.store(true, Release);
+            // The working link's front end connection, kept for a recovery.
+            let w = Bar5(&gpu);
+            let fe = w.read32(hdmi::DIG_FE_CNTL);
+            if fe != 0 {
+                *self.link_saved.lock() = Some((fe, w.read32(hdmi::DIG_BE_CNTL)));
+            }
+            return;
+        }
+        if !self.link_seen_healthy.load(Acquire) {
+            return;
+        }
+        if self.link_bad.fetch_add(1, AcqRel) + 1 < 3 {
+            return;
+        }
+        self.link_bad.store(0, Release);
+        if self.link_recoveries.load(Acquire) >= 3 {
+            return;
+        }
+        let n = self.link_recoveries.fetch_add(1, AcqRel) + 1;
+        self.log(format_args!(
+            "link: the encoder reports the link down (FIFO status {fifo:#010x}); training it again ({n} of 3)"
+        ));
+        let r = self.relink_now(s);
+        let healthy = self
+            .gpu()
+            .is_ok_and(|g| hdmi::link_healthy(Bar5(&g).read32(hdmi::DIG_FIFO_STATUS)));
+        self.log(format_args!(
+            "link: trained again: {r:?}, now {}",
+            if healthy { "healthy" } else { "still down" }
+        ));
+        if healthy {
+            self.link_recoveries.store(0, Release);
+        }
     }
 
     /// Takes the link down and up again at the mode running: a monitor that

@@ -41,6 +41,32 @@ impl Amd {
         self.asic_init()
     }
 
+    /// Takes the link down the way a lost signal does: the transmitter off
+    /// (through the display firmware), nothing else. The watcher then finds
+    /// the link down and trains it again; this is how that is tested.
+    pub(crate) fn link_break(&self) -> Result<(), abi::errno::Errno> {
+        use amdgpu::regs::Window as _;
+        use amdgpu::{dmcub, flip};
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        if !self.dmcub_up.load(Ordering::Acquire) || !dmcub::running(&w) {
+            self.log(format_args!(
+                "link break: the display firmware is not running (write 1 to `dmcub` first)"
+            ));
+            return Err(abi::errno::Errno::ENXIO);
+        }
+        let pause = |us: u32| bus::manager().delay_us(u64::from(us));
+        let vram_base = u64::from(w.read32(flip::FB_LOCATION_BASE) & 0xffff) << 24;
+        let inbox = dmcub::Inbox::new(vram_base + crate::dmcub::MAILBOXES_AT as u64);
+        let mem = crate::psp::vram_memory(&gpu, vram_base);
+        let r = inbox.submit(&w, &mem, &dmcub::transmitter_disable(), 200, 1000, &pause);
+        self.log(format_args!(
+            "link break: transmitter off: {r:?}; FIFO status {:#010x}",
+            w.read32(amdgpu::hdmi::DIG_FIFO_STATUS)
+        ));
+        r.map_err(|_| abi::errno::Errno::EIO)
+    }
+
     /// Reads the audio path's registers (the encoder's audio formatter, the
     /// packet and clock-regeneration controls, the audio clock, endpoint 0)
     /// and logs them: reads only. Run it while a tone plays.
@@ -1048,6 +1074,11 @@ pub(super) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             "asic_init",
             "Write 1 to run the video BIOS's initialisation table on the running chip (it writes a few registers)",
             Amd::asic_init_trigger,
+        ),
+        (
+            "link_break",
+            "Write 1 to take the HDMI link down the way a lost signal does (transmitter off, through the display firmware); the watcher should train it again within a few seconds. The picture goes",
+            Amd::link_break,
         ),
         (
             "afmt_probe",
