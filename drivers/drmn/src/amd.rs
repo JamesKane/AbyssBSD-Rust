@@ -80,6 +80,10 @@ pub(crate) struct Amd {
     baseline: SpinLock<Option<amdgpu::modeset::Baseline>>,
     /// Whether the display firmware was loaded (stage R3.3).
     dmcub_up: core::sync::atomic::AtomicBool,
+    /// The encoder's front end and back end registers as the firmware had
+    /// them before a clock change (`DIG_FE_CNTL`, `DIG_BE_CNTL`), for the
+    /// reconnection.
+    link_saved: SpinLock<Option<(u32, u32)>>,
 }
 
 /// Where the GART's page table is in video memory (BAR0 offset): past the
@@ -126,6 +130,7 @@ impl Amd {
             clock_khz: core::sync::atomic::AtomicU32::new(amdgpu::modeset::FIRMWARE_CLOCK_KHZ),
             baseline: SpinLock::new(None),
             dmcub_up: core::sync::atomic::AtomicBool::new(false),
+            link_saved: SpinLock::new(None),
         }
     }
 
@@ -929,6 +934,7 @@ impl Amd {
         // after the way on, step 12 of the reference).
         let front_end = w.read32(hdmi::DIG_FE_CNTL);
         if clock_change {
+            *self.link_saved.lock() = Some((front_end, w.read32(hdmi::DIG_BE_CNTL)));
             // The way off (08 section 3.7.7): the packets stopped, the plane
             // blanked, the transmitter off, then the generator stopped.
             self.link_state(&w, "before");
@@ -977,13 +983,7 @@ impl Amd {
             hdmi::stream_controls(&w);
             // Step 12: the front end connected again, its source the timing
             // generator, as the firmware had it.
-            if w.read32(hdmi::DIG_FE_CNTL) != front_end {
-                self.log(format_args!(
-                    "mode: DIG_FE_CNTL {:#010x} -> {front_end:#010x} (the front end reconnected)",
-                    w.read32(hdmi::DIG_FE_CNTL)
-                ));
-                w.write32(hdmi::DIG_FE_CNTL, front_end);
-            }
+            self.link_reconnect_now(&w, "before the transmitter is on");
         }
         let avi_code = if apply { code } else { 16 };
         let avi_wide = if apply { wide } else { true };
@@ -994,6 +994,8 @@ impl Amd {
                 "transmitter on",
                 &dmcub::transmitter_enable(running_clock / 10),
             );
+            // The transmitter-on command clears the front end again.
+            self.link_reconnect_now(&w, "after the transmitter is on");
         }
         if let Err(e) = started {
             self.log(format_args!("mode: start: {e:?} (the plane stays blanked)"));
@@ -1012,6 +1014,37 @@ impl Amd {
         if !apply {
             return Err(Errno::EIO);
         }
+        Ok(())
+    }
+
+    /// Puts the encoder's front end back as it was before the last clock
+    /// change (the front end register, and the back end's front-end select
+    /// bit), if either differs; logs what it did.
+    fn link_reconnect_now(&self, w: &Bar5<'_>, when: &str) {
+        use amdgpu::hdmi;
+        use amdgpu::regs::Window;
+        let Some((fe, be)) = *self.link_saved.lock() else {
+            self.log(format_args!("LINK: nothing saved to reconnect"));
+            return;
+        };
+        let (fe_now, be_now) = (w.read32(hdmi::DIG_FE_CNTL), w.read32(hdmi::DIG_BE_CNTL));
+        if fe_now == fe && be_now & 0x100 == be & 0x100 {
+            self.log(format_args!("LINK: front end already connected {when}"));
+            return;
+        }
+        hdmi::update(w, hdmi::DIG_BE_CNTL, 0x100, be);
+        w.write32(hdmi::DIG_FE_CNTL, fe);
+        self.log(format_args!(
+            "LINK: reconnected {when}: DIG_FE_CNTL {fe_now:#010x} -> {:#010x}, DIG_BE_CNTL {be_now:#010x} -> {:#010x}",
+            w.read32(hdmi::DIG_FE_CNTL),
+            w.read32(hdmi::DIG_BE_CNTL)
+        ));
+    }
+
+    /// The trigger: [`Amd::link_reconnect_now`] on demand.
+    pub(crate) fn link_reconnect(&self) -> Result<(), abi::errno::Errno> {
+        let gpu = self.gpu()?;
+        self.link_reconnect_now(&Bar5(&gpu), "on request");
         Ok(())
     }
 
@@ -1320,6 +1353,11 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             "hdmi",
             "Write 1 to switch the encoder to HDMI mode with the AVI info frame and enable audio; disturbs the picture briefly",
             Amd::hdmi_enable,
+        ),
+        (
+            "link_reconnect",
+            "Write 1 to put the encoder's front end back as before the last clock change (an experiment on a lost signal)",
+            Amd::link_reconnect,
         ),
         (
             "mode_probe",
