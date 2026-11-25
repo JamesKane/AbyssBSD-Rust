@@ -1335,3 +1335,19 @@ board before the next is built on it. Anything that can hang the machine is aske
 - **Not done:** the compute queues (not needed for graphics), the fence interrupt through the interrupt ring (the test polls memory), user address
   spaces (VMIDs 1 to 7 and the TLB flushes), then the render interface itself.
 
+### 16.25 R4.3: a user address space runs an indirect buffer on the graphics ring (2026-11-24)
+
+- **Code.** `lib/amdgpu/src/vm.rs` (four-level tables, 151 host tests in the library) over page tables kept in video memory
+  (`drivers/drmn/src/gcring.rs`, `VramTables`); `gmc::ring_vm_flush`: the packets a ring writes to switch a VMID's page table and flush
+  (05 section 5.3: the root as a valid directory entry written low then high, the request, a `WAIT_REG_MEM` on the acknowledgement's bit, then
+  `PFP_SYNC_ME`); `Packets::wait_reg`. `dev.drmn.1.gc_vm` (after `gc_ring`) runs it.
+- **On the X870E.** Two pages mapped in VMID 1 (the buffer at `0x100000`, a data page at `0x101000`, to video memory); the ring switches and
+  flushes VMID 1 (engine 0), runs the buffer by `INDIRECT_BUFFER` with VMID 1, and fences itself. The buffer's `WRITE_DATA` and `RELEASE_MEM` by
+  **virtual address** landed (`0xcafe0001`, `0xfeed0002`), the ring's own fence landed (`0x600df00d`), **no translation fault**, the display ran on.
+- **One thing learned.** The first run faulted with `GCVM_L2_PROTECTION_FAULT_STATUS` `0x00100880`: client 4 (the command fetcher), VMID 1, permission faults `0x8`
+  (bit 7), no mapping error: the permission bits (7:4) follow the order of the fault-enable bits (valid, read, write, execute), so bit 7 is **execute**:
+  the page an indirect buffer is fetched from must be mapped executable. With that the run is clean. (A fault leaves the fetcher stuck: a reboot is the
+  recovery.)
+- **Next:** the render interface (R4.5 to R4.7): buffers over system pages mapped through snooped entries (on this APU the "video memory" is carved from
+  system memory, so a graphics-translation-table-only design is enough), contexts, command submission with fences, syncobjs and PRIME.
+
