@@ -66,10 +66,12 @@ fn zero(gpu: &Aperture, at: usize, bytes: usize) {
 }
 
 /// Copies the platform's video BIOS into window 3's memory and returns its
-/// size: the ROM signature `55 aa`, the length in 512-byte units at byte 2,
-/// and the bytes summing to zero are checked. `None` (the window left zero)
-/// if the platform's copy is not a valid image.
-fn copy_vbios(gpu: &Aperture, w: &Bar5<'_>) -> Option<u32> {
+/// size and the sum of its bytes: the ROM signature `55 aa` and the length in
+/// 512-byte units at byte 2 are checked. `None` (the window left zero) if the
+/// platform's copy has no signature or an impossible length. (The sum is
+/// logged, not required to be zero: this image is the platform's copy, not
+/// a legacy option ROM.)
+fn copy_vbios(gpu: &Aperture, w: &Bar5<'_>) -> Option<(u32, u8)> {
     let first = amdgpu::regs::read_vram(w, PLATFORM_VBIOS);
     if first & 0xffff != 0xaa55 {
         return None;
@@ -86,7 +88,7 @@ fn copy_vbios(gpu: &Aperture, w: &Bar5<'_>) -> Option<u32> {
         }
         gpu.vram_write32(VBIOS_AT + 4 * usize::try_from(i).unwrap_or(0), v);
     }
-    (sum == 0).then_some(bytes)
+    Some((bytes, sum))
 }
 
 /// Runs the whole sequence. `file` is the firmware file; `psp` the ring
@@ -138,8 +140,8 @@ pub(crate) fn load(
     zero(gpu, VBIOS_AT, VBIOS_ROOM as usize);
     let vbios = copy_vbios(gpu, &w);
     match vbios {
-        Some(n) => log(format_args!(
-            "DMCUB: the platform's video BIOS ({n} bytes, checksum good) copied into window 3"
+        Some((n, sum)) => log(format_args!(
+            "DMCUB: the platform's video BIOS ({n} bytes, byte sum {sum:#04x}) copied into window 3"
         )),
         None => log(format_args!(
             "DMCUB: no valid video BIOS at the platform's copy: window 3 left zero"
@@ -202,7 +204,7 @@ pub(crate) fn load(
     }
     let layout = Layout {
         vbios: base + VBIOS_AT as u64,
-        vbios_bytes: vbios.unwrap_or(VBIOS_ROOM),
+        vbios_bytes: vbios.map_or(VBIOS_ROOM, |v| v.0),
         mailboxes: base + MAILBOXES_AT as u64,
         trace: base + TRACE_AT as u64,
         trace_bytes: needs.trace_bytes,
