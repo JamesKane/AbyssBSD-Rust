@@ -470,7 +470,17 @@ pub(crate) fn vm_test(
         return false;
     };
     let ok = space
-        .map(VA_IB, 1, Flags::VRAM_RW, |_| phys + VM_IB_AT)
+        .map(
+            VA_IB,
+            1,
+            // The command processor's fetch of an indirect buffer needs the
+            // page executable (a permission fault, bit 7, otherwise).
+            Flags {
+                executable: true,
+                ..Flags::VRAM_RW
+            },
+            |_| phys + VM_IB_AT,
+        )
         .and_then(|()| space.map(VA_DATA, 1, Flags::VRAM_RW, |_| phys + VM_DATA_AT));
     if ok.is_err() {
         log(format_args!("VM: mapping failed: {ok:?}"));
