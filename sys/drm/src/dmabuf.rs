@@ -83,7 +83,7 @@ pub fn ioctl(buf: &DmaBuf, s: &sched::Sleepable, req: u32, arg: &mut [u8]) -> Re
     match req {
         DMA_BUF_IOCTL_EXPORT_SYNC_FILE => {
             // A writer waits for every fence, a reader for the writers'.
-            let fences = buf.gem().reservation().lock().blocking(writes, false);
+            let fences = buf.gem().reservation().lock().blocking(writes, None);
             let file = crate::SyncFile::new(fences);
             let fd = (env.export_syncfile)(s, file, true)?;
             arg[4..8].copy_from_slice(&fd.to_le_bytes());
@@ -97,7 +97,7 @@ pub fn ioctl(buf: &DmaBuf, s: &sched::Sleepable, req: u32, arg: &mut [u8]) -> Re
                 buf.gem()
                     .reservation()
                     .lock()
-                    .add(file.fence(), writes, true);
+                    .add(file.fence(), writes, crate::resv::EXTERNAL);
             }
             Ok(0)
         }

@@ -21,10 +21,14 @@ struct Entry {
     fence: Arc<dyn Fence>,
     /// A writer's fence (a reader's if not).
     write: bool,
-    /// It came from outside this driver (an imported sync file), so the
-    /// driver's own ordering does not cover it and a job must wait for it.
-    external: bool,
+    /// Which of the driver's rings the job ran on, or [`EXTERNAL`] for a
+    /// fence that came from outside (an imported sync file). A ring orders
+    /// its own jobs, so only the others' need waiting for.
+    owner: u32,
 }
+
+/// The owner of a fence that did not come from the driver's own rings.
+pub const EXTERNAL: u32 = u32::MAX;
 
 /// The fences on a buffer.
 #[derive(Default)]
@@ -39,9 +43,9 @@ impl core::fmt::Debug for Reservation {
 }
 
 impl Reservation {
-    /// Adds a fence: `write` if the job writes the buffer, `external` if it
-    /// is not one of the driver's own.
-    pub fn add(&mut self, fence: Arc<dyn Fence>, write: bool, external: bool) {
+    /// Adds a fence: `write` if the job writes the buffer, `owner` the ring it
+    /// ran on (or [`EXTERNAL`]).
+    pub fn add(&mut self, fence: Arc<dyn Fence>, write: bool, owner: u32) {
         if self.entries.len() >= PRUNE_AT {
             self.entries.retain(|e| !e.fence.signaled());
         }
@@ -50,18 +54,19 @@ impl Reservation {
         self.entries.push(Entry {
             fence,
             write,
-            external,
+            owner,
         });
     }
 
     /// The unfinished fences someone who will read (`write` false) or write
-    /// (`write` true) the buffer has to wait for; the external ones only
-    /// when `external_only`.
+    /// (`write` true) the buffer has to wait for; those of ring `except`
+    /// are left out when it is a job on that ring that waits (the ring
+    /// orders its own).
     #[must_use]
-    pub fn blocking(&self, write: bool, external_only: bool) -> Vec<Arc<dyn Fence>> {
+    pub fn blocking(&self, write: bool, except: Option<u32>) -> Vec<Arc<dyn Fence>> {
         self.entries
             .iter()
-            .filter(|e| (write || e.write) && (!external_only || e.external))
+            .filter(|e| (write || e.write) && except != Some(e.owner))
             .filter(|e| !e.fence.signaled())
             .map(|e| Arc::clone(&e.fence))
             .collect()

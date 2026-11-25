@@ -1219,6 +1219,20 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         "What the interrupts have done",
         sysctl::Value::Str(Box::new(move |out| out.push_str(&r.irq.summary()))),
     );
+    let r = Arc::clone(a);
+    let _ = t.add_value(
+        node,
+        sysctl::Number::Auto,
+        "render",
+        "What the render node's submissions looked like",
+        sysctl::Value::Str(Box::new(move |out| {
+            let render = r.render.lock().as_ref().and_then(Weak::upgrade);
+            match render {
+                Some(render) => out.push_str(&render.summary()),
+                None => out.push_str("no render node"),
+            }
+        })),
+    );
     if crate::debug_enabled() {
         debug::publish(t, node, a);
     }
