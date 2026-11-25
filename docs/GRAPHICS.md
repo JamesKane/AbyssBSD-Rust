@@ -1256,3 +1256,24 @@ and from 720p60, with a normal picture each time. The audio was not part of this
   surface is shown at the mode then running, not the firmware's), a mode change on a hot-plug, the monitor's own mode list (the
   card offers its fixed seven, not the EDID's), the audio.
 
+### 16.21 R4: the plan to glmark2 on the Radeon's own engine (2026-11-24)
+
+**Goal (set by the user):** glmark2 running with the Raphael iGPU accelerating it, not the CPU's software rasteriser. On the X870E's
+AbyssBSD the userspace is already there: Mesa 26.2 with `radeonsi_dri.so`, `libdrm_amdgpu`, LLVM 19, Sway 1.12 with wlroots
+0.20 and glmark2 2023.01. What is missing is in the kernel: the graphics engine, and the `amdgpu` render interface that
+`libdrm_amdgpu` speaks. Display (modes, EDID, the firmware, PSP) is done.
+
+| Stage | Work | Where it can be tested | Exit on the board |
+|---|---|---|---|
+| R4.1 | The security processor loads SDMA, CE, PFP, ME, MEC1/2 and the RLC images into the trusted zone and starts the RLC autoload (03 section 7, 02 section 9). Done in code (`gcfw`, `gcload`, `dev.drmn.1.gc_fw`), **not yet run**. | containers on the vendor's files (host) | `CP_STAT` 0 and the RLC's boot-complete bit after the autoload |
+| R4.2 | Golden settings, GRBM and per-VMID shader memory configuration, the RLC's clear-state buffer, `GRBM_CNTL`, MEC unhalt (06 sections 2 to 6) | register-model tests | the engine idle and configured |
+| R4.3 | VM contexts of the hubs for user address spaces (05 section 4.4): page tables (`vm`, done), context registers, TLB invalidation (`gmc`) | host (`vm` walks) | a GPU write through a mapped page |
+| R4.4 | The graphics ring and the KIQ (06 sections 7 to 9): MQDs, the KIQ by direct registers, MAP_QUEUES, the graphics start sequence; PM4 packets (`pm4`, done), fences by RELEASE_MEM with the end-of-pipe interrupt through the interrupt ring (R2, done) | packet tests (host) | the ring test (06 section 11.6): a scratch write and a fence |
+| R4.5 | Memory objects: video and system buffers with GPU addresses, `GEM_CREATE`, `GEM_MMAP` (a mapping the CPU sees: video through BAR0 write-combined), `GEM_VA` map and unmap into the file's address space | host (a model of the memory manager) | a buffer written by the CPU read back by a GPU copy |
+| R4.6 | The submission interface: contexts, `CS` (the IB and fence chunks), `WAIT_CS`, `INFO` (device and hardware-IP information as 09 section 3 says), buffer lists, syncobjs | host (ioctl codecs) | Mesa's `amdgpu_query_*` calls answered; `eglinfo` shows `radeonsi` |
+| R4.7 | Sharing: PRIME export and import of a buffer (dma-buf), so the compositor and its clients exchange buffers; scanout of a video or system buffer from the display card | host and board | Sway starts on the Radeon's render node |
+| R4.8 | glmark2 on Sway: `GL_RENDERER` reports the Radeon (RADEON 610M), a full run with a score and screenshots | board | the acceptance capture |
+
+Each stage logs what it reads and writes, is triggered by its own sysctl until the stage after it needs it, and is checked on the
+board before the next is built on it. Anything that can hang the machine is asked of the user first (a reboot clears it).
+
