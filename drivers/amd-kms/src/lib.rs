@@ -482,7 +482,7 @@ pub fn create(g: Geometry, display: Arc<dyn Display>) -> Result<Arc<AmdKms>, Err
 impl DrmDriver for AmdKms {
     fn info(&self) -> DriverInfo {
         // "amdgpu" 3.x is what the rendering libraries look for; without a
-        // render side the card is only a display (GRAPHICS.md §16.3).
+        // render side the card is only a display (GRAPHICS.md §16.2).
         if self.render.get().is_some() {
             return DriverInfo {
                 name: "amdgpu",

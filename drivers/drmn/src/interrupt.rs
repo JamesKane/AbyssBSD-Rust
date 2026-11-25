@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! The Radeon's interrupts (stage R2.1 of docs/GRAPHICS.md §16.6): the
+//! The Radeon's interrupts (stage R2.1 of docs/GRAPHICS.md §16.3): the
 //! interrupt handler's ring in video memory, the vector `vgapci` owns, and
 //! the display's frame-start event, which is the vertical blanking
 //! interrupt.

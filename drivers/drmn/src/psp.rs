@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! The Radeon's platform security processor (stage R3.1 and R3.2 of
-//! docs/GRAPHICS.md §16.6): its ring, the table of contents, and the trusted
+//! docs/GRAPHICS.md §16.4): its ring, the table of contents, and the trusted
 //! memory zone, with every buffer in video memory.
 
 use alloc::sync::Arc;

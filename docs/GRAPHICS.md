@@ -625,786 +625,346 @@ Also unconfirmed until the board: that the firmware's sync polarities and porche
 modes carry (a mismatch only costs a visible blank, by the fallback above), and that the pixel clock reads
 back as the SCMI rate it was set to.
 
-### 15.6 First board session (2026-11-23)
+### 15.6 What the Orange Pi 6 Plus showed
 
-Orange Pi 6 Plus, AbyssBSD booted once per kernel by `BootNext` from FreeBSD, serial console captured. Sway
-1.12 (pixman) now runs stably on the display processor's card, 1920x1080 at 60 Hz, on the HDMI output
-(unit 4); the atomic test commit and the real commit both succeed. What the board showed, in the order found:
+Sway 1.12 runs stably on the display processor's card at 1920x1080, 60 Hz, on the HDMI output (unit 4) and
+on a DisplayPort monitor at up to 3840x2160 (`Hbr2 x4`); the atomic test commit and the real commit both
+succeed. The hardware facts the driver now follows, each learned on the board:
 
-1. **Resets.** Firmware releases only the unit it uses for the boot display. The other four display units
-   stayed in reset, and the interconnect's monitor (the firmware's `IDM` lines on the serial console)
-   reported a non-secure access error for each. The driver now releases `rcsu_reset`, then `ip_reset`,
-   before the first register access (sky1-soc 02 §2.2, §2.4).
+1. **Resets.** Firmware releases only the unit it uses for the boot display. The driver releases
+   `rcsu_reset`, then `ip_reset`, before the first register access (sky1-soc 02 §2.2, §2.4); otherwise the
+   interconnect's monitor reports a non-secure access error for each unit.
 2. **`MAX_LINE_SIZE`.** Reading a block's own `MAX_LINE_SIZE` (offset 8 of the first block) is refused on
-   this part, the same monitor line at `0x208` of each window. The walk uses the global line size for every
-   block and never reads it. A late bus error from the refused access may be what killed `init` (signal 10)
-   on the first boot; it did not recur once both reads were gone.
-3. **SMMU.** Moving a bypassed stream to a translated one went through an invalid entry, and the display
-   scanning the firmware framebuffer faulted (`C_BAD_STE`). A bypassing entry is now switched with one
-   64-bit store of word 0 after the other words are written, with no invalid window.
-4. **Shared register windows.** The USB-C PHY's control window (`UCRU`) lies inside the FCH reset
-   controller's window, and the audio one (`ACRU`) is shared with three audio devices. Both are declared,
-   as the S5 one was; before, the reset controller or a syscon failed to attach with `Claimed`.
-5. **Two cards.** Both the firmware framebuffer card and the native one existed for the same screen. The
-   native driver now retires the firmware card (`drm::retire_firmware_cards`) once its connector sees a
-   monitor, so only `card1` remains; the console keeps drawing on the framebuffer memory the display scans.
+   this part. The walk uses the global line size for every block and never reads it.
+3. **SMMU.** A bypassed stream is switched to a translated one with one 64-bit store of word 0 after the other
+   words are written, with no invalid window (an invalid entry faults the display, `C_BAD_STE`).
+4. **Shared register windows.** The USB-C PHY's control window (`UCRU`) lies inside the FCH reset controller's
+   window, and the audio one (`ACRU`) is shared with three audio devices. Both are declared, as the S5 one is.
+5. **One card.** The native driver retires the firmware framebuffer card (`drm::retire_firmware_cards`) once
+   its connector sees a monitor, so only `card1` remains; the console keeps drawing on the framebuffer memory
+   the display scans.
+6. **Link shutdown.** The bring-up after a link shutdown re-initialises the host side with a reset first
+   (sky1-dp-tx 02 §2.11.2); a flag set at shutdown makes the next enable do it. Without it a mode switch
+   leaves the link dead.
+7. **The channel's reply codes.** The sink answers an I2C-over-AUX read with the channel's own reply field
+   DEFER (`AUX_REPLY_CODE` = 2) while the I2C field reads ACK. The native field applies first
+   (sky1-dp-tx 01 §1.4.3), and a DEFER is retried (32 tries for an I2C request). Short I2C replies are continued.
+8. **EDID.** A sink that NACKs the E-DDC segment pointer (address `0x30`) ends the read, and what was read
+   stands (the base block carries the modes). A failed I2C-over-AUX transaction is closed with a bare address
+   packet, as the standard's helpers do; a transaction left open stops the sink answering. A failed link
+   bring-up (`Aux(Nack)` right after a shutdown) is retried after a pause, then once from a full re-initialisation.
+9. **Buffer release.** A flip can take effect a frame after its event is sent, so a buffer is released once
+   three newer commits have replaced it (`retire` in `drivers/linlondp/src/card.rs`); earlier releases showed
+   as `F_TRANSLATION` faults from the unit's stream. If the latch can be later than one frame, release should
+   follow the interrupt that confirms the latch (not seen).
+10. **Detach.** The transmitter's register windows are revocable (`Window` in `drivers/sky1-dp/src/lib.rs`):
+    the driver gives them back at stop whichever of encoder and display unit detaches first; later reads give
+    0 and writes do nothing.
+11. **Mode list.** `lib/edid` reads CTA-861 extension blocks (`lib/edid/src/cta.rs`): the video data block's
+    standard video codes, looked up in a table of the progressive 480p to 2160p timings (each entry carries the
+    rate it is meant to give and a test checks it to 0.1 %), and the detailed timings after the data blocks.
+    A size at a rate already given is not added twice; only the base block's first timing is preferred; a
+    malformed extension gives no modes. The 4K monitor's connector offers 15 modes (2160p at 60, 50, 30, 25, 24
+    Hz; 1080p at 120, 60, 50, 30, 24 Hz; 720p60/50; 576p, 480p, 640x480).
 
-Confirmed on hardware: the transmitter's auxiliary channel and EDID read (4 modes, first 1920x1080 at 60 Hz);
-adoption keeps the console lit; the first client modeset takes (the mode asked for is the one firmware ran).
-Still open: the sync polarity inversion and the rest of the list above need a mode that differs from
-firmware's; the connector's readout does not yet say the link rate and lanes; `sky1_dptx4` leaves three
-grants outstanding at detach (the card still holds its windows); the broker's named-component branch ran
-for the first time here and worked (streams of the unit translate; the framebuffer range kept scanning).
+Verified on hardware: EDID read on three monitors; the first mode firmware never ran (1680x1050, an older
+Acer) is stable; the 4K monitor steps through 2160p60 (`Hbr2 x4`), 1080p60 (`Rbr x4`), 1080p120 (`Hbr x4`),
+720p60 (`Rbr x2`) and back with every link bring-up taking and no `F_TRANSLATION` faults; a Sway restart takes
+the link down and up again cleanly.
 
-#### 15.6.1 Second half of the session: a real EDID and a mode firmware never ran
+Open: the sync polarities (a monitor that locks regardless of polarity shows the same picture); DisplayID
+extensions, YCbCr 4:2:0-only modes, interlaced modes and the audio blocks are not read; the connector's
+readout does not say the link rate and lanes.
 
-On a second monitor (an older Acer whose mode is 1680x1050 at 59.95 Hz) the first Sway modeset failed with
-the monitor's own "Input Not Supported" box, which exposed that the connector had **never read an EDID**: both
-monitors had been offered the fallback list (1920x1080, 1280x720, 1024x768, 640x480; make and model
-"Unknown"). Findings, in the order found, all fixed:
-
-1. **Link shutdown.** The spec's rule that the bring-up after a link shutdown re-initialises the host side
-   with a reset first (sky1-dp-tx 02 §2.11.2) was not followed: shutdown left the PHY interface in `DP_RESET`
-   and the next training started from it. Switching 1920x1080 to 1280x720 on the first monitor went black
-   and stayed black at the way back. A flag set at shutdown now makes the next enable run the full
-   re-initialisation.
-2. **Silent failures.** `link_up`, `stream_on` and the EDID path returned without saying why. The encoder
-   and the sink read now log (`sky1_dp: link up, Rbr x4, 8 bits a component`, `EDID not read: ...`).
-3. **The channel's DEFER on an I2C read.** The sink answers the EDID's I2C-over-AUX read with the channel's
-   own reply field DEFER (`AUX_REPLY_CODE` = 2, `AUX_REPLY_DATA_COUNT` = 0) while the I2C field reads ACK. The
-   driver looked only at the I2C field for an I2C request, saw an ACK with no data and failed. The native
-   field applies first (sky1-dp-tx 01 §1.4.3), and a DEFER there is retried (32 tries for an I2C request).
-   Short I2C replies are also continued now, as the standard asks, though the board did not need it.
-
-Confirmed on hardware: with the Acer's EDID read, the connector offers its one mode, Sway sets it, and the
-picture is stable. That mode was never run by firmware, so this is the first picture from the display
-processor's and transmitter's computed timing (back-porch adjust, transfer unit, data count, the vendor's
-inverted sync polarities, link training at `Rbr x4`). It does not prove the polarities are right: a monitor
-that locks to the signal regardless of polarity would show the same.
-
-4. **Buffers released too early.** Five `F_TRANSLATION` faults from the unit's stream appeared at the mode
-   set. Logging each buffer's mapping and unmapping placed them: a fault inside a buffer's range right
-   after that buffer was unmapped, about halfway down the frame. Sway cycles three buffers, and a flip
-   can take effect a frame after its event is sent, so the display still read the buffer the previous
-   commit replaced when the next commit released it. A buffer is now released once three newer commits have
-   replaced it (`retire` in `drivers/linlondp/src/card.rs`). After that, no faults in 35 seconds of steady
-   state. If the latch can be later than one frame the fix would have to tie release to the interrupt that
-   confirms the latch; not seen.
-
-5. **The detach leak.** The transmitter's detach left its three register windows outstanding (the ledger's
-   "detach left 3 grant(s) outstanding") because the display card holds its encoder and connector, and the
-   display unit's `remote-endpoint` link is an `Order` edge, which does not make the unit detach first. The
-   windows are now revocable (`Window` in `drivers/sky1-dp/src/lib.rs`): the driver gives them back at stop,
-   whichever detaches first, and later reads give 0 and writes nothing. The shutdown log no longer has the
-   line.
-
-Restart test on the Acer (one mode): stopping Sway and starting it again takes the link down and brings it up
-(a second `sky1_dp: link up, Rbr x4` line), and the picture returns stable with no faults. Sway's
-`output dpms off` and `on` brought the picture back but logged no new link bring-up, so it did not take the
-link down; it proves nothing about the shutdown path.
-
-#### 15.6.2 The original monitor (a 4K panel behind a KVM switch)
-
-With the original monitor back, its EDID read failed in two new ways, both fixed:
-
-1. **Segment pointer.** The sink NACKed the E-DDC segment pointer (address `0x30`) that EDID blocks 2 and 3
-   need, so the whole EDID was thrown away and the fallback modes offered. An extension block that cannot be
-   read now ends the read and what was read stands (the base block carries the modes).
-2. **A transaction left open.** The refused request had the middle-of-transaction flag set, and after it the
-   sink stopped answering on the AUX channel (`link did not come up: Aux(Timeout)`, then the connector
-   reported disconnected). A failed I2C-over-AUX transaction is now closed with a bare address packet, as the
-   standard's helpers do. This is the likely reason, not proven: the next boots did not show the timeout.
-
-Then, on the board, with Sway: 3840x2160 at 60 Hz (the EDID's only mode here) comes up on `Hbr2 x4` at 8 bits
-a component and is stable, the first run of an HBR2 link and of the largest mode; a custom 1920x1080 mode
-(`Rbr x4`), then 1280x720 (`Rbr x2`), then 3840x2160 again, each switch a full link shutdown and bring-up,
-all stable, with no `F_TRANSLATION` faults. The resolution switch that went black before the link-shutdown fix
-(1920x1080 to 1280x720 on this monitor) now works.
-
-#### 15.6.3 CTA-861 extension blocks and the mode list
-
-The connector had offered only the base block's one mode (the 4K panel's preferred timing). `lib/edid` now
-reads CTA-861 extension blocks (`lib/edid/src/cta.rs`): the video data block's standard video codes, looked
-up in a table of the progressive 480p, 576p, 720p, 1080p and 2160p timings, and the detailed timings after the
-data blocks. Their modes follow the base block's, a size at a rate already given is not added twice, and only
-the base block's first timing is preferred. A table written by hand can be wrong, so each entry carries the
-rate it is meant to give and a test checks its numbers against it (to 0.1 %). A malformed extension (bad
-checksum, wrong tag, a data block or timing offset outside the block, a truncated block) gives no modes.
-
-On the 4K monitor the connector went from 1 mode to 15 (2160p at 60, 50, 30, 25 and 24 Hz; 1080p at 120, 60,
-50, 30 and 24 Hz; 720p at 60 and 50 Hz; 576p, 480p and 640x480). A timed sequence on the board, with the
-monitor watched through a KVM switch, changed mode every 15 seconds: 2160p60 (`Hbr2 x4`), 1080p60
-(`Rbr x4`), 1080p120 (`Hbr x4`), 720p60 (`Rbr x2`), 2160p60 again; every step brought the link up, every
-picture was stable and correct, with no `F_TRANSLATION` faults. An earlier run of the same steps had failed
-at 1080p120 with `link did not come up: Aux(Nack)`, a refusal by the sink right after the previous link was
-shut down; the bring-up now tries again after a pause, and once more from a full re-initialisation, though
-the run that passed did not need either.
-
-Open: the sync polarities (a monitor that locks regardless would show the same picture); DisplayID
-extensions, YCbCr 4:2:0-only modes, interlaced modes and the audio blocks are not read.
-
-## 16. Radeon on the X870E (Raphael, then Navi 22): state and plan
+## 16. Radeon on the X870E (Raphael, then Navi 22)
 
 Specification: `~/Projects/OS/chinese-wall/specs/amd-rdna2` (sections 01 to 12; every source MIT).
-Code: `lib/amdgpu` (MIT, with AMD's notices), `drivers/drmn` (the AMD half), `vgapci`.
-
-### 16.1 Built and measured (2026-11-24)
-
-- **Attach.** `vgapci1` maps the register window (BAR5) and adds `drmn1`, which reads two fixed registers
-  (VRAM size, 512 MiB; the platform security processor's ready bit) and declines a device that answers all
-  ones. Nothing is written at attach.
-- **IP discovery.** `dev.drmn.1.discover` reads the table from the last 64 KiB of VRAM through the index
-  registers (restored afterwards, one lock) and logs 30 blocks, identical to Fedora's: GC 10.3.6, SDMA 5.2.6,
-  DMU (display) 3.1.5, PSP/SMU 13.0.5, interrupt handler 5.2.1, host data path 5.2.0, bus interface 7.3.0.
-- **The firmware's display (`dev.drmn.1.display`, 224 reads, no writes).** Pipe 0 only: plane 0, blend 0,
-  output processor 0, timing generator 0, encoder 0. 1920x1080 in a 2200x1125 total (Linux's later timing).
-  The surface is **linear, 32-bit ARGB, pitch 7,680 bytes, with no compression, at the first byte of VRAM**
-  (GPU address `0xF400000000`); the plane's system aperture covers all of VRAM, so a surface anywhere in VRAM
-  scans out with no page tables. The encoder is in DVI mode (no audio on HDMI as left). The display
-  microcontroller (DMCUB) runs the platform's firmware, not the driver's (scratch 0 = `0x42`).
-- **The kernel's framebuffer is BAR0.** `efifb: framebuffer at 0xfc10000000, 0x7e9000 bytes`: the loader's
-  GOP surface is the first 8,294,400 bytes of the iGPU's VRAM aperture (BAR0, 256 MiB of the 512 MiB), which is
-  the test for "this GOP picture is this device's": compare the loader's base with BAR0's.
-- **Frame buffer offset.** `DCN_VM_FB_OFFSET` = `0x1840`, so VRAM is system physical `0x1840000000`
-  (ACPI-reserved), as the wall author inferred.
-- **What firmware owns at handover** (wall author, 01 §6.1): VRAM `0` to the end of the GOP surface (use 9 MiB),
-  and the top 2 MiB (`0x1fe00000` on; the discovery table is in it). Not firmware-owned, so ours to place:
-  the PSP's trusted memory zone (10 MiB; Linux `0x1e000000`), the GART table (Linux `0x1fc00000`) and the
-  display microcontroller's windows.
-
-### 16.2 Stages
-
-Each stage names what it needs and how it is seen to work on the board. The first two are independent of the
-PSP; **mode setting and HDMI audio wait on the PSP** because the display microcontroller runs the platform's
-firmware (§16.1) and stage R3 must load the driver's.
-
-| Stage | Work | Depends on | Exit (seen on the X870E) |
-|---|---|---|---|
-| R0 | Identify; read the discovery table and the firmware's display state | Done | `drmn1` attaches; the table and the display read match Fedora's |
-| R1 | Adopt the running display (pipe 0); scan out the driver's own buffers by flipping the surface address; the KMS device `gop-kms` gives way to; vblank; `vt` follows | The CPU path to VRAM (§16.3); sys/drm; vt handover | A dumb-buffer client (a test pattern, then `kms-test`) flips between two buffers at 60 Hz with the panel never blanking; killing the driver (or a panic) puts the firmware's picture back |
-| R2 | Memory: GMC (apertures, GART, GPU page tables), the interrupt ring, the doorbells | Spec 05 | A GPU page-table walk of a test buffer; an interrupt (a fence signalled by the engine in R4) arrives |
-| R3 | The platform security processor (load firmware, set the trusted memory zone), the SMU (clocks), the DMCUB bring-up; then mode setting (timing, clocks, watermarks) and HDMI mode with audio | Specs 03, 04, 08 stage 2 and 3 | A new mode (1280x720, then 3840x2160 on a second output) comes up and the old one returns; an HDMI info frame and HD Audio over HDMI work |
-| R4 | The graphics and DMA engines (ring buffers, the command processor), the userland interface (`amdgpu` ioctls) | Specs 06, 07, 09 | `vkcube` through RADV, then Sway through wlroots on Vulkan (the acceptance capture, §14) |
-| R5 | The same on the Navi 22 (Z690-A) | Its discovery table (read by R0 on that box) and VBIOS | R0's exit there, then R1 |
-
-### 16.3 Stage R1
-
-**Where the work lives.** A `dcn` module in `drivers/drmn`'s AMD half implements `sys/drm`'s `CrtcHw`,
-`PlaneHw`, `EncoderHw` and `ConnectorHw` for the adopted pipe. Adoption is as §15.5 does for Sky1: only if a
-timing generator runs **and** the loader's framebuffer lies in this device's BAR0 (the alias test in §16.1);
-with the RTX 4070 as the boot display it does nothing. The KMS device it registers replaces `gop-kms`
-(§7.5): `vt` switches to its console framebuffer and back if it detaches.
-
-**What a flip is.** Write the surface address high then low (`HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH`
-`0xeb2c`, then `_ADDRESS` `0xeb28`), with pitch `0xeb1c` (pixels minus 1) and format unchanged from what the
-firmware set; poll the flip-pending bit, or the vblank, for completion. Nothing else is touched in R1: no
-clocks, no watermarks, no timing, and the encoder stays in the mode firmware left it.
-
-**Buffers.** Scan-out buffers are allocated from the VRAM range `[9 MiB, 0x1e000000)` (about 471 MiB), bounded by BAR0's 256 MiB for the CPU path (a buffer the CPU writes must lie in BAR0), and clear of the top 2 MiB, which the platform's display
-microcontroller still uses (its windows run from `0x1fe00000`; the first window past `0x1ffd0400` overruns the end of VRAM). Their GPU
-address is `0xF400000000 + offset`; the plane's aperture already covers them.
-
-**The CPU path (decision needed, §16.4).** A dumb buffer needs the CPU to write pixels into VRAM. The
-candidates:
-
-1. *BAR0* (chosen 2026-11-24). It is this node's own resource and a write-combining window onto the first
-   256 MiB of VRAM, enough for R1. The broker kept it from drivers because the console's framebuffer (the same
-   bytes) is a sensitive range. The rule as built: `AttachCx::mmio_bytes_console` grants a prefetchable resource
-   the console's framebuffer lies wholly inside, with no other sensitive range overlapping, mapped
-   write-combining as the console's own mapping is; every other overlap still refuses (host tests in `sys/bus`).
-   The console keeps drawing on its mapping until `vt` switches to the driver's display.
-2. *The carve-out at `0x1840000000` (512 MiB).* It reaches all of VRAM, but it is ACPI-reserved memory, not a
-   PCI resource, so it would need a new kind of grant (a platform memory claim computed from two registers,
-   not a table entry per board).
-
-Writes through BAR0 need the host-data-path flush before the display reads them (the
-register is in spec 05); the probe `dev.drmn.1.vram` (reads the first words of BAR0; written, not yet
-accepted, see §16.5) is the first test.
-
-**Fallback.** `stop` and the panic path write the firmware surface's address back (it is never overwritten:
-buffers start above 9 MiB) and unregister the KMS device, so `vt` draws on the efifb range again. The board has
-no serial, so this is the only recovery short of a power cycle.
-
-**Vblank.** No interrupt ring until R2. Start with the core's timer from the mode's refresh rate
-(`vblank_interrupt()` false, as `gop-kms` does), and read the timing generator's frame counter to confirm.
-
-**First board test.** A sysctl that flips between two buffers holding a test pattern, back to the firmware
-surface after a timer, so a hang can be told from a bad picture on the screen.
-
-**Driver name.** The userland ioctl `DRM_IOCTL_VERSION` reports the Linux driver name, `amdgpu` (§2), but R1
-has no render side: Mesa probes by that name and finds no render node, which is the case `gop-kms` already
-presents (`simpledrm`-like). Spec 09 lists what RADV expects; none of it is in R1.
-
-### 16.4 Decisions for the owner
-
-1. **The CPU path to VRAM:** decided 2026-11-24: BAR0, with the console-adoption grant of 16.3.
-2. **The iGPU stays the primary display** until the AMD stack is complete (decided 2026-11-24).
-3. **The order after R1 (still open; the owner's "recommendations" did not cover it):** R2 (memory and interrupts) before R3 (PSP, SMU, mode setting), or R3 first because
-   mode changes need it and R2 only matters for the render side.
-
-### 16.5 Proven on the board (2026-11-24)
-
-- **BAR0 is the video memory.** `dev.drmn.1.vram` writes two words through BAR0 (at 64 MiB and at the aperture's
-  end) and reads them back through the index registers: identical. The loader's framebuffer is therefore the first
-  8,294,400 bytes of the iGPU's video memory, and the console and the display's scan-out read the same bytes.
-- **The flip works.** `dev.drmn.1.flip` adopts pipe 0 (`lib/amdgpu/src/flip.rs`: timing generator on, no flip
-  pending, surface at the start of video memory, pitch 1920), paints eight colour bars with a white frame at video
-  memory 16 MiB through BAR0, flushes the host data path, flips to it (taken in 9.6 ms, within one 60 Hz frame),
-  holds three seconds, and flips back (16.5 ms). The owner saw the bars and then the console again. Only the
-  surface address (high half first, then the low half that latches it) and the flip-type bit were written to the
-  display, plus the host-data-path setup (05 section 7).
-- **Scan-out in place is not possible yet.** `sys/drm`'s buffer objects are cached system memory only
-  (`Gem::new` refuses other placements), and the display reads system memory only through GART page tables (R2).
-  So R1's KMS device keeps clients' buffers in system memory and a commit **copies** the pixels into one of two
-  video-memory surfaces through BAR0, then flips to it: tear-free, and the copy is the cost `gop-kms` pays too.
-- **The card works (2026-11-24).** `drivers/amd-kms` implements `CrtcHw`, `PlaneHw`, `EncoderHw` and `ConnectorHw`
-  over this flip: a commit copies the client's pixels (forced opaque) into the back one of two video-memory
-  surfaces through BAR0 and flips to it; turning the controller off flips back to the firmware's surface, which is
-  the console's. `drmn` registers it as `dri/card1` and retires the firmware framebuffer card when
-  `hw.drmn.kms=1` is on the kernel command line (`EFI/ABYSS/CMDLINE`), the display is the firmware's (timing
-  generator on, surface at the start of video memory) and the console's framebuffer is the start of this
-  device's BAR0. `tests/graphics/kmsflip.c` (raw ioctls, no libdrm) set the 1920x1080 mode (19.9 ms) and flipped
-  between a gradient and a bar pattern six times (3.2 ms each); the owner saw both on the screen. The card
-  passes the same kind of QEMU kernel test as the firmware card (`drm_card.rs`) over a display in memory.
-- **Only the whole screen:** a plane smaller than the screen is refused, as the surface shown is drawn whole.
-- **The panic path (2026-11-24).** `DrmDriver::panic_restore` (default: nothing) is called for every registered
-  card by `drm::panic_restore()`, which the kernel's panic handler and fatal-trap report run after the other
-  processors are stopped and before anything is printed, so the console text (drawn on the firmware's surface)
-  can be seen. The Radeon card's takes no lock and waits for nothing: two register writes pointing the display at
-  the firmware's surface. A host test holds the card's lock and a pending flip and still gets the write; the QEMU
-  kernel test calls it on a card showing a client's buffer. On the board `dev.drmn.1.panic_restore` runs the same
-  hook: with `kmsflip` holding surface A (`0xf401000000`) the surface read `0xf400000000` a second later, and the
-  owner saw the held frame give way to the console's, and then to solid magenta when the console's surface was
-  painted (a test, since removed): the display scans the console's surface after the hook. While a client holds the
-  screen, `vt` does not draw, so the console's surface shows what it last drew.
-- **Shutdown and reset keep the last frame.** `stop` flips back to the console's surface for every detach reason
-  except `Shutdown` and `Reset`, across which the last frame stays rather than flashing the console.
-- **Vblank by timer is right (2026-11-24).** `dev.drmn.1.refresh` counts the timing generator's frames
-  (`OTG0_OTG_STATUS_FRAME_COUNT`, `0x14030`) over three seconds: 180 frames in 3.000053 s, 59.998 Hz, against the
-  mode's 60.000 Hz and the core's frame timer (which runs at the mode's rate while the card has no vertical
-  blanking interrupt). The 0.003% difference is under a frame in ten minutes; the interrupt comes with R2.
-- **On by default.** `hw.drmn.kms` is on unless set to 0; the card still registers only if the firmware's display
-  is running and is the console's, so it does nothing on a machine where the Radeon is not the boot display. The
-  board boots with no tunable and gets `dri/card1`.
-- **The Sway acceptance runs on it (2026-11-24).** On the X870E, `amd-display` (`dri/card1`, the Radeon 610M's
-  display) carries Sway 1.12 and wlroots with the pixman renderer at 1920x1080, 60 Hz, a successful modeset test
-  commit, `foot` running `fastfetch`, and `foot` running glmark2's jellyfish at about 549 frames a second on
-  llvmpipe (Mesa 26.2.2). Capture: `tests/graphics/accept-x86_64-amd-display.png`, taken with `grim` on the
-  machine. Mesa's messages about a failed `ZINK` and a missing driver name for fd -1 are the render side's
-  absence (R4): there is no render node, so it falls back to software, as it does on `simpledrm`.
-- **R1 is done** except what waits on later stages: the vertical blanking interrupt (R2), and scanning out
-  clients' buffers in place (R2's page tables) instead of copying them.
-- **Not yet read or done:** the decoding of the platform display firmware's window registers is in the
-  specification's 08 section 9.0.1; stage R3 overwrites those windows, so R1 stays out of the top 2 MiB.
-
-### 16.6 R2 and R3 in steps (2026-11-24)
-
-The owner's order is R2 (memory and interrupts), then R3 (the security processor, the display microcontroller,
-mode setting, HDMI audio). Reading specifications 03, 05 and 08 for it shows how little the two depend on
-each other: **the PSP's ring, fence, command and staging buffers, the trusted memory zone and the
-display microcontroller's windows all fit in video memory, which the display and the PSP already reach through
-the system aperture (no page tables)**. R3 therefore does not wait for R2's page tables; R2 is first because it
-brings the vertical blanking interrupt, which R3's mode setting wants, and the memory the engines (R4) need.
-
-The display shares the memory hub (MMHUB) with the multimedia engines, so **R2's hub writes are the first
-that can disturb the picture**. Each is made one hub at a time, the graphics hub (GFXHUB, which the display does
-not use) before the MMHUB, and each is checked by the frame counter still counting and a flip still working.
-
-| Step | Work | Depends on | Exit (seen on the X870E) |
-|---|---|---|---|
-| R2.0 | Read-only capture of the registers R2 will write (both hubs' apertures, L1 TLB and L2 control, fault control, the interrupt handler's ring registers, the host data path, the doorbell aperture and its ranges), as the firmware and the GOP left them; compared with the specification's reference values and Linux's | Done with R1 | The capture is in the corpus; every register the specification names reads as it says or the difference is recorded |
-| R2.1 | Interrupts: one MSI vector through `vgapci`; the interrupt handler's ring in video memory (no GART), its read pointer by register; the display's frame-start interrupt (client 4, source `0x3c`, `OTG0_OTG_GLOBAL_SYNC_STATUS` bit 0); the card's `vblank_interrupt()` true and `Kms::vblank` from the handler, the timer retired | R2.0; interrupt delivery for a `vgapci` child | The interrupt count over three seconds equals the frame count (180 at 60 Hz) and `kmsflip`'s events arrive from it; the ring never overflows over ten minutes of Sway |
-| R2.2 | The graphics hub: GART aperture, system aperture, fault defaults, L1 TLB, L2, context 0 and the user contexts, the invalidation engines, the host data path flush; the GART table in video memory | R2.0; spec 05 §4–5 | Registers read back as written; an invalidation request on engine 17 is acknowledged; the display's frame counter never stops and a flip works throughout |
-| R2.3 | The memory hub (MMHUB), the same, with the display's aperture settings kept as the firmware set them | R2.2 | The same exit, and `kmsflip` and Sway run unchanged; if the picture blinks, the first register that differs is found by writing one at a time |
-| R2.4 | Doorbells: BAR2 mapped, the aperture enabled, the interrupt handler's and the engines' ranges (the Raphael ranges are behind the NBIF index/data pair) | R2.1 | The interrupt handler's read pointer, written through its doorbell, shows in `IH_RB_RPTR` |
-| R3.1 | The firmware files on the board, and the PSP ring: the secure OS is already running (`C2PMSG_81` nonzero); ring, command, fence and staging buffers in video memory; the ring created | The files; spec 03 §1–4 | A harmless command (the security processor's version query, or TOC load) returns success in the response block |
-| R3.2 | The TOC, the trusted memory zone (10 MiB, outside the top 2 MiB the platform's display microcontroller holds), and the display microcontroller's image loaded by type 51; its reset, its windows (CW2–CW6, region 5) and inbox/outbox programmed from the driver layout; its release | R3.1; spec 08 §3.2, §9.0.1 | `SCRATCH0` bits 0 and 1 set (the driver's firmware runs); the picture never blanks until the platform's windows are replaced, and a flip still works after |
-| R3.3 | Mode setting through the display microcontroller and the register path: a second mode, the old mode again; clocks (the SMU, spec 04 §4: Raphael needs messages 4 steps), watermarks from a table, not the GOP's | R3.2; spec 04, 08 §3–6 | 1280x720 and back on the panel, the timing generator's totals as set |
-| R3.4 | HDMI mode with audio: the encoder's HDMI configuration, the audio infoframe and the audio clock; the HD Audio controller on the Radeon's function 1 (the HDA driver is there) | R3.3 | A tone through the monitor's speakers |
-
-**What is on the board for R3.** Firmware files (`dcn_3_1_5_dmcub.bin`, the PSP TOC and trusted applications
-for 13.0.5; 02 §9) are on the Fedora machine under `/lib/firmware/amdgpu` as `.xz`; the board's FreeBSD has none.
-They are loaded with the DMCUB firmware's own 256-byte header and footer intact (spec 02 §6). Getting them onto
-the board is a copy of the files (decompressed on this machine) into the AbyssBSD root; the loader of firmware
-in the kernel is what the NVIDIA half already uses.
-
-### 16.7 R2.0: what the firmware left (2026-11-24)
-
-`dev.drmn.1.memory` (`lib/amdgpu/src/memory.rs`, 120 plain reads; the invalidation engines' semaphore registers
-are left out, as reading one takes the semaphore) on the X870E at the GOP's state; the capture is
-`tests/corpus/x870e/abyssbsd/raphael-drmn1-memory.txt`.
-
-- **As the specification says the reference leaves them.** Both hubs: video memory at `0xf400` to `0xf41f`
-  (16 MiB units), frame buffer offset `0x1840`, system aperture `0x3d0000` to `0x3d07ff` (the whole of video
-  memory, 256 KiB units), default page address 0. Both L2 caches have `CNTL3`, `CNTL4` and `CNTL5` at their reset
-  values (`0x80100007`, `0xc1`, `0x3fe0`); fault control is `0x3ffffffc` (every default-enable bit set, both
-  crash bits clear).
-- **No page tables anywhere.** Context 0 and context 1 of both hubs read `0x007ffe80` (`ENABLE_CONTEXT` clear),
-  with the page-table base, start and end zero. The display, the security processor and the interrupt handler
-  reach video memory by the system aperture alone, which is what R2.1 and R3.1 rely on.
-- **Differences from what Linux writes** (to be settled by the specification's author): the L1 TLB control reads
-  `0x501` on both hubs (Linux's step writes enable, access mode 3, advanced driver model and type 3); fault control
-  2 reads `0x20000` (graphics hub) and `0xa0000` (memory hub); the AGP aperture reads 0 for bottom, top and
-  base (Linux disables it with a bottom of `0xFFFFFF`).
-- **The interrupt handler is off and unmade.** The ring control reads `0x40610000` (enable clear, `MC_SPACE` 4,
-  the reset value), base, pointers and write-back address zero, its doorbell off, the doorbell aperture
-  (`DOORBELL_APER_EN`) 0, the bus interface's interrupt control `0x10000` and its dummy page 0. The host data path's
-  flush-invalidate bit is already set (`HDP_MISC_CNTL` `0x2d600be1`), with the flush remap registers at their
-  defaults `0x385c` and `0x3858`.
-- **Questions sent to the specification's author** about the L1 TLB bits, fault control 2, the AGP window, the
-  interrupt control's bit 16, and whether the interrupt ring and its write-back slot may be in video memory with
-  no page tables. R2.1 builds on that answer.
-
-### 16.8 R2.1: interrupts (2026-11-24)
-
-- **The vector.** `vgapci` enables one MSI message for an AMD function it is wanted for (`hw.vgapci.msi`, on by default; the specification's reference asks for one vector of any type), turns bus mastering
-  on, and installs the interrupt filter, which calls the sink the GPU driver registers once
-  (`vgapci::InterruptSink`).
-- **The ring is in video memory, with no page tables.** 64 KiB (2,048 entries) at BAR0 offset 128 MiB with its
-  write-back slot after it, addressed by the video memory's GPU address (`0xF4_0800_0000`), not snooped
-  (`MC_SNOOP` clear), the processor reading it through BAR0. The specification's author expected this to work
-  (the reference puts the ring in GART-mapped system memory and never does this on bare metal; `05` marks it
-  open): **it works**, with both hubs' contexts off and the L2 caches off, as the firmware left them. The bus
-  interface's dummy page is not written (the dummy read is off, and bit 16 skips it for MSI).
-  `lib/amdgpu/src/ih.rs` has the bring-up sequence and the entry decoder and ring drain, tested on the host
-  (wraps, overflow restarts at the oldest entry the ring holds, hostile pointers handle nothing).
-- **The display's frame-start event is the vertical blanking interrupt.** `OTG0_OTG_GLOBAL_SYNC_STATUS` bit 0
-  enables it, writing bit 4 clears it (08 section 2.5); no interrupt-routing registers needed programming
-  (the open question there). The entry is client 4, source `0x3c`.
-- **On the X870E:** 181 interrupts in three seconds and 361 in six: 60 a second, every entry a frame start, no
-  others, no overflow. With the card on it (`CrtcHw::vblank_interrupt` true, while the interrupts run, and the
-  handler calls `Kms::vblank`), `kmsflip` flips at 3.2 ms and Sway with glmark2's jellyfish runs at about 504 to
-  533 frames a second, the interrupt count matching the frame count.
-- **The soak passed:** ten minutes of Sway with glmark2's jellyfish, 42,048 frame starts, no overflow, no error in
-  the Sway log. `hw.vgapci.msi` is on by default (the owner agreed 2026-11-24; `=0` turns it off). The read pointer is written by
-  register; the doorbell is R2.4.
-
-### 16.9 R2.2 and R2.3: the translation hubs (2026-11-24)
-
-- **Code.** `lib/amdgpu/src/gmc.rs` has both hubs' register maps (arrays on the graphics hub, eight-dword
-  interleaved blocks on the memory hub) and the specification's setup order (05 section 5.1): the GART's flat
-  table, AGP off (bottom above top), a dummy page for faults and aperture misses, the L1 translation buffer and
-  the L2 read-modify-write so the firmware's ECO bits and reset values survive, context 0 on with depth 0 and no
-  retry, the identity aperture off (graphics hub), the fifteen user contexts, the invalidation engines'
-  ranges; plus the invalidation through engine 17 (the memory hub's semaphore taken around it). Tested on the host
-  against a model of each hub, including the order (the context is enabled only after the table, the buffers and
-  the L2 are set), the register strides, and that the semaphore is released.
-- **In the driver.** `dev.drmn.1.gmc` (graphics hub) and `dev.drmn.1.gmc_mm` (memory hub), each a trigger, share one
-  GART table: 2 MiB at BAR0 offset 144 MiB (video memory physical `0x1849000000`), every entry invalid, covering
-  GPU addresses 0 to 1 GiB, and one dummy system page from a new DMA tag on the AMD function (44 address bits).
-- **On the X870E, graphics hub then memory hub:** each reads back context 0 `0x007ffe01` (enabled, flat, no
-  retry), the L2 `0x00080e01` (on, default page out to system memory), the L1 `0x00001d59` (the firmware's ECO bits
-  kept, access mode 3, advanced driver model, uncached type), and its VMID 0 invalidation is acknowledged. The
-  display and the interrupt handler, which use the memory hub, did not notice: the interrupts kept coming at 60 a
-  second through both, `kmsflip` flipped at 3.2 ms, and Sway with glmark2's jellyfish ran at about 497 to 537
-  frames a second with no overflow and no error (`tests/graphics/accept-x86_64-amd-display-irq.png`).
-- **Not automatic yet.** Nothing uses the GART until the engines (R4), so the hubs are set up on request. The
-  memory hub's identity-aperture registers are not in the specification's table and are left alone; context 1
-  is not used.
-
-### 16.10 R2.4: doorbells, and R2 done (2026-11-24)
-
-- **Doorbells work.** `vgapci` maps BAR2 (the 2 MiB doorbell aperture); `lib/amdgpu/src/doorbell.rs` enables the
-  aperture (`RCC_DOORBELL_APER_EN`), programs the bus interface's interrupt handler range (dword `0x2f0`, two
-  dwords) behind the NBIF index/data pair (`RSMU_INDEX` `0x50`, `RSMU_DATA` `0x54`, byte `0x1403bc8`, the index put
-  back as found), and sets `IH_DOORBELL_RPTR`. `dev.drmn.1.doorbells` then makes the interrupt handler publish its
-  read pointer by doorbell (BAR2 byte `0xbc0`) instead of the register. On the X870E, with the interrupts at 60 a
-  second, `IH_RB_RPTR` reads back the driver's pointer (`0x26e0`, and `0x3d60` on a second run: they agree), and
-  `kmsflip` flips as before.
-- **R2 is done:** MSI vector and interrupt ring in video memory (R2.1), both translation hubs (R2.2, R2.3),
-  doorbells (R2.4), and the display's vertical blanking from the interrupt. The hubs and doorbells are set up
-  on request (`gmc`, `gmc_mm`, `doorbells`); they become automatic when the engines need them (R4).
-
-**R3 as the specification's author lays it out (05, 03; 2026-11-24).** Everything in R3's PSP part fits video
-memory addresses (the ring, command and fence buffers, the 1 MiB-aligned staging buffer, the image area, the trusted
-memory zone, each by its `0xF4_...` GPU address; the zone's separate physical address field is `0x18_4000_0000`
-plus the offset), so the GART is not needed. The secure OS is already running (`C2PMSG_81` nonzero): create the
-ring, load the TOC (`psp_13_0_5_toc.bin` from offset `0x100`, 1,536 bytes; command `0x20`; the response's size
-field is the zone's, `0xa00000`), set the zone up (`0x05`, flags `0x2`), then the images. **Loading the display
-microcontroller's image (type 51) is held back to the display's second stage:** the platform's firmware is
-driving the display, and the reference never loads it alone after the other images (untested). The engine images
-(SDMA0, CE, PFP, ME, MEC, the RLC lists and RLC_G, then "start RLC autoload", the ASD from the trusted
-applications file) are R4's graphics bring-up, not the display's; R3 for the display needs the ring, the TOC,
-the zone, and then the display microcontroller's load as one experiment. The files (decompressed from linux-firmware
-20261019, checked against 02 section 11) are: `psp_13_0_5_toc.bin`, `psp_13_0_5_ta.bin`, `sdma_5_2_6.bin`,
-`gc_10_3_6_{ce,pfp,me,mec,mec2,rlc}.bin`, `dcn_3_1_5_dmcub.bin`.
-
-### 16.11 R3.1 and R3.2: the security processor's ring, table of contents and trusted memory zone (2026-11-24)
-
-- **Code.** `lib/amdgpu/src/psp.rs` has the mailbox registers (MP0 segment 0: `C2PMSG_64` ring control `0x58200`,
-  `_67` the write pointer `0x5820c`, `_69` to `_71` the ring's address and size, `_81` the secure OS's sign of life
-  `0x58244`), the 64-byte ring frame, the 1 KiB command buffer with its response block at `+0x360`, the load-TOC
-  (`0x20`), set-up-TMR (`0x05`) and load-firmware (`0x06`) commands, and the ring creation and submit sequences of 03
-  sections 4.2 and 4.4; ten host tests against a model of the PSP (a frame in the ring, its fence, its response, the write pointer
-  wrapping after 64 frames, a PSP that never answers, one that refuses the ring, a secure OS that is not running).
-  `drivers/drmn/src/psp.rs` runs it on the X870E, every buffer in video memory: the ring, command buffer and
-  fence at BAR0 offset 160 MiB, the 1 MiB-aligned staging buffer at 161 MiB, the zone at video memory `0x1e000000`
-  (outside the top 2 MiB, away from the interrupt ring and the GART table). The firmware file is read by
-  `kernel/src/firmware_files.rs` (a whole file by path from the root, handed to `drmn` with `set_firmware`; the
-  files are the operator's, in `/lib/firmware/amdgpu/`, decompressed from linux-firmware 20261019 and checked against
-  02 section 11) on the bring-up's own kernel thread (`sched::spawn`), because a sysctl writer has no `Sleepable`.
-- **On the X870E, `dev.drmn.1.psp=1`:** the translation hubs set up first (the specification says the PSP's
-  addresses go through them), the secure OS running (`C2PMSG_81` `0x1dde5d`, boot firmware initialised, version
-  register `0x420016`), the ring created, the table of contents (`psp_13_0_5_toc.bin`, its 1,536-byte payload
-  from offset `0x100`) loaded with status 0 and **a trusted memory zone of `0xa00000` bytes, the size the
-  specification measured**, the zone set up at GPU address `0xf41e000000` (physical `0x185e000000`) with status 0.
-  The display and the interrupts ran through it (3,168 frame starts, no overflow).
-- **Next (R3.3):** the display microcontroller. 08 section 3.2: reset it, give the PSP its image (type 51; the PSP
-  places it and writes its first two windows itself), program the others (windows 2 to 6, region 5) and the
-  inbox and outbox from the driver's layout (bases `0x6000_0000` and up, which differ from the platform's `0x0n00_0000`),
-  release the reset and wait for `SCRATCH0` bits 0 and 1. The platform's firmware is running now: the picture is
-  scanned out by the timing generator and the plane, not by the microcontroller, so a reset should not blank it,
-  but the platform's windows are overwritten and its state is lost. Untested: the reference loads the image with
-  the other engines' and never alone.
-
-### 16.12 R3.3: the display microcontroller loaded through the security processor (2026-11-24)
-
-- **Code.** `lib/amdgpu/src/dmcub.rs` has the registers, the firmware metadata finder (the state and trace window
-  sizes), and the steps of 08 section 3.2 as separate functions (`stop`, `hold`, `clean`, `configure`, `release`,
-  `wait_running`) with eight host tests against a register model. `drivers/drmn/src/dmcub.rs` runs them on the
-  X870E with a log line between each (`dev.drmn.1.dmcub=1`, on a kernel thread; it brings the security processor up
-  first if needed): the image and the windows' memory written in video memory (BAR0 offsets 161 to 165 MiB), the
-  platform's firmware asked to stop, the unit held in reset, the security processor given the whole instruction
-  region (239,392 bytes, type 51), windows 2 to 6, region 5, the mailboxes and the boot options programmed, the unit
-  released.
-- **On the X870E:** the platform's firmware answered the stop request; the unit held (`DMCUB_CNTL2` 1,
-  `MMHUBBUB_SOFT_RESET` `0x100`); the load returned status 0; the **display firmware came up**: `DMCUB_SCRATCH0`
-  `0x42` before (platform) and `0x43` after (bit 0 display firmware, bit 1 mailbox ready). The firmware version in the
-  image's metadata is `0x05003700`, state window `0xc880`, trace window `0x10010`, as 02 section 11 says. The display
-  kept scanning out: the frame-start interrupts went on (2,394 at the time of the check, no overflow).
-- **What the security processor wrote.** Window 0: base `0x0`, top `0x8003a51f` (enabled, last address `0x3a51f`,
-  the image's instruction size less the 512-byte frame), physical offset `0x18_5e300000`. Window 1: base
-  `0x1000000`, top `0x810c5adf`, offset `0x18_5e33a600`. So the security processor uses the platform layout's
-  `0x0n00_0000` bases for windows 0 and 1, not the `0x6000_0000` ones 08 section 3.2's table lists; both
-  windows are inside the trusted memory zone (physical `0x185e000000` up). The firmware ran with the driver's
-  windows 3 to 6 at `0x6n00_0000` regardless. (A note for the specification's author.)
-- **Not done:** the firmware has no command yet (no inbox use, no video BIOS copy: window 3 is zeros), window 2 is
-  off, the boot options are 0. The next step is the first command through inbox 1 (a mailbox round trip), then the
-  clocks and the mode (R3.4).
-
-### 16.13 R3.4 (first part): conversations with the display firmware (2026-11-24)
-
-- **Code.** `lib/amdgpu/src/dmcub.rs` gains the command header (type, subtype, reply flag, payload size), `version`
-  (the general-purpose interrupt register, command 1, answer in `SCRATCH7`) and `Inbox` (a 64-byte slot at the write
-  pointer, flushed, the write pointer moved, the read pointer waited for; a full ring and a firmware that does not read
-  are errors), with four more host tests. The driver runs both right after the firmware comes up.
-- **On the X870E:** the firmware reports version `0x5003700`, the image's own; a no-operation command through inbox 1
-  was taken (read pointer `0x40`, one slot). The mailbox ring works both ways of reaching the firmware.
-- **Next.** Mode setting is where the specification itself says the largest unknown is (08 section 3.6: the
-  bandwidth model's request and watermark values for a mode other than the firmware's 1080p60 are not derived), so the
-  next steps are: the firmware commands that matter without a new mode (query of the connectors' hot-plug state,
-  enabling outbox 1), then HDMI mode and audio on the firmware's own mode, and only then a different timing.
-
-### 16.14 R3.4: HDMI mode, the AVI info frame and the audio side (2026-11-24)
-
-- **Code.** `lib/amdgpu/src/hdmi.rs` (ten host tests against a register model, with the endpoint index/data pair and
-  the packet memory modelled): the audio encoder setup, the endpoint configuration bracketed by the clock-gating
-  disable, the audio clock written source first, the switch of the first encoder to HDMI mode (back-end mode, clock
-  pattern, a pulse of the front-end start bit, the stream controls), the AVI info frame for 1080p60 at index 0 with the
-  specification's bytes, the packet controls, the endpoint's enable and the unmute. `drivers/drmn/src/amd.rs` runs
-  them as three triggers: `dev.drmn.1.hdmi_audio` (the audio side only; the picture is not touched), `hdmi` (the
-  video switch, the packets, the enable and the unmute; prepares the audio side first if needed) and `hdmi_off`. Each
-  logs the registers it changes, before and after.
-- **On the X870E:** the audio side took (endpoint 0 speakers `0x10001`, linear PCM descriptor `0x70701`, audio clock
-  module `0x16a8c8`, phase `0x3a980`, the clock-regeneration pairs, auto-send on). `hdmi` then moved `DIG_BE_CNTL`
-  from `0x20100` to `0x30100`, `HDMI_CONTROL` from `0x10011` to `0x10019`, wrote the AVI frame without a packet-memory
-  conflict, set the packet controls (the AVI sent every frame), set the endpoint's audio-enabled bit (`0x80000000`)
-  and the sample-send bit. **The user watched the screen: the picture stayed fine through the switch.** The frame count ran
-  on (3 frames in 50 ms after the switch), and the interrupt count kept pace, no overflow.
-- **Observed, not explained:** `HDMI_DB_CONTROL` read `0x10010` before and `0x1000` after setting bit 12 (the two
-  other bits went to 0, status bits by their look). `AFMT_STATUS` bit 4 (audio enabled) still reads 0: probably it
-  needs an audio stream from the HD Audio side (not started). The audio info frame bytes and the choice between the
-  three clock-regeneration pairs are OPEN in the specification.
-- **Sound is not tested.** The kernel's HD Audio driver (`drivers/hda`) attaches to the Radeon's controller (`hdac1`,
-  vendor 1002 device 1640, function group `hdaa1`) but names the devices only; there are no streams or a PCM device
-  yet, so nothing plays. That is the next piece of work for audio (an HD Audio stream and a sound device), not part of
-  the display driver.
-- **Not done:** the sink's EDID (no DDC engine yet), so the endpoint's descriptors are the generic stereo ones and the
-  sink name is empty; the 60958 channel numbers for channels 2 to 7; modes other than 1080p60 (the audio clock is
-  fixed at 148.5 MHz).
-
-### 16.15 R3.4: the monitor's EDID over DDC, and the audio endpoint from it (2026-11-24)
-
-- **Shared type.** The EDID parser is `lib/edid` (from the Sky1 display work), not a copy in the Radeon library: it now
-  also reads the CTA-861 short audio descriptors (by format code), the speaker allocation and the basic-audio flag, and
-  the manufacturer and product codes, for any display driver's audio endpoint.
-- **Code.** `lib/amdgpu/src/ddc.rs`: the display core's hardware I2C engine (08 section 4.7): the arbitration (request,
-  owner status, done), the pin hand-over (the DDC group's mask cleared, the pad in I2C mode, all put back after), up to
-  four transactions in one run (segment pointer for blocks 2 and above, the offset write, the read), the buffer's
-  readback from the saved index; eight host tests against a model engine with a monitor behind it (the specification's
-  worked example for block 0 exactly, the segment pointer, a NACKing monitor, the display firmware holding the engine,
-  the pins restored on every path). `dev.drmn.1.ddc_probe` logs the engine's and pins' registers (reads only);
-  `dev.drmn.1.edid` reads the EDID, logs it, parses it and writes the endpoint (`hdmi::endpoint_configure_for`).
-- **On the X870E:** `MICROSECOND_TIME_BASE_DIV` reads `0x00120218`, not the `0x00120264` the specification's prescale of 500
-  is for (the platform left a prescale of 240 and `DDC1_SETUP` `0x30000040`). The driver tries 500 and then the platform's
-  value; **the first, 500, read both blocks**: a DELL ST2421L, manufacturer `0xac10`, product `0xa070`, one extension, eight
-  modes including 1920x1080, **audio: linear PCM, two channels, 32/44.1/48 kHz, 16/20/24 bits (descriptor `09 07 07`),
-  no other format, speakers front left and right, basic audio**. The endpoint was written from it, the picture and the
-  interrupts ran through (1,441 frame starts, no overflow). Its bytes are the real test vector in `lib/edid` and
-  `tests/corpus/x870e/abyssbsd/edid-hdmi-a-1.txt` (the monitor's serial number is in it).
-- **Not measured:** the speed (the prescale scaling with the time base is not established; 500 worked on this monitor, and
-  a 100 kHz clock was not seen on a bus analyser), the engine with the display firmware running, and SCDC writes.
-
-### 16.16 R3.4 modes, step 1: 1080p50 at the firmware's pixel clock (2026-11-24)
-
-- **Code.** `lib/amdgpu/src/timing.rs`: the timing generator's eight registers for a progressive mode from 08 section
-  2.2 (it reproduces the GOP's 1080p60 registers exactly; 1080p50 differs from it in `OTG_H_TOTAL` alone).
-  `lib/amdgpu/src/modeset.rs`: `preflight` (the live registers must be as 08 section 3.7 says, nothing written),
-  `plan` (the register writes for a mode at the running pixel clock and size, with each old value), `stop` (plane
-  blanked, output data source off, memory configuration cleared, generator and timing generator off, wait for idle),
-  `apply`, `start` (data source back, timing generator then generator on, wait for busy, plane unblanked); seven host
-  tests against a model of the firmware's registers. `hdmi::avi_for` builds the AVI info frame for a code (checksums
-  checked against the specification's table for nine codes); `edid::mode_for_vic` is the shared CTA timing lookup.
-  `dev.drmn.1.mode=<code>` runs it on the X870E: the preflight, the plan logged, then the change.
-- **On the X870E (`mode=31`):** the plan was three writes: `OTG_H_TOTAL` `0x897` -> `0xa4f`, `OTG_VUPDATE_PARAM`
-  `0x01400226` -> `0x01400294` (offset 660), `HUBPREQ_DST_DIMENSIONS` `0x1e641` -> `0x24781` (the GOP's value scaled
-  by 2640/2200, the specification's choice). The generator stopped, restarted, the AVI frame for code 31 was written
-  with no packet-memory conflict, the refresh measured **50.332 Hz** (151 frames in 3 s), and the frame-start interrupts
-  ran on at 50 a second with no overflow after `rearm_frame_start`. **The user saw a normal picture.**
-- **Process note.** This ran earlier than intended: the command that was meant to run only the harmless
-  `mode=16` check also carried `mode=31`. The user had asked that the display be checked with them first. It was
-  disclosed at once and the user confirmed the picture was normal.
-- **Not done:** modes with a different pixel clock (the clock change goes through the display firmware's
-  set-pixel-clock command with the transmitter off and on, 08 section 3.7.5), a different active size (the viewport,
-  scaler, output buffer and ODM width registers, which have not been read), and the KMS card still offering only the
-  firmware's mode.
-
-### 16.17 R3.4 modes, step 2: the first pixel-clock change (720p60) did not carry the link (2026-11-24)
-
-- **Code.** `modeset::plan_retimed` (the request fields by the reference's rules, every value equal to 08 section 3.7.2's table
-  for seven modes, and every register that holds the active size: viewport, scaler receive size, mixer size, the scaler's copy of
-  the blanking, the pattern generator's size), `modeset::snapshot` / `plan_restore` (the firmware's own values put back exactly),
-  `dmcub::set_pixel_clock` (header `0x10000280`), window 3 sized to the video BIOS (top = base + size), and the platform's own
-  copy of the video BIOS (44,544 bytes at video memory `0x1fe20000`, signature `55 aa`, byte sum `0x2b`) copied into it. Host
-  tests: 106 in `amdgpu`.
-- **Read-only findings on the X870E.** The scaler reads as bypass (ratios `0x01000000`); the output buffer and ODM widths are 0 (left
-  alone, as the specification says); `BIOS_SCRATCH_6` reads 0 (the reference would power-gate every pipe first; not done);
-  `DSCL0_SCL_MODE` at `0x106ec` reads 1 where 0 was expected (not understood, ratios are 1.0).
-- **The attempt.** `mode=4` (720p60, 74.25 MHz): stop the generator, one set-pixel-clock command (taken; the generator then ran at
-  60.331 Hz with 1650 x 750 totals, which needs a 74.25 MHz clock, so the clock really retuned), 14 register writes, start.
-  **The monitor showed no signal.** Putting back the firmware's registers and sending the 148.5 MHz command did not bring it
-  back either. Every register read back as the firmware left it, so the plane, timing and clock source were not the cause;
-  the physical layer was not carrying a valid signal. Only a reboot cleared it (the platform firmware retrains the display).
-- **Reading.** On HDMI the pixel clock is the link clock; the reference sends a transmitter-control "off" before the clock
-  command and "on" after (08 section 3.7.5). This attempt sent the clock command alone, as the specification's author advised
-  trying first. Next: the transmitter off/on pair, whose layout for this firmware (the 1.7 one) the wall agent is asked to
-  give byte by byte.
-
-### 16.18 R3.4 modes, step 3: 720p60 through the reference's way off and on (2026-11-24)
-
-- **Code.** The byte-exact firmware commands of 08 section 3.4.1 (`dmcub::transmitter_disable`, `transmitter_enable`,
-  `encoder_stream_setup`, `set_pixel_clock`; tests compare their dwords with the specification's) and the reference's
-  sequence in `Amd::set_mode`: packets stopped, plane blanked, transmitter off, generator stopped, new pixel clock,
-  timing and request registers, generator started (plane still blanked), encoder in HDMI mode, encoder stream setup,
-  stream controls, AVI info frame, packet controls, transmitter on, **the encoder's front end reconnected**, unblank.
-  Every firmware command waits for its read pointer.
-- **Result on the X870E.** `mode=4` (720p60 at 74.25 MHz): all four commands taken, 59.998 Hz measured, the encoder's
-  FIFO calibrated again (`DIG_FIFO_STATUS` `0x22099000`, bit 29), **a stable 1280x720 picture** (the user's report).
-- **Two findings the specification did not have** (reported to its author):
-  1. **The transmitter-off command, and then the transmitter-on command, each clear the encoder's front-end connection:**
-     `DIG_FE_CNTL` `0x01000000` -> 0 and `DIG_BE_CNTL` bit 8 (the back end's front-end select) 1 -> 0. A sequence
-     that sent the commands and skipped the reference's step 12 (connect the back end to front end 0, source the
-     timing generator) left the monitor with no signal while every other register looked right. Reconnecting the front end
-     once, before the transmitter-on command, was not enough; **it has to be done after it** (the driver does both).
-  2. A write to `DIG_FE_CNTL` reads back 0 at once and takes its value only after the generator runs again
-     (the log shows 0 straight after the write and `0x01000000` at the end).
-- **The first attempt** (clock command alone, section 16.17) and the second (commands but no reconnect) both lost the
-  signal; a reboot cleared them (the UEFI retrains the link).
-- **Not done:** the way back (code 16 through the baseline restore), the other lower-clock modes (720p50, 480p, 640x480,
-  576p), SCDC, and the reconnection being done by the driver as a clean library step rather than from `set_mode`.
-
-### 16.19 R3.4 modes, step 4: every mode of the specification's table on the X870E (2026-11-24)
-
-With the sequence of section 16.18 (and the plain stop, reprogram, start when the pixel clock does not change), each mode
-below ran on the X870E's DELL ST2421L through `dev.drmn.1.mode=<CTA code>`, with the encoder's FIFO calibrated afterwards
-and the user's report of a stable picture:
-
-| Code | Mode | Pixel clock | Path | Measured refresh | Picture |
-|---|---|---|---|---|---|
-| 16 | 1920x1080 at 60 Hz | 148.5 MHz | the firmware's own values put back, with the clock change from any other | 59.998 Hz | normal (also after each of the others) |
-| 31 | 1920x1080 at 50 Hz | 148.5 MHz | no clock change: one timing register, the update offset, the line delivery field | 50.332 Hz | normal |
-| 4 | 1280x720 at 60 Hz | 74.25 MHz | clock change | 59.998 Hz | stable |
-| 19 | 1280x720 at 50 Hz | 74.25 MHz | clock change | 49.998 Hz | stable |
-| 3 | 720x480 at 59.94 Hz (16:9) | 27 MHz | clock change | 59.998 Hz | stable |
-| 18 | 720x576 at 50 Hz (16:9) | 27 MHz | no clock change; size change | 50.332 Hz | stable |
-| 1 | 640x480 at 59.94 Hz | 25.175 MHz | clock change (251,750 x 100 Hz; symbol 2517 x 10 kHz) | 59.998 Hz | stable |
-
-(The refresh column is frames counted in a 3 s window, so it is good to about 0.33 Hz.) 1080p60 was returned to from 640x480,
-and from 720p60, with a normal picture each time. The audio was not part of this (deferred with the audio design).
-
-- **Not done:** the KMS card still offers only the firmware's mode (a client cannot choose one); the pitch and the surface for
-  a smaller mode (the plane scans the top-left part of the 1080p surface, which is what the user saw); SCDC (the monitor is
-  HDMI 1.4); modes above 148.5 MHz and interlaced modes; and the in-driver recovery of a lost signal (a reboot still is it).
-
-### 16.20 R3.4 modes, step 5: the modes on the graphics card (2026-11-24)
-
-- **What the card does now.** `drivers/amd-kms`: the connector offers seven modes (the firmware's 1080p60 first and preferred, then
-  1080p50, 720p60, 720p50, 480p, 576p50 and 640x480); the display controller accepts only those (and the right clock);
-  the plane takes a size equal to one of the modes' at the corner and copies exactly that size into the back surface, whose line
-  pitch stays the firmware's 1920 pixels, so a smaller mode scans the top-left part of the same surfaces; a mode-set commit calls
-  `Display::set_mode` after the planes' commit, and turning the controller off (or removing the card with the console to be seen)
-  sets the firmware's mode again, so the console is never shown at a smaller mode. `drivers/drmn` implements it with
-  `Amd::set_mode_for`: the code of the mode, the display firmware loaded from the requesting thread on the first change of pixel clock
-  (the ioctl sleeps for it), one mode set at a time, then the sequence of section 16.18. 11 host tests in the card (modes offered,
-  modes accepted and refused, the controller's commit setting a mode or going back, the plane's sizes).
-- **On the X870E, through `/dev/dri/card1`** (`tests/graphics/kmsflip.c`, which now picks a mode by width or `#index`): the mode set at
-  1280x720 loaded the display firmware inside the `SETCRTC` call (the call took 200 ms), set 720p60, flipped between the gradient and
-  the bars, and turning the controller off returned to 1080p60; then 1080p50, 720p50, 480p, 576p and 640x480 each in turn, every one
-  returning to 1080p60 by itself. **The user saw each mode's picture and the picture back every time.** No driver error and no
-  interrupt overflow (13,922 frame starts after the whole series).
-- **Not done:** the compositor on a non-firmware mode (Sway with `output ... mode`), the panic path in a smaller mode (the console
-  surface is shown at the mode then running, not the firmware's), a mode change on a hot-plug, the monitor's own mode list (the
-  card offers its fixed seven, not the EDID's), the audio.
-
-### 16.21 R4: the plan to glmark2 on the Radeon's own engine (2026-11-24)
-
-**Goal (set by the user):** glmark2 running with the Raphael iGPU accelerating it, not the CPU's software rasteriser. On the X870E's
-AbyssBSD the userspace is already there: Mesa 26.2 with `radeonsi_dri.so`, `libdrm_amdgpu`, LLVM 19, Sway 1.12 with wlroots
-0.20 and glmark2 2023.01. What is missing is in the kernel: the graphics engine, and the `amdgpu` render interface that
-`libdrm_amdgpu` speaks. Display (modes, EDID, the firmware, PSP) is done.
-
-| Stage | Work | Where it can be tested | Exit on the board |
-|---|---|---|---|
-| R4.1 | The security processor loads SDMA, CE, PFP, ME, MEC1/2 and the RLC images into the trusted zone and starts the RLC autoload (03 section 7, 02 section 9). Done in code (`gcfw`, `gcload`, `dev.drmn.1.gc_fw`), **not yet run**. | containers on the vendor's files (host) | `CP_STAT` 0 and the RLC's boot-complete bit after the autoload |
-| R4.2 | Golden settings, GRBM and per-VMID shader memory configuration, the RLC's clear-state buffer, `GRBM_CNTL`, MEC unhalt (06 sections 2 to 6) | register-model tests | the engine idle and configured |
-| R4.3 | VM contexts of the hubs for user address spaces (05 section 4.4): page tables (`vm`, done), context registers, TLB invalidation (`gmc`) | host (`vm` walks) | a GPU write through a mapped page |
-| R4.4 | The graphics ring and the KIQ (06 sections 7 to 9): MQDs, the KIQ by direct registers, MAP_QUEUES, the graphics start sequence; PM4 packets (`pm4`, done), fences by RELEASE_MEM with the end-of-pipe interrupt through the interrupt ring (R2, done) | packet tests (host) | the ring test (06 section 11.6): a scratch write and a fence |
-| R4.5 | Memory objects: video and system buffers with GPU addresses, `GEM_CREATE`, `GEM_MMAP` (a mapping the CPU sees: video through BAR0 write-combined), `GEM_VA` map and unmap into the file's address space | host (a model of the memory manager) | a buffer written by the CPU read back by a GPU copy |
-| R4.6 | The submission interface: contexts, `CS` (the IB and fence chunks), `WAIT_CS`, `INFO` (device and hardware-IP information as 09 section 3 says), buffer lists, syncobjs | host (ioctl codecs) | Mesa's `amdgpu_query_*` calls answered; `eglinfo` shows `radeonsi` |
-| R4.7 | Sharing: PRIME export and import of a buffer (dma-buf), so the compositor and its clients exchange buffers; scanout of a video or system buffer from the display card | host and board | Sway starts on the Radeon's render node |
-| R4.8 | glmark2 on Sway: `GL_RENDERER` reports the Radeon (RADEON 610M), a full run with a score and screenshots | board | the acceptance capture |
-
-Each stage logs what it reads and writes, is triggered by its own sysctl until the stage after it needs it, and is checked on the
-board before the next is built on it. Anything that can hang the machine is asked of the user first (a reboot clears it).
-
-### 16.22 R4.1: the engines' firmware loaded and the RLC autoload finished on the X870E (2026-11-24)
-
-- **Code.** `lib/amdgpu/src/gcfw.rs` reads the vendor's containers (CP and SDMA major 1, RLC major 2) and gives the load list in the
-  security processor's order; on the vendor's own Raphael files it gives exactly the specification's test vectors (SDMA 33,792;
-  CE 263,040; PFP and ME 263,168; MEC 267,440 twice; RLC lists `0x250`, `0x600`, `0x4480`; IRAM and DRAM `0x10200`; RLC_G 25,088). Four
-  host tests; the real-file test runs with `AMDGPU_FIRMWARE_DIR` pointing at the decompressed files. `drivers/drmn/src/gcload.rs`
-  runs it (`dev.drmn.1.gc_fw`, on a kernel thread, the files read from `/lib/firmware/amdgpu/`), each image through the 1 MiB
-  staging buffer, then the start-autoload command; `gc_probe` reads the graphics block's state without writing.
-- **State at handover** (`gc_probe`, read-only, in the specification's safe order: `RLC_GPM_STAT` first): `RLC_GPM_STAT`
-  `0x00f40016` (graphics power on, clock on, no power-gating error); `RLC_CNTL` 0 (the RLC not running); `CP_ME_CNTL`
-  `0x15000000` and `CP_MEC_CNTL` `0x50000000` (all command processors halted); `RLC_RLCS_BOOTLOAD_STATUS` 0; `CP_STAT` 0;
-  `SDMA0_F32_CNTL` 1 (halted). The platform firmware had not started the graphics engines.
-- **The load** (the display firmware already loaded and running): all twelve images answered status 0 (SDMA0, CE, PFP, ME, MEC1,
-  MEC2, the restore lists CNTL, GPM, SRM, IRAM, DRAM, RLC_G), the start-autoload command answered status 0, and
-  **within the 2 s wait `CP_STAT` was 0 and `RLC_RLCS_BOOTLOAD_STATUS` was `0xc0000001`** (boot complete, IRAM loaded;
-  `BOOTLOAD_ID_STATUS1` `0x833e`). Afterwards the RLC is running (`RLC_CNTL` 1) and `RLC_GPM_STAT` reads `0x00b40016`; the command
-  processors stay halted until they are released (06 section 2, steps 7 and 9). The display kept running (2,908 frame starts, no overflow).
-- **Next (R4.2):** the golden settings, `GRBM_CNTL`, the harvesting read and per-VMID shader memory configuration, the clear-state
-  buffer, releasing the command processors, then the rings (06 sections 2 to 9).
-
-### 16.23 R4.2 to R4.4, first attempt: graphics ring 0 programmed directly (2026-11-24)
-
-- **Code.** `lib/amdgpu/src/gc.rs`: the golden settings of GC 10.3.6 (22 entries, generated from the specification's table), the per-VMID shader
-  memory configuration, the clear-state buffer (949 dwords built from the specification's extents and its 85 non-zero values, checked
-  value by value), the ring registers of 06 section 7.1, the release of the command processors; `lib/amdgpu/src/pm4.rs`: the packets of
-  06 section 10 (header, write-data, set-register with range checks, the release-mem fence, wait, indirect buffer, acquire-mem, and
-  the rest); `lib/amdgpu/src/vm.rs`: the four-level GPU page tables. 131 host tests in `amdgpu`. `drivers/drmn/src/gcring.rs` puts the ring
-  (64 KiB), its report words and the clear-state buffer in video memory (BAR0 offset 170 MiB), starts it and runs the ring test
-  (`dev.drmn.1.gc_ring`, after `gc_fw`).
-- **Result on the X870E.** The golden settings, shader memory and clear-state address took; ring 0 was programmed; the processors were released
-  (`CP_ME_CNTL` 0; **`CP_STAT` then reads `0x80808000`: a released processor is busy running its firmware, it is not waited for to go idle**: 06
-  section 7.3's "wait for `CP_STAT` = 0" applies after a halt); the clear state and `SET_BASE` were written (write pointer 953). The
-  **read pointer stayed 0**, and the translation hub reported a fault: `GCVM_L2_PROTECTION_FAULT_STATUS` `0x0d3c` = client 6 (CPG, the graphics
-  command processor's front end), VMID 0, a read, mapping error, **fault address 0**. So the processor reads a pointer that is 0 instead of the
-  ring at `0xf40aa00000` (which the system aperture covers). The display was not disturbed.
-- **Reading.** Direct programming of ring 0 leaves something the firmware dereferences at 0. The reference's default is the graphics queue
-  mapped through the kernel interface queue with a graphics queue descriptor (06 sections 7.2, 9); the question of what the firmware reads, and
-  whether the direct path is valid with this firmware, is asked of the specification's author. The kernel interface queue path (the queue
-  descriptors, the compute queue registers, `SET_RESOURCES` and `MAP_QUEUES`, the doorbells) is the next thing to build if it is required.
-
-### 16.24 R4.4: the graphics ring runs, through the kernel interface queue (2026-11-24)
-
-- **What was wrong (16.23).** The graphics queue has to be mapped through the KIQ with a queue descriptor: with only the ring registers
-  programmed, the firmware read the (zero) descriptor address and faulted at address 0 (`CP_GFX_MQD_BASE_ADDR`). The specification's author
-  confirmed the reference's default is the KIQ path and that the direct ring path is not supported until it works.
-- **Code.** `lib/amdgpu/src/mqd.rs`: the compute and graphics queue descriptors from the specification's tables (21 and 11 non-zero dwords),
-  the mirror of the descriptor in the queue registers (byte offset `0xc824 + (MQD offset - 0x200)`, which reproduces the specification's own
-  register table for nine registers), `SET_RESOURCES` and `MAP_QUEUES`; `lib/amdgpu/src/kiq.rs`: the KIQ's programming (06 section 9.2); 64-bit
-  doorbell writes (`regs::Mmio::write64`, `vgapci::Aperture::doorbell_write64`); `drivers/drmn/src/gcring.rs`.
-- **On the X870E** (`gc_fw` then `gc_ring`): the golden settings, shader memory and the 949-dword clear-state buffer; the KIQ programmed
-  (MEC2 pipe 1; active; `CP_MEC_CNTL` 0); **the KIQ test**: a `WRITE_DATA` through its doorbell wrote its word (read pointer 5 of 5);
-  `SET_RESOURCES` and `MAP_QUEUES` for graphics queue 0 in one submission, taken: `CP_GFX_MQD_BASE_ADDR` `0xf4:0x0aa12000`,
-  `CP_GFX_HQD_ACTIVE` 1, `CP_GFX_HQD_BASE` `0xf40aa000`; the graphics processors released (`CP_STAT` 0 idle); the clear state and `SET_BASE` read by the ring (read
-  pointer 953 of 953); **the ring test: `SCRATCH_REG0` took the value the ring wrote, and a memory write and an end-of-pipe fence (`RELEASE_MEM`) both
-  landed.** No translation fault, and the display ran on (6,536 frame starts, no overflow).
-- **Not done:** the compute queues (not needed for graphics), the fence interrupt through the interrupt ring (the test polls memory), user address
-  spaces (VMIDs 1 to 7 and the TLB flushes), then the render interface itself.
-
-### 16.25 R4.3: a user address space runs an indirect buffer on the graphics ring (2026-11-24)
-
-- **Code.** `lib/amdgpu/src/vm.rs` (four-level tables, 151 host tests in the library) over page tables kept in video memory
-  (`drivers/drmn/src/gcring.rs`, `VramTables`); `gmc::ring_vm_flush`: the packets a ring writes to switch a VMID's page table and flush
-  (05 section 5.3: the root as a valid directory entry written low then high, the request, a `WAIT_REG_MEM` on the acknowledgement's bit, then
-  `PFP_SYNC_ME`); `Packets::wait_reg`. `dev.drmn.1.gc_vm` (after `gc_ring`) runs it.
-- **On the X870E.** Two pages mapped in VMID 1 (the buffer at `0x100000`, a data page at `0x101000`, to video memory); the ring switches and
-  flushes VMID 1 (engine 0), runs the buffer by `INDIRECT_BUFFER` with VMID 1, and fences itself. The buffer's `WRITE_DATA` and `RELEASE_MEM` by
-  **virtual address** landed (`0xcafe0001`, `0xfeed0002`), the ring's own fence landed (`0x600df00d`), **no translation fault**, the display ran on.
-- **One thing learned.** The first run faulted with `GCVM_L2_PROTECTION_FAULT_STATUS` `0x00100880`: client 4 (the command fetcher), VMID 1, permission faults `0x8`
-  (bit 7), no mapping error: the permission bits (7:4) follow the order of the fault-enable bits (valid, read, write, execute), so bit 7 is **execute**:
-  the page an indirect buffer is fetched from must be mapped executable. With that the run is clean. (A fault leaves the fetcher stuck: a reboot is the
-  recovery.)
-- **Next:** the render interface (R4.5 to R4.7): buffers over system pages mapped through snooped entries (on this APU the "video memory" is carved from
-  system memory, so a graphics-translation-table-only design is enough), contexts, command submission with fences, syncobjs and PRIME.
-
-
-### 16.26 R4.5 to R4.7: the render node runs Mesa (2026-11-24)
-
-The card has a render node (`dri/renderD<128+N>`, device `drm/<128+N>`) that takes rendering requests only. Mesa's `radeonsi` (ACO) initialises through it and `glmark2-es2-gbm --off-screen` completes the whole suite on the Radeon 610M: score 11907, 3.5 million jobs, no refused submission and no VM fault (board run, X870E).
-
-What it took, beyond the interface itself (`drivers/drmn/src/render.rs`):
-
-- Synchronisation objects in `sys/drm` (create, destroy, wait, reset, signal; `GET_CAP` says yes; descriptors and timelines are not built); a command submission can hand its fence to one.
-- libdrm on FreeBSD finds the device by `devname`: the nodes are `drm/<minor>` with `dri/card<N>` and `dri/renderD<M>` as links, and `hw.dri.<N>.busid` (`pci:0000:7a:00.0`) and `.modesetting` exist.
-- The address of an indirect buffer or a mapping in the high half of the 48-bit space stays sign-extended in packets and is masked for the page tables.
-- Context query is operation 4; compute and DMA report as absent (all work stays on the graphics ring) until R4.8.
-- A user fence word is written by a packet run from an indirect buffer in the job's own address space (a ring-level write runs in VMID 0 and faults); the kernel's fence is written from the ring.
-- The job is the reference's frame (06 section 10.4): pipeline sync, address-space flush, state loads, frame control, buffers, fences, `SWITCH_BUFFER`, padded to 256 dwords.
-- **The write pointer is a count that never wraps** (the doorbell and the poll word get the 64-bit count; the ring offset is the count modulo the size). A wrapped pointer stalled the ring at its first wrap.
-
-Open: sway on the render node's card with `glmark2-es2-wayland` (screenshots), compute and DMA rings (R4.8), PRIME export of render buffers, the interrupt instead of polling for fences.
-
-### 16.27 R4.8: Sway on the Radeon with hardware rendering (2026-11-25)
-
-Sway (wlroots `gles2` renderer on the card's render node) and its clients (foot, `glmark2-es2-wayland` jellyfish) draw with Mesa's `radeonsi` on the Raphael: the jellyfish runs at about 7400 frames a second, the compositor imports every client's shared buffer, no submission was refused and no fault logged. Capture: `tests/graphics/accept-x86_64-amd-radeonsi-sway.png`; start it with `tests/graphics/run-sway-gles.sh`. Importing a shared buffer needed one more request on the render node, `GEM_OP` (creation parameters).
-
-### 16.28 Fence interrupts (2026-11-25)
-
-A job's ring fence now interrupts (`RELEASE_MEM` with the interrupt select; `CP_INT_CNTL_RING0` time-stamp enable, bit 26, set when the ring starts). The interrupt handler recognises client `0x14`, source 181 and wakes a wait queue; `WAIT_CS`, `GEM_WAIT_IDLE` and the synchronisation-object wait (through `Fence::wait`) sleep on it instead of polling every millisecond. A 50 ms (render) or 20 ms (syncobj) timeout stays as the fallback and for signals, so a lost interrupt costs latency, not a hang. Board run (2026-11-25): 52,191 fence interrupts for a glmark2 pass, none other; the scores are unchanged (terrain 429 FPS); Sway with the jellyfish runs with no errors. `dev.drmn.<unit>.irq` counts them.
-
-### 16.29 The DMA engine and the compute rings (2026-11-25)
-
-**System DMA engine 0** (07): started with the graphics ring (`start_sdma`: reset pulse, ring registers, doorbell range through the bus interface's port pair, translation settings, enabled; the self-test writes a word and a fence). Jobs on the DMA IP type go through the render node as the reference's frame: the previous job's fence, the address-space switch (two register writes and the invalidation poll on engine 13), the buffers (each ending on an 8-dword boundary), a fence and a trap. The client's own fence word is written by a packet buffer run in the job's address space, as on the graphics ring. The trap interrupt (client `0x08`, source 224) wakes waiters like the graphics fence. Pointers are 64-bit byte offsets.
-
-**Compute rings** (06 section 8.1): eight kernel queues on the first micro engine (pipe `n mod 4`, queue `n div 4`, doorbell dword `6 + 2n`) mapped in one submission on the KIQ (`SET_RESOURCES` mask `0x03030303`, eight `MAP_QUEUES`); each answers a test write at start. Four are offered (IP type compute, rings 0 to 3). The job is the graphics frame without the parser-only items: a micro-engine wait on the previous fence, the address-space switch on the ring's own invalidation engine (`4 + n`), buffers with the valid bit, the fences.
-
-Board run: a command buffer on each of the three engines writes to a buffer mapped in the client's address space (`tests/graphics/amdrender.c`: graphics, DMA write and copy, compute rings 0 and 3); glmark2 and Sway with the jellyfish run as before, no fault. Mesa does not use the extra engines by default; the interface is there for what asks (compute work, DMA copies). Open: the other four compute queues, user queues, preemption and reset.
-
-### 16.30 The console comes back when the last client quits (2026-11-25)
-
-Closing a file used to remove only its buffers, so the picture of a compositor that quit stayed on the display, frozen. The core now tells the driver (`DrmDriver::last_close`) when the last file on the card's own node closes (render-node files do not count), and the Radeon card shows the console's surface again. Board run: Sway with the jellyfish started and stopped; the console was back on the monitor.
-
-### 16.31 The monitor sets the modes; the bring-up code is split out; tests for `drmn` (2026-11-25)
-
-- **Sink.** The card reads the monitor's EDID over the DDC engine at attach (`Amd::read_sink`) and offers those modes of its table (the seven CTA-861 modes the pixel-clock path has been run for) that the EDID lists, the monitor's native one preferred when the card can set it, else 1080p60. A monitor with no usable EDID, or none of the table's modes, gets the whole table. The matching includes the pixel clock: 1080p at 25 hertz has the totals of 1080p at 50 hertz (a host test caught that). `dev.drmn.<unit>.sink` shows the monitor and the offered modes (the X870E's Dell ST2421L: all seven, 1080p60 preferred). The connector still reports connected whatever the hot-plug line says (the monitor is behind a KVM switch that drops it), and the list is read once at attach; hot-plug re-reading and the notice to user space are not built.
-- **Bring-up code.** The one-shot sysctls and the code behind them moved from `amd.rs` to `amd/debug.rs`; `hw.drmn.debug=0` leaves them out (on by default; names unchanged).
-- **Tests.** `drmn` has host tests: interrupt entry classification, ring room, address forms, engine and page-set tables, video memory layout (compile-time and run-time), the mode selection.
-- **Turning the controller off** now shows the console's surface again (it used to leave the last picture scanned out; a `kmsflip` run left its pattern on the monitor).
-
-### 16.32 Compute queues 4 to 7, ring reset, preemption, buffer sharing, user queues (2026-11-25)
-
-- **All eight compute queues.** A submission names one of four compute slots (09 section 3.2's limit); each context's slot is bound, at its first submission, to the less loaded of the two hardware queues behind it (`s` or `s + 4`) and stays there, so a context's fence values keep the order of one ring. A compute job's handle carries its queue in the high half (the wait decodes it). Board run (`tests/graphics/amdrender.c`): the first context's slot 0 uses queue 0, a second context's uses queue 4.
-- **Ring reset** (10 sections 1 and 4). A job that makes no progress for two seconds (found by whoever waits for it, or by a submission that finds its ring full) gets its ring reset and its jobs completed by writing the ring's fence word: graphics by `CP_VMID_RESET` (descriptor inactive, request done, new descriptor, remap, the ring's start sequence again), compute by `UNMAP_QUEUES` with the reset action (queue seen inactive, remap), DMA by the engine's own reset (ring stopped, translation cache off, soft reset pulse, restart; the freeze step is left out because the registers are not in the specification). The context that made the last job reads as guilty and every context reads that a reset happened (`QUERY2` flags 1 and 4, hangs 1). Board run (`tests/graphics/amdhang.c`): a wait that never succeeds on each engine; the wait returns after 2.0 s, the context state says so, the engine runs a job afterwards; glmark2 afterwards runs as before with no false resets. **Not built:** the full chip reset (mode 2 through the SMU, then the whole reinitialisation, which the specification says needs the AtomBIOS interpreter); the wave kill (a soft recovery the reference dropped).
-- **Preemption.** The DMA engine's preemption (07 section 8) works (`sdma_preempt`: the fence is written and the queue runs on). `UNMAP_QUEUES` is built for all four actions; the firmware did not write the fence of "preempt without unmapping" on an idle compute queue with the fence in video memory (`gc_preempt`, which resets the queue afterwards). The clean-room specification (10 section 4.3) says that is outside what the reference does: it uses that action only on the graphics ring, with preemptible buffers and the fence in a GART-mapped system-memory word, and issues action 0 with no fence at all. Compute and graphics preemption are therefore unverified (a graphics-ring test needs preemptible buffers and a GART mapping of kernel memory, which are not built). Nothing here preempts a job.
-- **Buffer sharing.** `tests/graphics/amdprime.c`: a buffer made on the render node is exported as a descriptor and imported in a second file (same pages, writes cross both ways, a second import gives the same handle); the GPU writes to it through the importer's address space; the card's own node imports it and makes a framebuffer of it (the scanout path); the buffer outlives the exporter's handle. **Not built:** descriptors for synchronisation objects and sync files (they need a descriptor kind with a wake-up for `poll`), and the dma-buf fence ioctls.
-- **User-mode queues** need a firmware scheduler this hardware does not have (09 section 1: user-queue mask 0); their requests (`0x16` to `0x18`) are refused as not supported.
-
-### 16.33 The full chip reset (2026-11-25)
-
-`chip_reset` (a debug trigger) does the whole sequence of 10 sections 3, 5 and 8: the security processor's zone and ring destroyed (03 section 9; the mode-2 reset does not reset it, so the next ring creation otherwise fails), the configuration space saved and bus mastering cleared, the power firmware's "graphics device reset" message (10) with mode 2, the configuration space restored, the memory-size register polled, the video BIOS's ASIC-init table run by the interpreter (`lib/amdgpu/src/atom.rs`, the image from the ACPI VFCT table), then interrupts, memory hubs, security processor, firmware, graphics, compute, DMA and render fences re-established. The display keeps scanning out through it (about 12 frames in 200 ms right after). Six runs on the X870E board: all finished, `amdrender` (graphics, DMA, compute) and glmark2 pass afterwards.
-- **Open: half speed after a reset.** glmark2 terrain runs 430 FPS on a clean boot and 202 after a reset. The processor is unaffected (`cpuspin.c`), the firmware reports the same 2200 MHz graphics, 3300 MHz memory clocks and 100% activity, but VDD power is 6.5 W against 64 W. Not the video BIOS initialisation (`chip_reset_no_init` is the same), not GFXOFF (`smu_gfxoff_disallow` no change), and the graphics register dump after the reset matches a clean boot's. Suspect: a graphics-block configuration (shader array or work-group-processor enable) that firmware sets only at power-on.
-- New debug triggers: `smu_metrics` (clocks, activity, power), `smu_gfxoff_allow/disallow`, `chip_reset_no_init`.
+Code: `lib/amdgpu` (MIT, with AMD's notices), `drivers/drmn` (the AMD half; "drmn" is the AbyssBSD kernel's
+display and render driver name), `drivers/amd-kms` (the display card), `vgapci`.
+
+Status: the Radeon 610M (Raphael, 1002:164e) drives the display, takes modes from the monitor's EDID, runs
+Mesa's `radeonsi` on a render node, and runs Sway with hardware rendering. The Navi 22 (Z690-A) is not started.
+
+### 16.1 Hardware facts
+
+- **Attach.** `vgapci` maps the register window (BAR5, `Bar5` in the code), the doorbell aperture (BAR2) and the
+  video memory window (BAR0), and adds `drmn`, which reads VRAM size (512 MiB) and the security processor's
+  ready bit and declines a device that answers all ones. Nothing is written at attach.
+- **IP blocks** (the discovery table in the last 64 KiB of video memory, read through the index registers):
+  GC 10.3.6, SDMA 5.2.6, DMU (display) 3.1.5, PSP/SMU 13.0.5, interrupt handler 5.2.1, host data path 5.2.0,
+  bus interface 7.3.0; 30 blocks, identical to Fedora's.
+- **Video memory is carved from system memory.** `DCN_VM_FB_OFFSET` is `0x1840`, so video memory is system
+  physical `0x1840000000` (ACPI-reserved), GPU address `0xF400000000`. BAR0 is a write-combining window onto the
+  first 256 MiB of it. The loader's GOP framebuffer is the first 8,294,400 bytes of it, which is the test for
+  "this GOP picture is this device's": compare the loader's base with BAR0's.
+- **What firmware owns at handover:** video memory from 0 to the end of the GOP surface (9 MiB used) and the
+  top 2 MiB (`0x1fe00000` on; the discovery table and the platform display firmware's windows). Everything
+  else is the driver's.
+- **The firmware's display:** pipe 0 only (plane, blend, output processor, timing generator and encoder 0),
+  1920x1080 in a 2200x1125 total, linear 32-bit ARGB, pitch 7,680 bytes, no compression, at the first byte of
+  video memory; the plane's system aperture covers all of video memory, so a surface anywhere in it scans out
+  with no page tables. The encoder is in DVI mode. The display microcontroller (DMCUB) runs the platform's
+  firmware (`SCRATCH0` `0x42`).
+- **Page tables are off at handover.** Both hubs' contexts read `ENABLE_CONTEXT` clear; the display, the
+  security processor and the interrupt handler use the system aperture alone. The capture is
+  `tests/corpus/x870e/abyssbsd/raphael-drmn1-memory.txt`.
+
+**Video memory layout** (BAR0 offsets; the host test `layout` in `gcring.rs` checks that nothing overlaps):
+
+| At | What |
+|---|---|
+| 0 | the firmware's surface (the console's) |
+| 9 MiB to 128 MiB | scan-out surfaces (the card's two), mode-set scratch |
+| 128 MiB | interrupt handler ring (64 KiB) and its write-back slot |
+| 144 MiB | GART table (2 MiB, physical `0x1849000000`) |
+| 160 / 161 MiB | the security processor's ring, command and fence buffers / its staging buffer |
+| 161 to 165 MiB | display firmware image and windows (the staging buffer's space, used one after the other) |
+| 170 MiB | graphics ring, report words, clear-state buffer |
+| 171 MiB | kernel interface queue |
+| 172, 173 MiB | test page tables |
+| 174 MiB | DMA ring |
+| 175 MiB | eight compute rings (128 KiB each) |
+| 176 MiB | page-table pools |
+| 192 MiB | per-file fence-packet pages (1 MiB a file) |
+| 200 MiB | metrics table (`smu_metrics`) |
+| `0x1e000000` | the security processor's trusted memory zone (10 MiB) |
+| `0x1fe00000` | firmware's (top 2 MiB) |
+
+### 16.2 Display scan-out and the KMS card
+
+- **Adoption.** The card (`drivers/amd-kms`, over `lib/amdgpu/src/flip.rs`) registers only if the firmware's
+  display is running (timing generator on, surface at the start of video memory) and the console's framebuffer
+  is the start of this device's BAR0; with another GPU as the boot display it does nothing. `hw.drmn.kms` is on
+  unless set to 0. The device registers as `dri/card1` and retires the firmware framebuffer card.
+- **CPU path.** BAR0, granted through `AttachCx::mmio_bytes_console`: a prefetchable resource the console's
+  framebuffer lies wholly inside, with no other sensitive range overlapping, mapped write-combining. Writes
+  need the host-data-path flush before the display reads them.
+- **A flip** writes the surface address (high half, then the low half that latches it,
+  `HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH` `0xeb2c` and `_ADDRESS` `0xeb28`) with the flip-type bit, and
+  polls the flip-pending bit; it takes 3 to 10 ms and never blanks the panel. Scan-out in place is not possible
+  (buffer objects are system memory and the display reads system memory only through GART pages), so a commit
+  **copies** the client's pixels (forced opaque) into the back one of two video-memory surfaces and flips to it.
+  A plane smaller than the screen is refused.
+- **Vertical blanking** comes from the display's frame-start interrupt (§16.3); the core's timer is the fallback
+  while the interrupts are off. Measured 59.998 Hz against the mode's 60.000 Hz.
+- **The console comes back.** Turning the controller off, or the last client on the card's own node closing
+  (`DrmDriver::last_close`; render-node files do not count), scans the console's surface again. `stop` does so
+  for every detach reason except `Shutdown` and `Reset`, across which the last frame stays.
+- **The panic path.** `DrmDriver::panic_restore` (default: nothing) runs for every registered card from
+  `drm::panic_restore()`, which the panic handler and fatal-trap report call after the other processors are
+  stopped and before anything is printed. The Radeon's takes no lock and waits for nothing: two register writes
+  pointing the display at the firmware's surface. Host and QEMU tests cover it; on the board
+  `dev.drmn.1.panic_restore` showed the console after a client held the screen.
+- **Modes and the monitor.** The connector reads the monitor's EDID over the DDC engine at attach
+  (`Amd::read_sink`, `sink.rs`) and offers those modes of its table of seven CTA-861 modes (codes 16, 31, 4, 19,
+  3, 18, 1: 1080p60/50, 720p60/50, 480p, 576p, 640x480) that the EDID lists, the native one preferred when the
+  card can set it, else 1080p60; no usable EDID gives the whole table. The matching includes the pixel clock
+  (1080p25 has the totals of 1080p50). `dev.drmn.<unit>.sink` shows the result. The connector reports connected
+  whatever the hot-plug line says; the list is read once at attach. The plane takes a size equal to one of the
+  modes' at the corner and copies exactly that size into the surface, whose pitch stays 1920 pixels; a mode-set
+  commit calls `Display::set_mode` and turning the controller off sets the firmware's mode again.
+- **Verified:** `tests/graphics/kmsflip.c` (raw ioctls) sets each mode and flips between two patterns; Sway 1.12
+  with the pixman renderer, `foot` and glmark2 run on it (`tests/graphics/accept-x86_64-amd-display.png`); a
+  ten-minute Sway soak ran 42,048 frames with no overflow.
+
+### 16.3 Interrupts, translation hubs, doorbells
+
+- **Interrupts.** `vgapci` enables one MSI message (`hw.vgapci.msi`, on by default), turns bus mastering on and
+  calls the sink the GPU driver registers (`vgapci::InterruptSink`). The interrupt handler's ring (64 KiB,
+  2,048 entries, write-back slot after it) is in video memory at BAR0 offset 128 MiB, addressed by its GPU
+  address and not snooped; this works with both hubs' contexts off. `lib/amdgpu/src/ih.rs` has the bring-up,
+  the entry decoder and the drain (host tested: wraps, overflow restarts at the oldest entry, hostile pointers
+  handle nothing). Entries: client 4 source `0x3c` is the display's frame start (`OTG0_OTG_GLOBAL_SYNC_STATUS`
+  bit 0 enables, bit 4 clears); client `0x14` source 181 is the graphics fence; client 8 source 224 is the DMA
+  trap. `dev.drmn.<unit>.irq` counts them. The read pointer is published through its doorbell (BAR2 byte
+  `0xbc0`, `IH_DOORBELL_RPTR`).
+- **Translation hubs** (`lib/amdgpu/src/gmc.rs`; 05 section 5.1 order): both hubs get the GART's flat table,
+  AGP off, a dummy page, the L1 buffer and a read-modify-write of the L2 so the firmware's ECO bits survive,
+  context 0 on (`0x007ffe01`, L2 `0x00080e01`, L1 `0x00001d59`), the fifteen user contexts and the invalidation
+  engines. The graphics hub (GFXHUB) is set up before the memory hub (MMHUB), which the display shares, and
+  each step is checked by the frame counter still counting. The GART table is 2 MiB (1 GiB of GPU address
+  space), every entry invalid, plus one dummy system page from a 44-bit DMA tag. Invalidation goes through
+  engine 17 with the memory hub's semaphore taken around it.
+- **Doorbells** (`lib/amdgpu/src/doorbell.rs`): `RCC_DOORBELL_APER_EN`, the interrupt handler's range (dword
+  `0x2f0`, two dwords) and the DMA engine's (RSMU range `0x500ef0`) programmed behind the NBIF index/data pair
+  (`RSMU_INDEX` `0x50`, `RSMU_DATA` `0x54`, the index put back as found).
+- **Differences from Linux's settings** that are left as the firmware set them: L1 TLB control `0x501`, fault
+  control 2 (`0x20000`, `0xa0000`) and the AGP window registers.
+
+### 16.4 The security processor and the engines' firmware
+
+- **PSP** (`lib/amdgpu/src/psp.rs`, `drivers/drmn/src/psp.rs`): the secure OS is already running at handover
+  (`C2PMSG_81` nonzero; version register `0x420016`). The driver creates the ring (MP0 `C2PMSG_64`, `_67`
+  write pointer, `_69` to `_71` address and size; 64-byte frames), loads the table of contents
+  (`psp_13_0_5_toc.bin` from offset `0x100`, 1,536 bytes, command `0x20`) and sets up the trusted memory zone
+  (`0x05`, flags 2): `0xa00000` bytes at `0xf41e000000` (physical `0x185e000000`). Every buffer is in video
+  memory. Firmware files are read by `kernel/src/firmware_files.rs` from `/lib/firmware/amdgpu/` (decompressed
+  from linux-firmware 20261019, checked against 02 section 11) on a kernel thread, because a sysctl writer
+  cannot sleep. **Teardown** (03 section 9) destroys the zone (command `0x07`) then the ring
+  (`DESTROY_RINGS` `0x00030000`); a chip reset needs it because the security processor survives a mode-2 reset.
+- **Engines' firmware** (`lib/amdgpu/src/gcfw.rs`, `drivers/drmn/src/gcload.rs`): the vendor containers give
+  twelve images in the security processor's order (SDMA0, CE, PFP, ME, MEC1, MEC2, the restore lists CNTL, GPM,
+  SRM, IRAM, DRAM, RLC_G), each loaded through the staging buffer, then the start-autoload command. Size
+  vectors (SDMA 33,792; CE 263,040; PFP and ME 263,168; MEC 267,440; RLC_G 25,088) are checked on the vendor's
+  files (`AMDGPU_FIRMWARE_DIR`). The autoload finishes with `RLC_RLCS_BOOTLOAD_STATUS` `0xc0000001` and
+  `CP_STAT` 0; the command processors stay halted until released. At handover the graphics engines are not
+  started (`RLC_GPM_STAT` `0x00f40016`, `RLC_CNTL` 0, all processors halted).
+- **Power firmware (SMU)** (`lib/amdgpu/src/smu.rs`): mailbox through `PCIE_INDEX2`/`DATA2` (BAR5 `0x38`/`0x3c`),
+  byte addresses flags `0x3b10024` (bit 0: running), message `0x3b10508`, response `0x3b10984`, argument
+  `0x3b10988`; messages used: 2 version, 25 driver interface (5), 10 graphics device reset, 15 graphics clock,
+  16 enabled features, 11/12/13 driver table address and transfer (the metrics table, id 7). No message is
+  needed for graphics to run at the firmware's clocks (600 MHz idle, 2200 MHz loaded); GFXOFF is never allowed.
+
+### 16.5 The display firmware, HDMI and mode setting
+
+- **Display microcontroller** (`lib/amdgpu/src/dmcub.rs`, `drivers/drmn/src/dmcub.rs`; 08 section 3.2): the
+  platform's firmware is asked to stop, the unit is held in reset, the security processor loads the driver's image
+  (type 51, 239,392 bytes), windows 2 to 6 (region 5), mailboxes and boot options are programmed, the unit
+  released; `DMCUB_SCRATCH0` goes `0x42` to `0x43` (display firmware, mailbox ready). The picture never blanks
+  through it. The security processor writes windows 0 and 1 itself at the platform layout's `0x0n00_0000` bases
+  (not the `0x6000_0000` ones 08 section 3.2 lists). Commands go through inbox 1 (64-byte slots, the read
+  pointer waited for); version `0x5003700`.
+- **HDMI** (`lib/amdgpu/src/hdmi.rs`): the audio encoder setup, endpoint configuration bracketed by the clock
+  gating disable, the audio clock, the encoder's HDMI mode, the AVI info frame (`hdmi::avi_for`, checksums
+  checked against the specification), packet controls, enable and unmute. The endpoint is written from the
+  EDID's short audio descriptors, speaker allocation and basic-audio flag. **Sound is not tested:** the HD Audio
+  driver (`drivers/hda`) attaches to the Radeon's controller but has no streams yet; the audio clock is fixed
+  at 148.5 MHz; audio info frame bytes and the choice between the three clock-regeneration pairs are open in
+  the specification.
+- **EDID over DDC** (`lib/amdgpu/src/ddc.rs`): the display core's hardware I2C engine (08 section 4.7):
+  arbitration, pin hand-over (all restored on every path), up to four transactions per run (segment pointer,
+  offset write, read). `MICROSECOND_TIME_BASE_DIV` reads `0x00120218` rather than the `0x00120264` the
+  specification's prescale of 500 expects; the driver tries 500, then the platform's value, and 500 works. The
+  real EDID of the X870E's Dell ST2421L (`tests/corpus/x870e/abyssbsd/edid-hdmi-a-1.txt`) is the test vector in
+  `lib/edid`. The clock actually produced, the engine with the display firmware running, and SCDC are not measured.
+- **Mode setting** (`lib/amdgpu/src/timing.rs`, `modeset.rs`; sequence in `Amd::set_mode`): the timing
+  generator's eight registers from 08 section 2.2 (they reproduce the GOP's 1080p60 exactly); `preflight`
+  (live registers must be as 08 section 3.7 says), `plan`/`plan_retimed`, `stop`, `apply`, `start`;
+  `snapshot`/`plan_restore` put the firmware's own values back exactly. With no pixel-clock change (1080p50,
+  576p) only timing registers and the request fields change. With a clock change the sequence is the reference's:
+  packets stopped, plane blanked, transmitter off (firmware command), generator stopped, new pixel clock
+  (`dmcub::set_pixel_clock`, header `0x10000280`, window 3 holding the video BIOS copy), timing and request
+  registers, generator started with the plane still blanked, encoder in HDMI mode, encoder stream setup, stream
+  controls, AVI frame, packet controls, transmitter on, **the encoder's front end reconnected after the
+  transmitter-on command**, unblank. Findings the specification lacked: both transmitter commands clear the
+  encoder's front-end connection (`DIG_FE_CNTL` to 0 and `DIG_BE_CNTL` bit 8), without the reconnect the monitor
+  shows no signal while every other register looks right, and a `DIG_FE_CNTL` write reads back 0 until the
+  generator runs. A pixel-clock change without the transmitter pair loses the signal and only a reboot (the
+  platform firmware retrains the link) recovers it.
+- **Verified on the X870E** (Dell ST2421L, user-observed): 1080p60, 1080p50 (50.332 Hz), 720p60 and 720p50
+  (74.25 MHz), 480p (27 MHz), 576p50, 640x480 (25.175 MHz), each stable, each returning to 1080p60. Not done:
+  modes above 148.5 MHz or interlaced; a different active size beyond the plane's top-left crop; in-driver
+  recovery of a lost signal; hot-plug.
+- **A process rule from this work:** a display-changing command runs only after the user has agreed to it, one
+  command at a time; never bundle one with its harmless pre-check.
+
+### 16.6 The graphics, DMA and compute engines
+
+- **Graphics block** (`lib/amdgpu/src/gc.rs`, `pm4.rs`, `mqd.rs`, `kiq.rs`; 06): golden settings of GC 10.3.6
+  (22 entries), per-VMID shader memory configuration, the clear-state buffer (949 dwords), the command processors
+  released (a released processor is busy running its firmware; `CP_STAT` is not waited to idle). **The graphics
+  ring runs only through the kernel interface queue (KIQ):** the KIQ is programmed directly on MEC2 pipe 1, then
+  `SET_RESOURCES` and `MAP_QUEUES` map the graphics queue with its queue descriptor; with only the ring registers
+  programmed the firmware reads a zero descriptor address and faults at address 0. Doorbell writes are 64-bit.
+  The ring's write pointer is a **count that never wraps** (doorbell and poll word get the 64-bit count; the ring
+  offset is the count modulo the size); a wrapped pointer stalls the ring at its first wrap.
+- **User address spaces** (`lib/amdgpu/src/vm.rs`: four-level tables in video memory): the ring switches a VMID's
+  page table and flushes through packets (`gmc::ring_vm_flush`: root written low then high, request, wait on
+  the acknowledgement, `PFP_SYNC_ME`). A page an indirect buffer is fetched from must be mapped **executable**
+  (a fault leaves the fetcher stuck until reboot). Addresses with the top bit set stay sign-extended in packets
+  and are masked for the page tables.
+- **The job** is the reference's frame (06 section 10.4): pipeline sync, address-space flush, state loads
+  (`CONTEXT_CONTROL`), frame control, indirect buffers, fences (`RELEASE_MEM` with the interrupt select),
+  `SWITCH_BUFFER`, padded to 256 dwords. A client's own fence word is written by a small indirect buffer run in
+  the job's address space (a ring-level write runs in VMID 0 and faults); kernel-reserved address space is the
+  top 4 MiB, and the fence packets live at its top 1 MiB.
+- **DMA engine 0** (`lib/amdgpu/src/sdma.rs`, 07): reset pulse, ring registers (64-bit byte-offset pointers),
+  doorbell range, translation settings, a self-test at start. Its job: previous fence, address-space switch (two
+  register writes and an invalidation poll on engine 13), buffers each ending on an 8-dword boundary, fence and
+  trap.
+- **Compute:** eight kernel queues on the first micro engine (pipe `n mod 4`, queue `n div 4`, doorbell dword
+  `6 + 2n`) mapped in one KIQ submission (`SET_RESOURCES` mask `0x03030303`); each answers a test write at start.
+  The interface offers four slots (09 section 3.2); each context's slot is bound at its first submission to the
+  less loaded of queues `s` and `s + 4` and stays there, so a context's fence values keep the order of one ring.
+  A compute job's handle carries its queue in the high half. The job is the graphics frame without the
+  parser-only items, with the address-space switch on the ring's own invalidation engine (`4 + n`).
+- **Fence interrupts:** `CP_INT_CNTL_RING0` time-stamp enable (bit 26) is set when the ring starts; the handler
+  wakes a wait queue; `WAIT_CS`, `GEM_WAIT_IDLE` and the syncobj wait sleep on it with a 50 ms (render) or 20 ms
+  (syncobj) timeout as fallback, so a lost interrupt costs latency, not a hang.
+
+### 16.7 The render node and Mesa
+
+The card has a render node (`dri/renderD<128+N>`, device `drm/<128+N>`; `drivers/drmn/src/render.rs`) that takes
+rendering requests only: amdgpu interface 3.64 with `INFO`, `GEM_CREATE/MMAP/VA/OP/METADATA/WAIT_IDLE`, contexts,
+buffer lists, `CS` (IB, fence and syncobj-out chunks), `WAIT_CS`, and synchronisation objects in `sys/drm`
+(create, destroy, wait, reset, signal; no descriptors or timelines yet). Mesa's `radeonsi` (ACO) initialises
+through it and `glmark2-es2-gbm --off-screen` completes the whole suite on the Radeon 610M (score about 11,900
+at the first run, terrain about 430 FPS); Sway's `gles2` renderer and its clients (jellyfish about 7,400 FPS)
+draw on it, with the compositor importing every client's shared buffer
+(`tests/graphics/accept-x86_64-amd-radeonsi-sway.png`; `tests/graphics/run-sway-gles.sh`).
+
+Details a client depends on: libdrm on FreeBSD finds the device by `devname` (nodes `drm/<minor>` with
+`dri/card<N>` and `dri/renderD<M>` as links, plus `hw.dri.<N>.busid` `pci:0000:7a:00.0` and `.modesetting`);
+the context answer's id is its first dword; context query is operation 4; sharing is by PRIME (see §16.8).
+Mesa does not use the compute and DMA rings by default; the interface offers them to what asks
+(`tests/graphics/amdrender.c` runs a command buffer on graphics, DMA write and copy, and compute rings 0 and 3).
+
+### 16.8 Reset, preemption and buffer sharing
+
+- **Ring reset** (10 sections 1 and 4). A job with no progress for two seconds (noticed by whoever waits for
+  it, or by a submission that finds its ring full) gets its ring reset and its jobs completed by writing the
+  ring's fence word. Graphics: `CP_VMID_RESET` (descriptor inactive, request done, new descriptor, remap, the
+  ring's start sequence). Compute: `UNMAP_QUEUES` with the reset action (queue seen inactive, remap). DMA: the
+  engine's own reset (ring stopped, translation cache off, soft reset pulse, restart; the freeze step is left
+  out because its registers are not in the specification). The context that made the last job reads as
+  guilty; every context reads that a reset happened (`QUERY2` flags bit 0 and bit 2, hangs 1).
+  `tests/graphics/amdhang.c` hangs each engine and checks the wait returns after 2.0 s, the state says so, and
+  the engine runs a job afterwards.
+- **Full chip reset** (`chip_reset`, `drivers/drmn/src/amd/reset.rs`; 10 sections 3, 5 and 8): the flag is
+  `BIOS_SCRATCH_3` (BAR5 byte `0x13c`) bit 29; the security processor's zone and ring are destroyed; PCI
+  configuration is saved (`PciChild::save_state`) and bus mastering cleared; SMU message 10 with argument 2
+  (mode 2) is sent; configuration is restored; `RCC_CONFIG_MEMSIZE` (dword `0xde3`) is polled; the **AtomBIOS
+  ASIC-init table** is run by the interpreter (`lib/amdgpu/src/atom.rs`; the video BIOS image comes from the
+  ACPI VFCT table, `lib/amdgpu/src/vbios.rs`, `Manager::acpi_table`; command table 0 with the boot engine and
+  memory clocks from firmware-info data table 4, done when scratch 7 bit 9 is set); then interrupts, hubs,
+  security processor, firmware, graphics, compute, DMA and the render fences are re-established (display
+  last). The display keeps scanning out through it. The vendor video BIOS is never committed
+  (`tests/corpus/x870e/vbios.bin` is git-ignored).
+  Verified: six runs on the X870E, `amdrender` and glmark2 pass afterwards. **Open: the graphics runs at
+  half speed after a reset** (terrain 202 FPS against 430). The processor is unaffected (`cpuspin.c`); the
+  firmware reports the same clocks (2200 MHz graphics, 3300 MHz memory) and 100 % activity, but graphics power
+  is 6.5 W against 64 W. It is not the video BIOS initialisation (`chip_reset_no_init` is the same), not GFXOFF
+  (`smu_gfxoff_disallow`), and the graphics register dump matches a clean boot. Suspect a configuration the
+  firmware sets only at power-on (shader array or work-group-processor enables).
+- **Preemption.** The DMA engine's works (`sdma_preempt`). `UNMAP_QUEUES` is built for all four actions, but
+  the firmware did not write the fence of "preempt without unmapping" on an idle compute queue with a video
+  memory fence; the specification (10 section 4.3) says the reference uses that action only on the graphics ring,
+  with preemptible buffers and a GART-mapped fence. Compute and graphics preemption are unverified and nothing
+  preempts a job.
+- **Buffer sharing.** A buffer made on the render node is exported as a descriptor and imported in a second
+  file (same pages, writes cross both ways, a second import gives the same handle, the GPU writes through the
+  importer's address space, the card's own node makes a framebuffer of it, the buffer outlives the exporter's
+  handle): `tests/graphics/amdprime.c`.
+- **User-mode queues** need a firmware scheduler this hardware does not have (09 section 1: user-queue mask 0);
+  their requests (`0x16` to `0x18`) are refused as not supported.
+
+### 16.9 Debug triggers
+
+One-shot sysctls in `drivers/drmn/src/amd/debug.rs` (`dev.drmn.<unit>.<name>`, written with 1; all left out by
+`hw.drmn.debug=0`, on by default): reads (`discover`, `display`, `memory`, `vram`, `gc_probe`, `smu_probe`, `smu_metrics`, `ddc_probe`,
+`mode_probe`, `vbios_dump`; and `sink` and `irq`, which are always present); bring-up pieces (`psp`, `gmc`,
+`gmc_mm`, `interrupts`, `doorbells`, `dmcub`, `gc_fw`, `gc_ring`, `gc_vm`, `asic_init`); display (`flip`,
+`mode=<code>`, `hdmi`, `hdmi_off`, `hdmi_audio`, `edid`, `link_reconnect`, `refresh`, `panic_restore`); and tests
+that disturb the engines (`gc_hang`, `gc_fault`, `gc_preempt`, `sdma_preempt`, `chip_reset`,
+`chip_reset_no_init`, `smu_gfxoff_allow`, `smu_gfxoff_disallow`). Anything that can hang the machine is run only after the user agrees; a hang is cleared by a
+reboot (always set `BootNext` first so the board does not boot Fedora).
+
+### 16.10 Not built
+
+- Synchronisation-object and sync-file descriptors (need a descriptor kind with a wake-up for `poll`), and the
+  dma-buf fence ioctls.
+- Connector hot-plug detection (the X870E is not behind a KVM switch, so the hot-plug sense at
+  `0x14f50` bit 1 could drive `Connector::detect`), re-reading the EDID later, and the notice to user space.
+- Compute and graphics preemption verification; the wave-kill soft recovery; the DMA reset's freeze step.
+- Scanning out clients' buffers in place (a GART-mapped scan-out path) instead of copying.
+- Sound over HDMI; the Navi 22 (Z690-A) bring-up; the half-speed-after-reset cause (§16.8).

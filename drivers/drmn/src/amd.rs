@@ -239,7 +239,7 @@ impl Amd {
 
     /// Makes the display the firmware left a graphics card, and takes over
     /// from the firmware framebuffer's card, if this is the display the
-    /// console shows (docs/GRAPHICS.md §16.3). Logs why not otherwise.
+    /// console shows (docs/GRAPHICS.md §16.2). Logs why not otherwise.
     pub(crate) fn register_kms(&self, s: &sched::Sleepable) {
         if self.kms.lock().is_some() {
             return;
