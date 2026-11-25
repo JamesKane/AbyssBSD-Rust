@@ -37,6 +37,10 @@ const FRAME_START_CLEAR: u32 = 1 << 4;
 /// source of the first timing generator.
 const CLIENT_DISPLAY: u8 = 4;
 const SOURCE_FRAME_START_0: u8 = 0x3c;
+/// The graphics command processor's client id, and its end-of-pipe source
+/// (a fence with the interrupt bit; 06 section 11.1).
+const CLIENT_GRBM_CP: u8 = 0x14;
+const SOURCE_EOP: u8 = 181;
 
 /// The interrupts of one GPU, and what they were.
 pub(crate) struct Irq {
@@ -50,6 +54,9 @@ pub(crate) struct Irq {
     doorbell: AtomicBool,
     /// Called for each frame-start event, in interrupt context.
     on_frame: sync::Once<alloc::boxed::Box<dyn Fn(u64) + Send + Sync>>,
+    /// Called when a fence interrupt came, in interrupt context.
+    on_eop: sync::Once<alloc::boxed::Box<dyn Fn() + Send + Sync>>,
+    eops: AtomicU64,
     interrupts: AtomicU64,
     entries: AtomicU64,
     frames: AtomicU64,
@@ -73,6 +80,8 @@ impl Irq {
             rptr: AtomicU32::new(0),
             doorbell: AtomicBool::new(false),
             on_frame: sync::Once::new(),
+            on_eop: sync::Once::new(),
+            eops: AtomicU64::new(0),
             interrupts: AtomicU64::new(0),
             entries: AtomicU64::new(0),
             frames: AtomicU64::new(0),
@@ -88,6 +97,10 @@ impl Irq {
         dead_code,
         reason = "wired to the card once the board shows the interrupts arrive"
     )]
+    pub(crate) fn set_on_eop(&self, f: alloc::boxed::Box<dyn Fn() + Send + Sync>) -> bool {
+        self.on_eop.set(f).is_ok()
+    }
+
     pub(crate) fn set_on_frame(&self, f: alloc::boxed::Box<dyn Fn(u64) + Send + Sync>) -> bool {
         self.on_frame.set(f).is_ok()
     }
@@ -103,11 +116,12 @@ impl Irq {
         let other = self.last_other.load(Ordering::Relaxed);
         let _ = write!(
             s,
-            "{}: {} interrupts, {} entries, {} frame starts, {} others (last client {} source {}), {} overflows",
+            "{}: {} interrupts, {} entries, {} frame starts, {} fence interrupts, {} others (last client {} source {}), {} overflows",
             if self.active() { "on" } else { "off" },
             self.interrupts.load(Ordering::Relaxed),
             self.entries.load(Ordering::Relaxed),
             self.frames.load(Ordering::Relaxed),
+            self.eops.load(Ordering::Relaxed),
             self.other.load(Ordering::Relaxed),
             other >> 8,
             other & 0xff,
@@ -250,6 +264,7 @@ impl Irq {
         let wptr = gpu.vram_read32(WRITEBACK_AT).unwrap_or(0);
         let rptr = self.rptr.load(Ordering::Acquire);
         let mut frame = false;
+        let mut eop = false;
         let d = ih::drain(
             RING_BYTES,
             rptr,
@@ -259,6 +274,9 @@ impl Irq {
                 self.entries.fetch_add(1, Ordering::Relaxed);
                 if e.client == CLIENT_DISPLAY && e.source == SOURCE_FRAME_START_0 {
                     frame = true;
+                } else if e.client == CLIENT_GRBM_CP && e.source == SOURCE_EOP {
+                    eop = true;
+                    self.eops.fetch_add(1, Ordering::Relaxed);
                 } else {
                     self.other.fetch_add(1, Ordering::Relaxed);
                     self.last_other.store(
@@ -280,6 +298,9 @@ impl Irq {
             gpu.doorbell_write32((doorbell::IH_DOORBELL_DWORD * 4) as usize, d.rptr);
         } else {
             w.write32(ih::RB_RPTR, d.rptr);
+        }
+        if eop && let Some(f) = self.on_eop.get() {
+            f();
         }
         if frame {
             // Acknowledge the event, keeping the interrupt enabled.

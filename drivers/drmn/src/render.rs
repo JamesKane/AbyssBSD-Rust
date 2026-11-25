@@ -129,6 +129,8 @@ pub(crate) struct Render {
     /// The context of the last job (a job from another one loads the
     /// context's state).
     last_ctx: AtomicU32,
+    /// Where waiters for a job sleep; the fence interrupt wakes it.
+    queue: Arc<sched::WaitQueue>,
     device: Device,
 }
 
@@ -144,6 +146,7 @@ impl Render {
             amd,
             seq: AtomicU32::new(0),
             last_ctx: AtomicU32::new(0),
+            queue: Arc::new(sched::WaitQueue::new()),
             state: PreemptLock::new(State {
                 files: BTreeMap::new(),
                 slots: [false; VMIDS],
@@ -154,6 +157,23 @@ impl Render {
             }),
             device: Device::raphael(vram_bytes, GTT_BYTES).graphics_only(),
         })
+    }
+
+    /// The queue the fence interrupt wakes.
+    pub(crate) fn queue(&self) -> Arc<sched::WaitQueue> {
+        Arc::clone(&self.queue)
+    }
+
+    /// Sleeps until job `seq` has finished or `ns` nanoseconds have passed
+    /// (the fence interrupt ends it early; without interrupts it is a poll
+    /// at this period).
+    fn sleep_for(&self, s: &sched::Sleepable, amd: &Amd, seq: u32, ns: u64) {
+        let _ = bus::manager().wait_timeout(
+            s,
+            &self.queue,
+            &mut || self.done(amd, seq).unwrap_or(true),
+            ns,
+        );
     }
 
     fn amd(&self) -> Result<Arc<Amd>, Errno> {
@@ -518,7 +538,7 @@ impl Render {
                     false,
                 );
             }
-            p.fence(gfx.seq_address(), u64::from(seq), false, false);
+            p.fence(gfx.seq_address(), u64::from(seq), false, true);
             p.switch_buffer();
             // The reference pads every commit to 256 dwords.
             p.pad(256);
@@ -530,6 +550,7 @@ impl Render {
             let slot = cx.syncobj(h).ok_or(Errno::ENOENT)?;
             *slot.lock() = Some(Arc::new(JobFence {
                 amd: self.amd.clone(),
+                queue: Arc::clone(&self.queue),
                 seq,
             }));
         }
@@ -567,7 +588,10 @@ impl Render {
             if sched::current().is_interrupted() {
                 return Err(Errno::EINTR);
             }
-            bus::manager().sleep_ms(cx.sleepable(), 1);
+            let left = r
+                .timeout_ns
+                .saturating_sub(sched::now_ns().saturating_sub(start));
+            self.sleep_for(cx.sleepable(), &amd, seq, left.min(50_000_000));
         }
         uapi::WaitCs::answer(arg, timed_out);
         Ok(0)
@@ -683,7 +707,8 @@ impl RenderApi for Render {
                     if sched::current().is_interrupted() {
                         return Err(Errno::EINTR);
                     }
-                    bus::manager().sleep_ms(cx.sleepable(), 1);
+                    let left = timeout.saturating_sub(sched::now_ns().saturating_sub(start));
+                    self.sleep_for(cx.sleepable(), &amd, seq, left.min(50_000_000));
                 }
                 uapi::gem_wait_idle_answer(arg, busy);
                 Ok(0)
@@ -735,6 +760,7 @@ impl RenderApi for Render {
 /// The completion of a job: the ring's fence word reaching its number.
 struct JobFence {
     amd: Weak<Amd>,
+    queue: Arc<sched::WaitQueue>,
     seq: u32,
 }
 
@@ -749,6 +775,10 @@ impl drm::Fence for JobFence {
         let g = amd.gfx_lock();
         g.as_ref()
             .is_none_or(|gfx| gfx.finished(&gpu).wrapping_sub(self.seq) < 0x8000_0000)
+    }
+
+    fn wait(&self, s: &sched::Sleepable, ns: u64) -> bool {
+        bus::manager().wait_timeout(s, &self.queue, &mut || self.signaled(), ns)
     }
 }
 

@@ -331,6 +331,12 @@ pub(crate) fn start(
     ));
     fault(gpu, log);
     r?;
+    // Fences interrupt: the end-of-pipe event of ring 0 goes to the
+    // interrupt handler, which wakes whoever waits for a job.
+    w.write32(
+        gc::CP_INT_CNTL_RING0,
+        w.read32(gc::CP_INT_CNTL_RING0) | gc::TIME_STAMP_INT_ENABLE,
+    );
     Ok(Gfx {
         base,
         kiq: kiq_ring,

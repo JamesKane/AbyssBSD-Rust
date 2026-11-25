@@ -332,7 +332,7 @@ pub(crate) fn dispatch(
     if file.render && !render_allowed(n) {
         return Err(Errno::ENOTTY);
     }
-    if let Some(r) = crate::syncobj::dispatch(file, n, arg) {
+    if let Some(r) = crate::syncobj::dispatch(file, s, n, arg) {
         return r;
     }
     if (DRM_COMMAND_BASE..DRM_COMMAND_END).contains(&n) {

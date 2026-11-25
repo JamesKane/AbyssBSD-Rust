@@ -478,7 +478,13 @@ impl Amd {
                 return;
             }
         };
-        card.set_render(crate::render::Render::new(self.me.clone(), 512 << 20));
+        let render = crate::render::Render::new(self.me.clone(), 512 << 20);
+        // A fence's interrupt wakes whoever waits for a job.
+        let queue = render.queue();
+        let _ = self.irq.set_on_eop(Box::new(move || {
+            queue.wake_all();
+        }));
+        card.set_render(render);
         let node = match drm::register(card.clone()) {
             Ok(n) => n,
             Err(e) => {

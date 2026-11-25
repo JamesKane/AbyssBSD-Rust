@@ -52,6 +52,11 @@ pub const CP_MAX_CONTEXT: usize = 0xc2b8;
 pub const CP_DEVICE_ID: usize = 0xc12c;
 /// `CP_ME_CNTL`: bit 24 CE halt, 26 PFP halt, 28 ME halt.
 pub const CP_ME_CNTL: usize = 0x86d8;
+/// `CP_INT_CNTL_RING0`: bit 26 turns on the end-of-pipe (fence) interrupt of
+/// graphics ring 0 (06 section 11.2).
+pub const CP_INT_CNTL_RING0: usize = 0xc1a8;
+/// Its time-stamp (fence) interrupt enable bit.
+pub const TIME_STAMP_INT_ENABLE: u32 = 1 << 26;
 /// `CP_STAT`: 0 when the command processor is idle.
 pub const CP_STAT: usize = 0x8680;
 /// `CP_RB0_RPTR`: the live read pointer.

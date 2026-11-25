@@ -33,6 +33,14 @@ const MAX_HANDLES: u32 = 4096;
 pub trait Fence: Send + Sync {
     /// Whether it has finished.
     fn signaled(&self) -> bool;
+
+    /// Waits up to `ns` nanoseconds for it to finish (returns early when it
+    /// does); the default gives the processor up and looks again.
+    fn wait(&self, s: &sched::Sleepable, ns: u64) -> bool {
+        let _ = (s, ns);
+        sched::yield_now();
+        self.signaled()
+    }
 }
 
 /// A fence that has already finished.
@@ -114,13 +122,18 @@ fn slots(f: &Open, list: &[u32]) -> Result<Vec<Slot>, Errno> {
 
 /// Runs synchronisation request `n` for `f`, `None` if `n` is not one of
 /// them.
-pub(crate) fn dispatch(f: &Open, n: u8, a: &mut [u8]) -> Option<Result<usize, Errno>> {
+pub(crate) fn dispatch(
+    f: &Open,
+    s: &sched::Sleepable,
+    n: u8,
+    a: &mut [u8],
+) -> Option<Result<usize, Errno>> {
     Some(match n {
         CREATE => create(f, a),
         DESTROY => destroy(f, a),
         // Descriptors for them are not built.
         HANDLE_TO_FD | FD_TO_HANDLE => Err(Errno::EOPNOTSUPP),
-        WAIT => wait(f, a),
+        WAIT => wait(f, s, a),
         RESET => reset(f, a),
         SIGNAL => signal(f, a),
         _ => return None,
@@ -169,7 +182,7 @@ fn signal(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
 
 /// `SYNCOBJ_WAIT`: until one (or all) of the slots' fences has finished, or
 /// the absolute time (nanoseconds of uptime) in the request.
-fn wait(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
+fn wait(f: &Open, s: &sched::Sleepable, a: &mut [u8]) -> Result<usize, Errno> {
     let list = handles(f, u64_at(a, 0)?, u32_at(a, 16)?)?;
     let timeout = u64_at(a, 8)?;
     let flags = u32_at(a, 20)?;
@@ -180,8 +193,9 @@ fn wait(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
         let mut missing = false;
         let mut first = None;
         let mut done = 0;
-        for (i, s) in objects.iter().enumerate() {
-            let fence = s.lock().clone();
+        let mut pending: Option<Arc<dyn Fence>> = None;
+        for (i, slot) in objects.iter().enumerate() {
+            let fence = slot.lock().clone();
             match fence {
                 None => missing = true,
                 Some(fe) => {
@@ -189,6 +203,8 @@ fn wait(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
                     if flags & WAIT_AVAILABLE != 0 || fe.signaled() {
                         done += 1;
                         first.get_or_insert(i);
+                    } else if pending.is_none() {
+                        pending = Some(fe);
                     }
                 }
             }
@@ -208,6 +224,13 @@ fn wait(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
         if sched::current().is_interrupted() {
             return Err(Errno::EINTR);
         }
-        sched::yield_now();
+        match pending {
+            // Sleep on the fence a little (its interrupt wakes it), then look
+            // at everything again.
+            Some(fe) => {
+                let _ = fe.wait(s, 20_000_000);
+            }
+            None => sched::yield_now(),
+        }
     }
 }

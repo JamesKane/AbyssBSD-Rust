@@ -1371,3 +1371,7 @@ Open: sway on the render node's card with `glmark2-es2-wayland` (screenshots), c
 ### 16.27 R4.8: Sway on the Radeon with hardware rendering (2026-11-25)
 
 Sway (wlroots `gles2` renderer on the card's render node) and its clients (foot, `glmark2-es2-wayland` jellyfish) draw with Mesa's `radeonsi` on the Raphael: the jellyfish runs at about 7400 frames a second, the compositor imports every client's shared buffer, no submission was refused and no fault logged. Capture: `tests/graphics/accept-x86_64-amd-radeonsi-sway.png`; start it with `tests/graphics/run-sway-gles.sh`. Importing a shared buffer needed one more request on the render node, `GEM_OP` (creation parameters).
+
+### 16.28 Fence interrupts (2026-11-25)
+
+A job's ring fence now interrupts (`RELEASE_MEM` with the interrupt select; `CP_INT_CNTL_RING0` time-stamp enable, bit 26, set when the ring starts). The interrupt handler recognises client `0x14`, source 181 and wakes a wait queue; `WAIT_CS`, `GEM_WAIT_IDLE` and the synchronisation-object wait (through `Fence::wait`) sleep on it instead of polling every millisecond. A 50 ms (render) or 20 ms (syncobj) timeout stays as the fallback and for signals, so a lost interrupt costs latency, not a hang. Board run (2026-11-25): 52,191 fence interrupts for a glmark2 pass, none other; the scores are unchanged (terrain 429 FPS); Sway with the jellyfish runs with no errors. `dev.drmn.<unit>.irq` counts them.
