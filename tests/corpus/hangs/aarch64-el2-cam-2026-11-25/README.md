@@ -29,17 +29,26 @@ Later captures of the same hang, over QEMU's gdb stub and the monitor:
   I/O queue 1 has head = tail (42), nothing in flight, the entry at the head from the previous lap.
   Its reaper, single-stepped, finds nothing new and so writes no head doorbell.
 - Writing the queue's head doorbell again, with the same value, from the debugger dropped the
-  controller's INTx at once: it had raised the input after the last head doorbell with nothing new
-  posted, and lowers it only on a later doorbell or mask change. Nothing in the driver's INTx path
-  did either, so the interrupt thread (which outranks the `cam` process, pinned to the same CPU, as
-  the user tests are) ran forever.
-- A burst of 2000 admin identifies in `cam` hung on the first run.
+  controller's INTx at once: it was holding the input with nothing new posted. Nothing in the
+  driver's INTx path wrote a doorbell or the mask in that state. That the interrupt thread then
+  outran the `cam` process for good is consistent with `cam` being pinned to the same CPU (the
+  user tests are spawned bound to the runner's CPU); it was read from the code, not seen on the
+  thread.
+- One later probe, after the guest had moved on, wrote a doorbell value that was stale by then and
+  then `INTMS` (the input dropped) and `INTMC` (it came back): it does not show whether unmasking
+  alone clears the stuck state. How the fix works is therefore not established.
+- A build with a 2000-identify burst in `cam` hung on its first two runs, but the admin queue showed
+  none of those identifies had run: the hang came before the burst, which played no part.
 
 The fix is FreeBSD's INTx handling (`nvme_ctrlr_shared_handler`): under INTx the interrupt thread
-masks the controller (`INTMS`) while it reaps and unmasks it (`INTMC`) after, which makes it look
-again; a polled admin command holds the same mask until its completion is taken, so an admin
-completion never holds the input the I/O queue shares. After it, 10 of 10 runs of `aarch64-el2`
-with the 2000-identify burst passed (before: 1 of 1 hung, and 3 of 14 without the burst). `cam`
-keeps a 200-identify burst.
+masks the controller (`INTMS`) while it reaps and unmasks it (`INTMC`) after; a polled admin
+command holds the same mask until its completion is taken, so an admin completion never holds the
+input the I/O queue shares. Before it, 5 of 16 runs hung; after it, 10 of 10 passed on a build
+that still had the debugging (see the roadmap for the runs on the committed code). `cam` keeps a
+200-identify burst as coverage of polled admin commands under INTx, not as a reproducer.
+
+Not covered (FreeBSD services the admin queue in the shared handler, which covers both): an admin
+command that times out releases the mask, so a late completion would hold the input again with no
+reset to follow; and a queue in recovery is not reaped, so the input storms until the reset lands.
 
 QEMU's NVMe model is GPL and was not read: what it does is known only by these experiments.

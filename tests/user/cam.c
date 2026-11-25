@@ -376,8 +376,8 @@ check_nvme_nodes(void)
 	    !nvme_completion_is_error(&p.cpl), "identify: %s status %#x",
 	    strerror(errno), p.cpl.status);
 	/*
-	 * Admin commands back to back: under INTx each completion asserts
-	 * the line its I/O queue shares until the admin queue's head moves.
+	 * Admin commands back to back: under INTx each completion is on the
+	 * input the I/O queue shares (coverage of the polled admin path).
 	 */
 	for (int i = 0; i < ADMIN_BURST; i++) {
 		if (pt(fd, NVME_OPC_IDENTIFY, 0, 1, &cd2, sizeof(cd2), &p) != 0 ||

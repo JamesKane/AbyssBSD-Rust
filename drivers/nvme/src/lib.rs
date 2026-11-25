@@ -333,10 +333,10 @@ impl Regs {
         *n += 1;
     }
 
-    /// Lets go of a [`Regs::mask`]; the last holder unmasks. Unmasking
-    /// also has the controller look again at what is left unreaped: it
-    /// may have raised the input after the last head doorbell with nothing
-    /// new posted, and would hold it there (QEMU's does).
+    /// Lets go of a [`Regs::mask`]; the last holder unmasks. (QEMU's
+    /// controller was seen holding INTx with nothing left to reap until a
+    /// head doorbell was written again; with this masking, as FreeBSD
+    /// does it, that state has not been seen.)
     fn unmask(&self) {
         if !self.intx {
             return;
