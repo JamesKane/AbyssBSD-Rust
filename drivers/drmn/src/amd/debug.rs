@@ -8,6 +8,8 @@
 
 use alloc::sync::Arc;
 
+use core::sync::atomic::Ordering;
+
 use super::{Amd, Bar5};
 use amdgpu::{display, regs};
 
@@ -25,11 +27,90 @@ impl Amd {
         .map_err(|_| abi::errno::Errno::EAGAIN)
     }
 
+    /// [`Amd::chip_reset_trigger`] without the video BIOS's initialisation
+    /// (to see what that changes).
+    pub(crate) fn chip_reset_no_init_trigger(&self) -> Result<(), abi::errno::Errno> {
+        self.skip_asic_init.store(true, Ordering::Release);
+        self.chip_reset_trigger()
+    }
+
     /// Runs the video BIOS's ASIC-init table on the running chip (the table
     /// is for a chip that was just reset): left as a way to test the
     /// interpreter on hardware; it writes a few registers.
     pub(crate) fn asic_init_trigger(&self) -> Result<(), abi::errno::Errno> {
         self.asic_init()
+    }
+
+    /// Reads the firmware's metrics table (04 section 3.3: clocks, activity,
+    /// power, the limits that hold it down) into a page of video memory and
+    /// logs it: harmless, the way to see what the chip is running at.
+    pub(crate) fn smu_metrics(&self) -> Result<(), abi::errno::Errno> {
+        use amdgpu::psp::Memory as _;
+        use amdgpu::regs::Window as _;
+        use amdgpu::smu;
+        /// Where the table goes: a video memory offset nothing else uses.
+        const AT: usize = 200 << 20;
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        let pause = |us: u32| bus::manager().delay_us(u64::from(us));
+        let base = u64::from(w.read32(amdgpu::flip::FB_LOCATION_BASE) & 0xffff) << 24;
+        let address = base + AT as u64;
+        let send = |m: u32, a: u32| smu::send(&w, m, a, 2_000_000, &pause);
+        let mut r = send(
+            smu::message::SET_DRIVER_TABLE_ADDRESS_HIGH,
+            u32::try_from(address >> 32).unwrap_or(0),
+        );
+        if r.is_ok() {
+            r = send(
+                smu::message::SET_DRIVER_TABLE_ADDRESS_LOW,
+                u32::try_from(address & 0xffff_ffff).unwrap_or(0),
+            );
+        }
+        if r.is_ok() {
+            r = send(smu::message::TRANSFER_TABLE_TO_DRAM, smu::METRICS_TABLE);
+        }
+        if let Err(e) = r {
+            self.log(format_args!("SMU: metrics: {e:?}"));
+            return Err(abi::errno::Errno::EIO);
+        }
+        let mem = crate::psp::vram_memory(&gpu, base);
+        mem.invalidate();
+        let mut b = [0u8; smu::METRICS_BYTES];
+        for (i, c) in b.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            c.copy_from_slice(&mem.read32(address + 4 * i as u64).to_le_bytes());
+        }
+        match smu::Metrics::decode(&b) {
+            Some(m) => self.log(format_args!(
+                "SMU: metrics: graphics {} MHz, SOC {} MHz, memory {} MHz, activity {}.{:02}%, VDD/SOC {}/{} mV, power {}/{} mW, socket {} mW, throttler {:#x}",
+                m.graphics_mhz, m.soc_mhz, m.memory_mhz,
+                m.graphics_activity / 100, m.graphics_activity % 100,
+                m.voltage_mv[0], m.voltage_mv[1], m.power_mw[0], m.power_mw[1],
+                m.socket_power_mw, m.throttler
+            )),
+            None => self.log(format_args!("SMU: metrics: short")),
+        }
+        Ok(())
+    }
+
+    /// Sends the power firmware's "disallow GFXOFF entry" (23) or "allow"
+    /// (22) message (04 section 4): whether the graphics block may power
+    /// itself off when idle. A test of what a reset leaves it at.
+    pub(crate) fn smu_gfxoff(&self, allow: bool) -> Result<(), abi::errno::Errno> {
+        use amdgpu::smu;
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        let pause = |us: u32| bus::manager().delay_us(u64::from(us));
+        let m = if allow {
+            smu::message::ALLOW_GFXOFF_ENTRY
+        } else {
+            smu::message::DISALLOW_GFXOFF_ENTRY
+        };
+        let r = smu::send(&w, m, 0, 2_000_000, &pause);
+        self.log(format_args!(
+            "SMU: GFXOFF {}: {r:?}",
+            if allow { "allowed" } else { "disallowed" }
+        ));
+        r.map(|_| ()).map_err(|_| abi::errno::Errno::EIO)
     }
 
     /// Asks the power management firmware two harmless questions (its
@@ -52,6 +133,7 @@ impl Amd {
                 "driver interface",
                 smu::message::GET_DRIVER_INTERFACE_VERSION,
             ),
+            ("graphics clock (MHz)", smu::message::GET_GFX_CLOCK),
         ] {
             match smu::send(&w, m, 0, 2_000_000, &pause) {
                 Ok(v) => {
@@ -65,6 +147,17 @@ impl Amd {
                     self.log(format_args!("SMU: {name}: {e:?}"));
                 }
             }
+        }
+        // The features the firmware runs (04 section 3.4): a 64-bit mask in two
+        // answers, low then high. 8, 9, 10, 31, 36, 41, 44, 45 and 46 are the
+        // clock scaling ones.
+        let low = smu::send(&w, smu::message::GET_ENABLED_FEATURES, 0, 2_000_000, &pause);
+        let high = smu::send(&w, smu::message::GET_ENABLED_FEATURES, 1, 2_000_000, &pause);
+        if let (Ok(l), Ok(h)) = (low, high) {
+            self.log(format_args!(
+                "SMU: features {:#018x}",
+                (u64::from(h) << 32) | u64::from(l)
+            ));
         }
         if ok {
             Ok(())
@@ -893,9 +986,29 @@ pub(super) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             Amd::chip_reset_trigger,
         ),
         (
+            "chip_reset_no_init",
+            "Write 1 to reset the chip as chip_reset does, without the video BIOS's initialisation table (a test)",
+            Amd::chip_reset_no_init_trigger,
+        ),
+        (
             "asic_init",
             "Write 1 to run the video BIOS's initialisation table on the running chip (it writes a few registers)",
             Amd::asic_init_trigger,
+        ),
+        (
+            "smu_metrics",
+            "Write 1 to read the power firmware's metrics (clocks, activity, power, limits) and log them (harmless)",
+            Amd::smu_metrics,
+        ),
+        (
+            "smu_gfxoff_disallow",
+            "Write 1 to tell the power firmware the graphics block may not power itself off when idle",
+            |a: &Amd| a.smu_gfxoff(false),
+        ),
+        (
+            "smu_gfxoff_allow",
+            "Write 1 to tell the power firmware the graphics block may power itself off when idle",
+            |a: &Amd| a.smu_gfxoff(true),
         ),
         (
             "smu_probe",

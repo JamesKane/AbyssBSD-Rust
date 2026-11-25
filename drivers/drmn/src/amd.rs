@@ -103,6 +103,9 @@ pub(crate) struct Amd {
     sdma: SpinLock<Option<crate::gcring::Sdma>>,
     /// A chip reset is running.
     reset_busy: core::sync::atomic::AtomicBool,
+    /// A chip reset leaves out the video BIOS's initialisation (a test of
+    /// what it changes).
+    skip_asic_init: core::sync::atomic::AtomicBool,
     /// The render interface, once the card has one (a reset completes its
     /// jobs).
     render: SpinLock<Option<Weak<crate::render::Render>>>,
@@ -163,6 +166,7 @@ impl Amd {
             sdma: SpinLock::new(None),
             sink: SpinLock::new(None),
             reset_busy: core::sync::atomic::AtomicBool::new(false),
+            skip_asic_init: core::sync::atomic::AtomicBool::new(false),
             render: SpinLock::new(None),
         }
     }

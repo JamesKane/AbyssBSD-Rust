@@ -186,7 +186,11 @@ impl Amd {
             return Err(Errno::EIO);
         }
         // 5. The video BIOS's initialisation.
-        let _ = self.asic_init();
+        if self.skip_asic_init.load(Ordering::Acquire) {
+            self.log(format_args!("chip reset: ASIC init left out"));
+        } else {
+            let _ = self.asic_init();
+        }
         // 6. The translation hubs, the host data path and the interrupt
         //    handler, in the order of 10 section 8.
         self.hdp_ready

@@ -26,6 +26,18 @@ pub mod message {
     pub const TEST: u32 = 1;
     pub const GET_VERSION: u32 = 2;
     pub const GFX_DEVICE_RESET: u32 = 10;
+    pub const SET_DRIVER_TABLE_ADDRESS_HIGH: u32 = 11;
+    pub const SET_DRIVER_TABLE_ADDRESS_LOW: u32 = 12;
+    pub const TRANSFER_TABLE_TO_DRAM: u32 = 13;
+    pub const ENABLE_GFXOFF: u32 = 3;
+    pub const DISABLE_GFXOFF: u32 = 4;
+    pub const ALLOW_GFXOFF_ENTRY: u32 = 22;
+    pub const DISALLOW_GFXOFF_ENTRY: u32 = 23;
+    pub const GET_GFX_CLOCK: u32 = 15;
+    pub const GET_ENABLED_FEATURES: u32 = 16;
+    pub const SET_SOFT_MIN_GFX_CLOCK: u32 = 8;
+    pub const SET_SOFT_MAX_GFX_CLOCK: u32 = 20;
+    pub const SET_HARD_MIN_GFX_CLOCK: u32 = 21;
     pub const GET_DRIVER_INTERFACE_VERSION: u32 = 25;
 }
 
@@ -128,6 +140,43 @@ pub fn send<W: Window + ?Sized>(
             0xfc => return Err(Error::Busy),
             other => return Err(Error::Hung(other)),
         }
+    }
+}
+
+/// The metrics table (04 section 3.3, table 7): its size, and the table's
+/// number for the transfer message.
+pub const METRICS_TABLE: u32 = 7;
+pub const METRICS_BYTES: usize = 36;
+
+/// What the firmware reports of the chip's clocks and power.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Metrics {
+    pub graphics_mhz: u16,
+    pub soc_mhz: u16,
+    pub memory_mhz: u16,
+    /// In hundredths of a percent.
+    pub graphics_activity: u16,
+    pub voltage_mv: [u16; 2],
+    pub power_mw: [u16; 2],
+    pub throttler: u32,
+    pub socket_power_mw: u16,
+}
+
+impl Metrics {
+    /// Decodes the table's bytes.
+    #[must_use]
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        let u16_at = |at: usize| Some(u16::from_le_bytes([*b.get(at)?, *b.get(at + 1)?]));
+        Some(Self {
+            graphics_mhz: u16_at(0x00)?,
+            soc_mhz: u16_at(0x02)?,
+            memory_mhz: u16_at(0x08)?,
+            graphics_activity: u16_at(0x0c)?,
+            voltage_mv: [u16_at(0x10)?, u16_at(0x12)?],
+            power_mw: [u16_at(0x18)?, u16_at(0x1a)?],
+            throttler: u32::from(u16_at(0x20)?),
+            socket_power_mw: u16_at(0x22)?,
+        })
     }
 }
 
@@ -250,6 +299,28 @@ mod tests {
     fn a_busy_firmware_is_asked_again() {
         let s = Smu::new(1, &[(2, 0xfc, 0), (2, 0xfc, 0), (2, 1, 7)]);
         assert_eq!(send(&s, 2, 0, 5, &|_| {}), Ok(7));
+    }
+
+    #[test]
+    fn the_metrics_table_decodes() {
+        let mut b = [0u8; METRICS_BYTES];
+        b[0..2].copy_from_slice(&2200u16.to_le_bytes());
+        b[2..4].copy_from_slice(&800u16.to_le_bytes());
+        b[8..10].copy_from_slice(&2400u16.to_le_bytes());
+        b[0x0c..0x0e].copy_from_slice(&9500u16.to_le_bytes());
+        b[0x20..0x22].copy_from_slice(&0x0005u16.to_le_bytes());
+        let m = Metrics::decode(&b).unwrap();
+        assert_eq!(
+            (
+                m.graphics_mhz,
+                m.soc_mhz,
+                m.memory_mhz,
+                m.graphics_activity,
+                m.throttler
+            ),
+            (2200, 800, 2400, 9500, 5)
+        );
+        assert_eq!(Metrics::decode(&b[..10]), None);
     }
 
     #[test]
