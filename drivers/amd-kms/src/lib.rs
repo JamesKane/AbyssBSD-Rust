@@ -272,6 +272,11 @@ impl CrtcHw for Crtc {
         }
         let mode = u.new.mode.as_ref().filter(|_| u.new.active);
         let _ = self.0.display.set_mode(u.s, mode);
+        // Turned off: nobody has a picture to show, so the display shows the
+        // console's surface again, not the last picture drawn.
+        if mode.is_none() {
+            self.0.restore();
+        }
     }
 }
 

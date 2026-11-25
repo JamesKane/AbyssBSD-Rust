@@ -36,6 +36,7 @@ mod interrupt;
 mod kms;
 mod psp;
 mod render;
+mod sink;
 
 use alloc::string::String;
 use alloc::sync::Arc;

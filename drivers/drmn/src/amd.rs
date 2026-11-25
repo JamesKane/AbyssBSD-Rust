@@ -24,6 +24,7 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 
 mod debug;
 
@@ -99,6 +100,8 @@ pub(crate) struct Amd {
     gfx: SpinLock<Option<crate::gcring::Gfx>>,
     /// System DMA engine 0, once started.
     sdma: SpinLock<Option<crate::gcring::Sdma>>,
+    /// What the monitor's EDID said, if it was read (stage R3.5).
+    sink: SpinLock<Option<edid::Edid>>,
 }
 
 /// Where the GART's page table is in video memory (BAR0 offset): past the
@@ -152,6 +155,7 @@ impl Amd {
             modeset_busy: core::sync::atomic::AtomicBool::new(false),
             gfx: SpinLock::new(None),
             sdma: SpinLock::new(None),
+            sink: SpinLock::new(None),
         }
     }
 
@@ -244,6 +248,8 @@ impl Amd {
                 return;
             }
         }
+        // The monitor first: the card's modes follow its EDID.
+        self.read_sink();
         let card = match crate::kms::card(&gpu, Arc::clone(&self.irq), self.me.clone()) {
             Ok(c) => c,
             Err(e) => {
@@ -690,27 +696,79 @@ impl Amd {
         self.set_mode_by_code(vic, true)
     }
 
-    /// The modes the card offers (CTA video identification code, timing),
-    /// the firmware's first and preferred. 640x480 has the specification's
-    /// 25.175 MHz clock (the shared table rounds it to 25.2).
-    pub(crate) fn supported_modes() -> alloc::vec::Vec<(u8, kms_check::Mode)> {
-        use abi::drm::DRM_MODE_TYPE_PREFERRED;
-        [16u8, 31, 4, 19, 3, 18, 1]
+    /// Reads the monitor's EDID over the DDC engine and keeps what it says:
+    /// the modes the card offers follow it (stage R3.5). A monitor that does
+    /// not answer, or answers with a bad block, leaves the whole table.
+    pub(crate) fn read_sink(&self) {
+        use amdgpu::ddc;
+        use amdgpu::regs::Window;
+        let Ok(gpu) = self.gpu() else {
+            return;
+        };
+        let w = Bar5(&gpu);
+        let pause = |us: u32| bus::manager().delay_us(u64::from(us));
+        // The specification's prescale for 100 kHz first, then the platform's
+        // own (the time base differs from the one the specification's
+        // prescale is for).
+        let platform = w.read32(ddc::SPEED) >> 16;
+        let raw = [ddc::PRESCALE, platform]
             .into_iter()
-            .filter_map(|vic| {
-                let mut m = edid::mode_for_vic(vic)?;
-                if vic == 1 {
-                    m.clock_khz = 25_175;
-                }
-                if vic == 16 {
-                    m.kind |= DRM_MODE_TYPE_PREFERRED;
-                }
-                Some((vic, m))
-            })
-            .collect()
+            .find_map(|prescale| ddc::read_edid(&w, 0, 4, prescale, &pause).ok());
+        let Some(raw) = raw else {
+            self.log(format_args!("sink: no EDID answered; every mode offered"));
+            return;
+        };
+        match edid::parse(&raw) {
+            Ok(e) => {
+                let modes = crate::sink::offered(Some(&e));
+                self.log(format_args!(
+                    "sink: {:?}, {} timings in the EDID, {} offered of the card's {}",
+                    e.name,
+                    e.modes.len(),
+                    modes.len(),
+                    crate::sink::SETTABLE.len()
+                ));
+                *self.sink.lock() = Some(e);
+            }
+            Err(e) => self.log(format_args!(
+                "sink: EDID not valid ({e:?}); every mode offered"
+            )),
+        }
     }
 
-    /// Sets the mode `mode` (one of [`Amd::supported_modes`]), or the
+    /// What the monitor is and which modes it is offered, for the `sink`
+    /// sysctl.
+    pub(crate) fn sink_summary(&self) -> String {
+        let modes = self.offered_modes();
+        let list: Vec<String> = modes
+            .iter()
+            .map(|(vic, m)| {
+                let star = if m.kind & abi::drm::DRM_MODE_TYPE_PREFERRED != 0 {
+                    "*"
+                } else {
+                    ""
+                };
+                format!("{vic}{star}")
+            })
+            .collect();
+        match self.sink.lock().as_ref() {
+            Some(e) => format!(
+                "{:?}: modes {} (of {} timings; * preferred)",
+                e.name.as_deref().unwrap_or("unnamed"),
+                list.join(" "),
+                e.modes.len()
+            ),
+            None => format!("no EDID: modes {} (* preferred)", list.join(" ")),
+        }
+    }
+
+    /// The modes the card offers: those of the table it can set that the
+    /// monitor's EDID lists, or the whole table before the EDID is read.
+    pub(crate) fn offered_modes(&self) -> alloc::vec::Vec<(u8, kms_check::Mode)> {
+        crate::sink::offered(self.sink.lock().as_ref())
+    }
+
+    /// Sets the mode `mode` (one of the modes the card can set, [`crate::sink::settable`]), or the
     /// firmware's if `None`; the card's display calls it on a mode set. A
     /// pixel clock change needs the display firmware, which is loaded here on
     /// the first need (this may sleep on `s`, the requesting thread).
@@ -723,7 +781,7 @@ impl Amd {
         use core::sync::atomic::Ordering;
         let vic = match mode {
             None => 16,
-            Some(m) => Self::supported_modes()
+            Some(m) => crate::sink::settable()
                 .into_iter()
                 .find(|(_, w)| {
                     (w.hdisplay, w.vdisplay, w.htotal, w.vtotal, w.clock_khz)
@@ -738,7 +796,7 @@ impl Amd {
         let mut result = Ok(());
         // The display firmware is needed for any clock other than the one
         // running; the platform's own copy of the video BIOS is read then.
-        let wanted = Self::supported_modes()
+        let wanted = crate::sink::settable()
             .into_iter()
             .find(|(v, _)| *v == vic)
             .map_or(0, |(_, m)| m.clock_khz);
@@ -1066,6 +1124,14 @@ fn publish_dri(t: &mut sysctl::Tree, a: &Arc<Amd>) {
 /// bring-up and probe triggers of [`debug`].
 pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) {
     publish_dri(t, a);
+    let r = Arc::clone(a);
+    let _ = t.add_value(
+        node,
+        sysctl::Number::Auto,
+        "sink",
+        "The monitor's name and the video modes offered for it",
+        sysctl::Value::Str(Box::new(move |out| out.push_str(&r.sink_summary()))),
+    );
     let r = Arc::clone(a);
     let _ = t.add_value(
         node,

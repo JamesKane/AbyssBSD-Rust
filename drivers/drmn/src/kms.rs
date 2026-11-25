@@ -83,10 +83,14 @@ impl Display for Scanout {
     }
 
     fn modes(&self) -> alloc::vec::Vec<kms_check::Mode> {
-        crate::amd::Amd::supported_modes()
-            .into_iter()
-            .map(|(_, m)| m)
-            .collect()
+        // What the monitor's EDID allows of the modes the card can set.
+        match self.amd.upgrade() {
+            Some(amd) => amd.offered_modes(),
+            None => crate::sink::settable(),
+        }
+        .into_iter()
+        .map(|(_, m)| m)
+        .collect()
     }
 
     fn set_mode(

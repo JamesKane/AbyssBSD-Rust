@@ -304,8 +304,13 @@ fn a_mode_set_commit_sets_the_mode_and_turning_off_goes_back_to_the_firmwares() 
     crtc.commit(&crtc_update(&old, &on, false));
     assert!(d.sets.lock().unwrap().is_empty());
     crtc.commit(&crtc_update(&old, &on, true));
+    // A picture is on show when the controller is turned off.
+    *c.screen.front.lock() = Front::A;
     crtc.commit(&crtc_update(&old, &off, true));
     assert_eq!(*d.sets.lock().unwrap(), std::vec![Some((1280, 720)), None]);
+    // Off also shows the console's surface again, not the last picture.
+    assert_eq!(*c.screen.front.lock(), Front::Console);
+    assert_eq!(*d.inner.shown.lock().unwrap(), std::vec![0]);
 }
 
 #[test]

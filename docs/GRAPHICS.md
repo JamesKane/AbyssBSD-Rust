@@ -1387,3 +1387,10 @@ Board run: a command buffer on each of the three engines writes to a buffer mapp
 ### 16.30 The console comes back when the last client quits (2026-11-25)
 
 Closing a file used to remove only its buffers, so the picture of a compositor that quit stayed on the display, frozen. The core now tells the driver (`DrmDriver::last_close`) when the last file on the card's own node closes (render-node files do not count), and the Radeon card shows the console's surface again. Board run: Sway with the jellyfish started and stopped; the console was back on the monitor.
+
+### 16.31 The monitor sets the modes; the bring-up code is split out; tests for `drmn` (2026-11-25)
+
+- **Sink.** The card reads the monitor's EDID over the DDC engine at attach (`Amd::read_sink`) and offers those modes of its table (the seven CTA-861 modes the pixel-clock path has been run for) that the EDID lists, the monitor's native one preferred when the card can set it, else 1080p60. A monitor with no usable EDID, or none of the table's modes, gets the whole table. The matching includes the pixel clock: 1080p at 25 hertz has the totals of 1080p at 50 hertz (a host test caught that). `dev.drmn.<unit>.sink` shows the monitor and the offered modes (the X870E's Dell ST2421L: all seven, 1080p60 preferred). The connector still reports connected whatever the hot-plug line says (the monitor is behind a KVM switch that drops it), and the list is read once at attach; hot-plug re-reading and the notice to user space are not built.
+- **Bring-up code.** The one-shot sysctls and the code behind them moved from `amd.rs` to `amd/debug.rs`; `hw.drmn.debug=0` leaves them out (on by default; names unchanged).
+- **Tests.** `drmn` has host tests: interrupt entry classification, ring room, address forms, engine and page-set tables, video memory layout (compile-time and run-time), the mode selection.
+- **Turning the controller off** now shows the console's surface again (it used to leave the last picture scanned out; a `kmsflip` run left its pattern on the monitor).
