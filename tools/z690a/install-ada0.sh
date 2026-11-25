@@ -21,6 +21,8 @@
 #                         new image.
 #   --install --wipe S    DESTRUCTIVE: ada0 loses what it holds. S must be the
 #                         disk's serial number, as a check that you meant it.
+#   --entry               the boot entry for ada0's ESP, outside BootOrder (--install
+#                         runs it last; safe to run again).
 #   --boot-once           BootNext to the AbyssBSD entry. It does not reboot.
 #   --status              what is there: the partitions, the boot entries.
 # Add --dry-run to --install to see its preflight and plan only.
@@ -37,7 +39,7 @@ wipe=
 dry=0
 while [ $# -gt 0 ]; do
 	case $1 in
-	--prepare | --install | --boot-once | --status) mode=${1#--} ;;
+	--prepare | --install | --entry | --boot-once | --status) mode=${1#--} ;;
 	--wipe) wipe=$2; shift ;;
 	--dry-run) dry=1 ;;
 	-h | --help) sed -n '2,/^set -eu/p' "$0" | sed 's/^# \{0,1\}//; /^set -eu/d'; exit 0 ;;
@@ -45,7 +47,7 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
-[ -n "$mode" ] || { echo "usage: $0 --prepare | --install --wipe SERIAL [--dry-run] | --boot-once | --status" >&2; exit 2; }
+[ -n "$mode" ] || { echo "usage: $0 --prepare | --install --wipe SERIAL [--dry-run] | --entry | --boot-once | --status" >&2; exit 2; }
 
 srv() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 abyss-build "$@"; }
 say() { echo "$(date +%T) $*"; }
@@ -65,7 +67,7 @@ img=$image
 [ -f \$img ] || { echo "no image at \$img: cargo xtask --remote image --arch x86_64 --release --root installed" >&2; exit 1; }
 cp \$img $work/disk-z690a.img
 md=\$(doas -n mdconfig -a -t vnode -f $work/disk-z690a.img)
-trap 'doas -n umount $work/mnt 2> /dev/null; doas -n umount $work/esp 2> /dev/null; doas -n mdconfig -d -u \${md#md} 2> /dev/null' EXIT
+trap 'doas -n umount $work/mnt 2> /dev/null || true; doas -n umount $work/esp 2> /dev/null || true; doas -n mdconfig -d -u \${md#md} 2> /dev/null || true' EXIT
 mkdir -p $work/mnt $work/esp
 doas -n mount /dev/\${md}p2 $work/mnt
 doas -n sed -i '' -e 's#/dev/gpt/rootfs0#/dev/gpt/abyssroot#' -e 's#/dev/gpt/efiboot0#/dev/gpt/abyssefi#' $work/mnt/etc/fstab
@@ -117,9 +119,7 @@ EOF
 	srv "sh -s" << EOF
 set -eu
 md=\$(doas -n mdconfig -a -t vnode -o readonly -f $work/disk-z690a.img)
-trap 'doas -n umount /mnt/abyssefi-z690a 2> /dev/null; doas -n mdconfig -d -u \${md#md} 2> /dev/null' EXIT
-order=\$(doas -n efibootmgr | sed -n 's/^BootOrder *: *//p' | tr -d ' ')
-echo "BootOrder was: \$order"
+trap 'doas -n mdconfig -d -u \${md#md} 2> /dev/null || true' EXIT
 doas -n gpart destroy -F $disk
 doas -n gpart create -s gpt $disk
 doas -n gpart add -t efi -s $esp_size -l abyssefi $disk
@@ -134,18 +134,33 @@ for p in p1 p2; do
 done
 doas -n growfs -y /dev/${disk}p2
 doas -n fsck_ffs -f -n /dev/${disk}p2
-mkdir -p /mnt/abyssefi-z690a
+EOF
+	say "installed; now its boot entry"
+	exec "$0" --entry
+	;;
+
+entry)
+	srv "sh -s" << EOF
+set -eu
+order=\$(doas -n efibootmgr | sed -n 's/^BootOrder *: *//p' | tr -d ' ')
+echo "BootOrder is: \$order"
+trap 'doas -n umount /mnt/abyssefi-z690a 2> /dev/null || true; doas -n rmdir /mnt/abyssefi-z690a 2> /dev/null || true' EXIT
+doas -n mkdir -p /mnt/abyssefi-z690a
 doas -n mount -t msdosfs -o ro /dev/${disk}p1 /mnt/abyssefi-z690a
-ls /mnt/abyssefi-z690a/EFI/BOOT/BOOTX64.EFI
+ls /mnt/abyssefi-z690a/EFI/BOOT/BOOTX64.EFI /mnt/abyssefi-z690a/EFI/ABYSS/CMDLINE
 doas -n umount /mnt/abyssefi-z690a
-doas -n mount -t msdosfs /dev/${disk}p1 /mnt/abyssefi-z690a
-doas -n efibootmgr -c -a -L '$label' -l /mnt/abyssefi-z690a/EFI/BOOT/BOOTX64.EFI
-doas -n umount /mnt/abyssefi-z690a
-# A new entry may be put first in BootOrder: put the order back as it was.
-doas -n efibootmgr -o "\$order"
+if doas -n efibootmgr | grep -q '$label'; then
+	echo "the entry '$label' is already there"
+else
+	doas -n mount -t msdosfs /dev/${disk}p1 /mnt/abyssefi-z690a
+	doas -n efibootmgr -c -a -L '$label' -l /mnt/abyssefi-z690a/EFI/BOOT/BOOTX64.EFI
+	doas -n umount /mnt/abyssefi-z690a
+	# A new entry may be put first in BootOrder: put the order back as it was.
+	doas -n efibootmgr -o "\$order"
+fi
 doas -n efibootmgr -v | head -14
 EOF
-	say "installed. BootOrder is as it was; --boot-once sets BootNext (it does not reboot)"
+	say "BootOrder is as it was; --boot-once sets BootNext (it does not reboot)"
 	;;
 
 boot-once)
