@@ -1367,3 +1367,7 @@ What it took, beyond the interface itself (`drivers/drmn/src/render.rs`):
 - **The write pointer is a count that never wraps** (the doorbell and the poll word get the 64-bit count; the ring offset is the count modulo the size). A wrapped pointer stalled the ring at its first wrap.
 
 Open: sway on the render node's card with `glmark2-es2-wayland` (screenshots), compute and DMA rings (R4.8), PRIME export of render buffers, the interrupt instead of polling for fences.
+
+### 16.27 R4.8: Sway on the Radeon with hardware rendering (2026-11-25)
+
+Sway (wlroots `gles2` renderer on the card's render node) and its clients (foot, `glmark2-es2-wayland` jellyfish) draw with Mesa's `radeonsi` on the Raphael: the jellyfish runs at about 7400 frames a second, the compositor imports every client's shared buffer, no submission was refused and no fault logged. Capture: `tests/graphics/accept-x86_64-amd-radeonsi-sway.png`; start it with `tests/graphics/run-sway-gles.sh`. Importing a shared buffer needed one more request on the render node, `GEM_OP` (creation parameters).

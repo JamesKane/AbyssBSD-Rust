@@ -732,6 +732,32 @@ impl RenderApi for Render {
                 Ok(0)
             }
             cmd::GEM_METADATA => self.gem_metadata(cx, arg),
+            // GEM_OP: the creation parameters (0), the preferred domains
+            // (1: every buffer is system memory, so nothing changes), and
+            // the list of mappings (2, not built).
+            cmd::GEM_OP => {
+                if arg.len() < 16 {
+                    return Err(Errno::EINVAL);
+                }
+                let handle = u32::from_le_bytes([arg[0], arg[1], arg[2], arg[3]]);
+                let op = u32::from_le_bytes([arg[4], arg[5], arg[6], arg[7]]);
+                let user = u64::from_le_bytes([
+                    arg[8], arg[9], arg[10], arg[11], arg[12], arg[13], arg[14], arg[15],
+                ]);
+                let gem = cx.gem(handle).ok_or(Errno::ENOENT)?;
+                match op {
+                    0 => {
+                        let mut info = [0u8; 32];
+                        info[0..8].copy_from_slice(&gem.size().to_le_bytes());
+                        info[8..16].copy_from_slice(&4096u64.to_le_bytes());
+                        info[16..24].copy_from_slice(&uapi::domain::GTT.to_le_bytes());
+                        cx.copy_out(user, &info)?;
+                        Ok(0)
+                    }
+                    1 => Ok(0),
+                    _ => Err(Errno::EOPNOTSUPP),
+                }
+            }
             // Reserving a VMID for the compute runtime: nothing to do.
             cmd::VM => {
                 arg.iter_mut().for_each(|b| *b = 0);
