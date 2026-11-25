@@ -312,6 +312,59 @@ pub fn plan_retimed<W: Window + ?Sized>(w: &W, mode: &Mode) -> Result<Plan, Erro
     Ok(Plan { writes })
 }
 
+/// The registers a plan may write, with their names: what [`snapshot`] keeps
+/// so the firmware's own values can be put back exactly.
+pub const BASELINE: [(&str, usize); 22] = [
+    ("OTG_H_TOTAL", timing::H_TOTAL),
+    ("OTG_H_BLANK_START_END", timing::H_BLANK_START_END),
+    ("OTG_H_SYNC_A", timing::H_SYNC_A),
+    ("OTG_H_SYNC_A_CNTL", timing::H_SYNC_A_CNTL),
+    ("OTG_V_TOTAL", timing::V_TOTAL),
+    ("OTG_V_BLANK_START_END", timing::V_BLANK_START_END),
+    ("OTG_V_SYNC_A", timing::V_SYNC_A),
+    ("OTG_V_SYNC_A_CNTL", timing::V_SYNC_A_CNTL),
+    ("HUBPREQ_REF_FREQ_TO_PIX_FREQ", REF_FREQ_TO_PIX_FREQ),
+    ("HUBPREQ_DST_DIMENSIONS", DST_DIMENSIONS),
+    ("HUBPREQ_BLANK_OFFSET_0", BLANK_OFFSET_0),
+    ("HUBPREQ_BLANK_OFFSET_1", BLANK_OFFSET_1),
+    ("OTG_VUPDATE_PARAM", VUPDATE_PARAM),
+    ("OTG_VSTARTUP_PARAM", VSTARTUP_PARAM),
+    ("HUBP_PRI_VIEWPORT_DIMENSION", VIEWPORT_DIMENSION),
+    ("DSCL_RECOUT_SIZE", RECOUT_SIZE),
+    ("DSCL_MPC_SIZE", MPC_SIZE),
+    ("DSCL_OTG_H_BLANK", DSCL_H_BLANK),
+    ("DSCL_OTG_V_BLANK", DSCL_V_BLANK),
+    ("DPG_DIMENSIONS", DPG_DIMENSIONS),
+    ("PIXEL_RATE_CNTL", 0x500),
+    ("PHYPLLA_PIXCLK_RESYNC_CNTL", 0x400),
+];
+
+/// The values of [`BASELINE`], as the firmware left them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Baseline(pub [u32; 22]);
+
+/// Reads the registers a plan may write.
+pub fn snapshot<W: Window + ?Sized>(w: &W) -> Baseline {
+    Baseline(BASELINE.map(|(_, at)| w.read32(at)))
+}
+
+/// The plan that puts the registers a plan may write back to `baseline`.
+/// The last two ([`BASELINE`]: the pixel rate and the pixel clock's resync
+/// control) are only read: a plan never writes them.
+#[must_use]
+pub fn plan_restore<W: Window + ?Sized>(w: &W, baseline: &Baseline) -> Plan {
+    let mut writes = [None; 24];
+    let mut n = 0;
+    for (i, (name, at)) in BASELINE.iter().take(20).enumerate() {
+        let now = w.read32(*at);
+        if now != baseline.0[i] {
+            writes[n] = Some((*name, *at, now, baseline.0[i]));
+            n += 1;
+        }
+    }
+    Plan { writes }
+}
+
 /// Stops the pipe (08 section 3.7.4, step 2): the plane blanked, the output
 /// data source off, the memory configuration cleared, the generator and the
 /// timing generator off; waits for the generator to go idle (`pause_us` is
@@ -510,6 +563,21 @@ mod tests {
         // Timing as the specification's table.
         assert_eq!(get(timing::H_TOTAL), Some(0x671));
         assert_eq!(get(timing::H_BLANK_START_END), Some(0x0104_0604));
+    }
+
+    #[test]
+    fn restoring_the_baseline_puts_every_register_back_after_a_retimed_mode() {
+        let p = Pipe::new();
+        let base = snapshot(&p);
+        let go = plan_retimed(&p, &cta(4)).unwrap();
+        apply(&p, &go);
+        assert_ne!(snapshot(&p), base);
+        let back = plan_restore(&p, &base);
+        assert!(back.changes().count() > 10);
+        apply(&p, &back);
+        assert_eq!(snapshot(&p), base);
+        // And a restore with nothing changed writes nothing.
+        assert_eq!(plan_restore(&p, &base).changes().count(), 0);
     }
 
     #[test]

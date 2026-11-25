@@ -231,7 +231,13 @@ pub fn configure<W: Window + ?Sized>(w: &W, l: &Layout) {
     // Window 2: the base after the instructions, no size, off.
     w.write32(CW_BASE + 8, CW0_BASE + l.code_bytes);
     w.write32(CW_TOP + 8, 0);
-    window(3, CW3_BASE, l.vbios, l.vbios_bytes);
+    // Window 3, the video BIOS copy: the firmware learns the image's size
+    // from the window alone, and this window's top is base + size (not
+    // base + size - 1 as the others') (08 section 3.2.1).
+    w.write32(CW_OFFSET + 8 * 3, lo(l.vbios));
+    w.write32(CW_OFFSET + 8 * 3 + 4, hi(l.vbios));
+    w.write32(CW_BASE + 4 * 3, CW3_BASE);
+    w.write32(CW_TOP + 4 * 3, (CW3_BASE + l.vbios_bytes) | ENABLE);
     window(4, CW4_BASE, l.mailboxes, 2 * MAILBOX_BYTES);
     window(5, CW5_BASE, l.trace, l.trace_bytes);
     window(6, CW6_BASE, l.state, l.state_bytes);
@@ -298,6 +304,31 @@ pub fn enable_outbox1(enable: bool) -> [u8; 8] {
     let mut b = [0u8; 8];
     b[..4].copy_from_slice(&header(CMD_ENABLE_OUTBOX1, 0, false, 4).to_le_bytes());
     b[4..].copy_from_slice(&u32::from(enable).to_le_bytes());
+    b
+}
+
+/// Command type 128: the video BIOS table offload (08 section 3.4).
+pub const CMD_VBIOS: u8 = 128;
+/// Its subtype for setting the pixel clock.
+pub const VBIOS_SET_PIXEL_CLOCK: u8 = 2;
+/// The pixel-clock PLL of the first physical-layer block (combo PHY PLL 0).
+pub const PLL_COMBO_PHY_0: u8 = 0x14;
+/// The internal encoder's object id.
+pub const ENCODER_INTERNAL: u8 = 0x1e;
+
+/// The set-pixel-clock command (08 section 3.7.5), for HDMI at 8 bits per
+/// component on timing generator `crtc`: the pixel clock in units of 100 Hz,
+/// the PLL, the encoder, mode 3 (HDMI), no flags, the generator, no deep
+/// colour. The header is `0x10000280`.
+#[must_use]
+pub fn set_pixel_clock(clock_100hz: u32, crtc: u8) -> [u8; 20] {
+    let mut b = [0u8; 20];
+    b[..4].copy_from_slice(&header(CMD_VBIOS, VBIOS_SET_PIXEL_CLOCK, false, 16).to_le_bytes());
+    b[4..8].copy_from_slice(&clock_100hz.to_le_bytes());
+    b[8] = PLL_COMBO_PHY_0;
+    b[9] = ENCODER_INTERNAL;
+    b[10] = 3;
+    b[12] = crtc;
     b
 }
 
@@ -537,6 +568,8 @@ mod tests {
         assert_eq!(r.get(CW_TOP + 16), (CW4_BASE + 0x3fff) | ENABLE);
         // Window 6: the state.
         assert_eq!(r.get(CW_TOP + 24), (CW6_BASE + 0xc87f) | ENABLE);
+        // Window 3: the top is base + size, the size the video BIOS's.
+        assert_eq!(r.get(CW_TOP + 12), (CW3_BASE + 0x2_0000) | ENABLE);
         // Window 2 is off; windows 0 and 1 are not touched.
         assert_eq!(r.get(CW_TOP + 8), 0);
         assert_eq!(r.get(CW_BASE + 8), CW0_BASE + 0x3a520);
@@ -587,6 +620,15 @@ mod tests {
         }
         fn flush(&self) {}
         fn invalidate(&self) {}
+    }
+
+    #[test]
+    fn the_set_pixel_clock_command_is_the_specifications() {
+        let c = set_pixel_clock(742_500, 0);
+        assert_eq!(u32::from_le_bytes([c[0], c[1], c[2], c[3]]), 0x1000_0280);
+        assert_eq!(u32::from_le_bytes([c[4], c[5], c[6], c[7]]), 742_500);
+        assert_eq!(&c[8..14], [0x14, 0x1e, 3, 0, 0, 0]);
+        assert!(c[14..].iter().all(|b| *b == 0));
     }
 
     #[test]

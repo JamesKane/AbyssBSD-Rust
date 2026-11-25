@@ -29,11 +29,14 @@ const SIZE_AT: usize = 0x20;
 /// The windows' places in video memory (BAR0 offsets, 1 MiB each, after the
 /// security processor's staging buffer at 161 MiB).
 const VBIOS_AT: usize = 162 << 20;
-const MAILBOXES_AT: usize = 163 << 20;
+pub(crate) const MAILBOXES_AT: usize = 163 << 20;
 const TRACE_AT: usize = 164 << 20;
 const STATE_AT: usize = 165 << 20;
-/// The copy of the video BIOS: its size (the platform's own is 128 KiB).
-const VBIOS_BYTES: u32 = 0x2_0000;
+/// The window's room for the video BIOS copy, and the platform's own copy
+/// of it (a video memory offset, 08 section 9.0.1; the image is 44,544 bytes
+/// on Raphael).
+const VBIOS_ROOM: u32 = 0x2_0000;
+const PLATFORM_VBIOS: u64 = 0x1fe2_0000;
 /// How long to wait for the firmware: 2 s in 1 ms steps.
 const BOOT_POLLS: u32 = 2000;
 /// The stop request's waits: 100 ms each in 1 ms steps (08 section 3.2).
@@ -60,6 +63,30 @@ fn zero(gpu: &Aperture, at: usize, bytes: usize) {
     for o in (0..bytes).step_by(4) {
         gpu.vram_write32(at + o, 0);
     }
+}
+
+/// Copies the platform's video BIOS into window 3's memory and returns its
+/// size: the ROM signature `55 aa`, the length in 512-byte units at byte 2,
+/// and the bytes summing to zero are checked. `None` (the window left zero)
+/// if the platform's copy is not a valid image.
+fn copy_vbios(gpu: &Aperture, w: &Bar5<'_>) -> Option<u32> {
+    let first = amdgpu::regs::read_vram(w, PLATFORM_VBIOS);
+    if first & 0xffff != 0xaa55 {
+        return None;
+    }
+    let bytes = ((first >> 16) & 0xff) * 512;
+    if bytes == 0 || bytes > VBIOS_ROOM {
+        return None;
+    }
+    let mut sum = 0u8;
+    for i in 0..u64::from(bytes / 4) {
+        let v = amdgpu::regs::read_vram(w, PLATFORM_VBIOS + 4 * i);
+        for b in v.to_le_bytes() {
+            sum = sum.wrapping_add(b);
+        }
+        gpu.vram_write32(VBIOS_AT + 4 * usize::try_from(i).unwrap_or(0), v);
+    }
+    (sum == 0).then_some(bytes)
 }
 
 /// Runs the whole sequence. `file` is the firmware file; `psp` the ring
@@ -108,7 +135,16 @@ pub(crate) fn load(
     state("before");
     // The windows' memory and the image, written and flushed before the
     // unit or the security processor sees them.
-    zero(gpu, VBIOS_AT, VBIOS_BYTES as usize);
+    zero(gpu, VBIOS_AT, VBIOS_ROOM as usize);
+    let vbios = copy_vbios(gpu, &w);
+    match vbios {
+        Some(n) => log(format_args!(
+            "DMCUB: the platform's video BIOS ({n} bytes, checksum good) copied into window 3"
+        )),
+        None => log(format_args!(
+            "DMCUB: no valid video BIOS at the platform's copy: window 3 left zero"
+        )),
+    }
     zero(gpu, MAILBOXES_AT, 0x4000);
     zero(gpu, TRACE_AT, needs.trace_bytes as usize);
     zero(gpu, STATE_AT, needs.state_bytes as usize);
@@ -166,7 +202,7 @@ pub(crate) fn load(
     }
     let layout = Layout {
         vbios: base + VBIOS_AT as u64,
-        vbios_bytes: VBIOS_BYTES,
+        vbios_bytes: vbios.unwrap_or(VBIOS_ROOM),
         mailboxes: base + MAILBOXES_AT as u64,
         trace: base + TRACE_AT as u64,
         trace_bytes: needs.trace_bytes,

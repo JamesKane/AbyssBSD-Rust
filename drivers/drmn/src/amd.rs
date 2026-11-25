@@ -75,6 +75,11 @@ pub(crate) struct Amd {
     /// The pixel clock now running, in kHz (the firmware's, until a mode
     /// change that moves it).
     clock_khz: core::sync::atomic::AtomicU32,
+    /// The firmware's own values of the registers a mode change writes,
+    /// taken before the first change, to put back.
+    baseline: SpinLock<Option<amdgpu::modeset::Baseline>>,
+    /// Whether the display firmware was loaded (stage R3.3).
+    dmcub_up: core::sync::atomic::AtomicBool,
 }
 
 /// Where the GART's page table is in video memory (BAR0 offset): past the
@@ -119,6 +124,8 @@ impl Amd {
             psp: SpinLock::new(None),
             hdmi_prepared: core::sync::atomic::AtomicBool::new(false),
             clock_khz: core::sync::atomic::AtomicU32::new(amdgpu::modeset::FIRMWARE_CLOCK_KHZ),
+            baseline: SpinLock::new(None),
+            dmcub_up: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -711,7 +718,11 @@ impl Amd {
             Ok(file) => {
                 let log = |args: core::fmt::Arguments<'_>| self.log(args);
                 match crate::dmcub::load(&gpu, &mut brought.psp, &file, &log) {
-                    Ok(()) => self.log(format_args!("DMCUB: loaded")),
+                    Ok(()) => {
+                        self.dmcub_up
+                            .store(true, core::sync::atomic::Ordering::Release);
+                        self.log(format_args!("DMCUB: loaded"));
+                    }
                     Err(e) => self.log(format_args!("DMCUB: stopped: {e:?}")),
                 }
             }
@@ -807,36 +818,66 @@ impl Amd {
     }
 
     /// Changes the mode to CTA video identification code `vic` on the running
-    /// pipe (stage R3.4, 08 section 3.7): the pixel clock stays, so only
-    /// modes at the firmware's clock and size. A plan is checked and logged
-    /// before anything is written; the picture goes while the generator is
-    /// stopped.
+    /// pipe (stage R3.4, 08 section 3.7). The firmware's own mode (code 16)
+    /// puts every register back to the firmware's values; a mode at the
+    /// running pixel clock and size changes the few registers that differ;
+    /// any other needs the display firmware loaded (`dmcub`) to set the pixel
+    /// clock. A plan is checked and logged before anything is written; the
+    /// picture goes while the generator is stopped.
     pub(crate) fn set_mode(&self, vic: i32) -> Result<(), abi::errno::Errno> {
         use abi::errno::Errno;
-        use amdgpu::{flip, hdmi, modeset};
+        use amdgpu::regs::Window;
+        use amdgpu::{dmcub, flip, hdmi, modeset};
         use core::sync::atomic::Ordering;
         let gpu = self.gpu()?;
         let w = Bar5(&gpu);
         let pause = |us: u32| bus::manager().delay_us(u64::from(us));
-        let Some(mode) = u8::try_from(vic).ok().and_then(edid::mode_for_vic) else {
+        let code = u8::try_from(vic).unwrap_or(0);
+        let Some(mut mode) = edid::mode_for_vic(code) else {
             self.log(format_args!("mode: no timing for code {vic}"));
             return Err(Errno::EINVAL);
         };
+        if code == 1 {
+            // The specification's clock for 640x480 (the shared table rounds it).
+            mode.clock_khz = 25_175;
+        }
         if let Err(e) = modeset::preflight(&w) {
             self.log(format_args!("mode: the pipe is not as expected: {e:?}"));
             return Err(Errno::EINVAL);
         }
+        // The firmware's own register values, before the first change.
+        let baseline = *self
+            .baseline
+            .lock()
+            .get_or_insert_with(|| modeset::snapshot(&w));
         let clock = self.clock_khz.load(Ordering::Acquire);
-        let plan = match modeset::plan(&w, &mode, clock) {
+        let firmware_mode = code == 16;
+        let target_clock = if firmware_mode {
+            modeset::FIRMWARE_CLOCK_KHZ
+        } else {
+            mode.clock_khz
+        };
+        let plan = if firmware_mode {
+            Ok(modeset::plan_restore(&w, &baseline))
+        } else {
+            match modeset::plan(&w, &mode, clock) {
+                Err(modeset::Error::ClockChange | modeset::Error::SizeChange) => {
+                    modeset::plan_retimed(&w, &mode)
+                }
+                other => other,
+            }
+        };
+        let plan = match plan {
             Ok(p) => p,
             Err(e) => {
                 self.log(format_args!("mode: code {vic} not set: {e:?}"));
                 return Err(Errno::ENOTSUP);
             }
         };
+        let clock_change = target_clock != clock;
         self.log(format_args!(
-            "mode: code {vic}: {}x{} total {}x{} at {} kHz; the writes:",
-            mode.hdisplay, mode.vdisplay, mode.htotal, mode.vtotal, mode.clock_khz
+            "mode: code {vic}: {}x{} total {}x{} at {} kHz (running {} kHz); the writes:",
+            mode.hdisplay, mode.vdisplay, mode.htotal, mode.vtotal, target_clock, clock
         ));
         let mut any = false;
         for (name, at, old, new) in plan.changes() {
@@ -845,9 +886,21 @@ impl Amd {
                 "  {name} @{at:#07x}: {old:#010x} -> {new:#010x}"
             ));
         }
-        if !any {
+        if !any && !clock_change {
             self.log(format_args!("mode: already running"));
             return Ok(());
+        }
+        let bios_6 = w.read32(0x148);
+        if clock_change {
+            self.log(format_args!(
+                "mode: the pixel clock {clock} -> {target_clock} kHz through the display firmware; BIOS scratch 6 reads {bios_6:#x}"
+            ));
+            if !self.dmcub_up.load(Ordering::Acquire) || !dmcub::running(&w) {
+                self.log(format_args!(
+                    "mode: a clock change needs the display firmware: write 1 to `dmcub` first"
+                ));
+                return Err(Errno::ENXIO);
+            }
         }
         let wide = u32::from(mode.hdisplay) * 9 == u32::from(mode.vdisplay) * 16;
         let before = flip::frame_count(&w);
@@ -856,15 +909,34 @@ impl Amd {
             return Err(Errno::EIO);
         }
         self.log(format_args!("mode: generator stopped"));
-        modeset::apply(&w, &plan);
+        let mut apply = true;
+        if clock_change {
+            let vram_base = u64::from(w.read32(flip::FB_LOCATION_BASE) & 0xffff) << 24;
+            let inbox = dmcub::Inbox::new(vram_base + crate::dmcub::MAILBOXES_AT as u64);
+            let mem = crate::psp::vram_memory(&gpu, vram_base);
+            let cmd = dmcub::set_pixel_clock(target_clock * 10, 0);
+            match inbox.submit(&w, &mem, &cmd, 200, 1000, &pause) {
+                Ok(()) => {
+                    self.log(format_args!(
+                        "mode: set-pixel-clock command taken ({} x 100 Hz)",
+                        target_clock * 10
+                    ));
+                    self.clock_khz.store(target_clock, Ordering::Release);
+                }
+                Err(e) => {
+                    self.log(format_args!(
+                        "mode: set-pixel-clock: {e:?}; restarting with the old timing"
+                    ));
+                    apply = false;
+                }
+            }
+        }
+        if apply {
+            modeset::apply(&w, &plan);
+        }
         let started = modeset::start(&w, &pause);
         self.irq.rearm_frame_start();
-        let clear = hdmi::write_packet(
-            &w,
-            0,
-            &hdmi::avi_for(u8::try_from(vic).unwrap_or(0), wide),
-            &pause,
-        );
+        let clear = hdmi::write_packet(&w, 0, &hdmi::avi_for(code, wide), &pause);
         if let Err(e) = started {
             self.log(format_args!("mode: start: {e:?} (the plane stays blanked)"));
             return Err(Errno::EIO);
@@ -874,6 +946,9 @@ impl Amd {
             flip::frame_count(&w)
         ));
         let _ = self.refresh();
+        if !apply {
+            return Err(Errno::EIO);
+        }
         Ok(())
     }
 
@@ -915,6 +990,9 @@ impl Amd {
             ("PHYPLLA_PIXCLK_RESYNC_CNTL", 0x00400),
             ("OTG0_PIXEL_RATE_CNTL", 0x00500),
             ("DIG0_DIG_BE_CNTL", 0x155c0),
+            ("BIOS_SCRATCH_6", 0x148),
+            ("DSCL0_SCL_MODE (0x106ec)", 0x106ec),
+            ("DSCL0_SCL_TAP_CONTROL (0x106f0)", 0x106f0),
         ] {
             self.log(format_args!(
                 "MODE: {name} @{at:#07x} = {:#010x}",
