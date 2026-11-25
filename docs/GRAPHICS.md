@@ -1351,3 +1351,19 @@ board before the next is built on it. Anything that can hang the machine is aske
 - **Next:** the render interface (R4.5 to R4.7): buffers over system pages mapped through snooped entries (on this APU the "video memory" is carved from
   system memory, so a graphics-translation-table-only design is enough), contexts, command submission with fences, syncobjs and PRIME.
 
+
+### 16.26 R4.5 to R4.7: the render node runs Mesa (2026-11-24)
+
+The card has a render node (`dri/renderD<128+N>`, device `drm/<128+N>`) that takes rendering requests only. Mesa's `radeonsi` (ACO) initialises through it and `glmark2-es2-gbm --off-screen` completes the whole suite on the Radeon 610M: score 11907, 3.5 million jobs, no refused submission and no VM fault (board run, X870E).
+
+What it took, beyond the interface itself (`drivers/drmn/src/render.rs`):
+
+- Synchronisation objects in `sys/drm` (create, destroy, wait, reset, signal; `GET_CAP` says yes; descriptors and timelines are not built); a command submission can hand its fence to one.
+- libdrm on FreeBSD finds the device by `devname`: the nodes are `drm/<minor>` with `dri/card<N>` and `dri/renderD<M>` as links, and `hw.dri.<N>.busid` (`pci:0000:7a:00.0`) and `.modesetting` exist.
+- The address of an indirect buffer or a mapping in the high half of the 48-bit space stays sign-extended in packets and is masked for the page tables.
+- Context query is operation 4; compute and DMA report as absent (all work stays on the graphics ring) until R4.8.
+- A user fence word is written by a packet run from an indirect buffer in the job's own address space (a ring-level write runs in VMID 0 and faults); the kernel's fence is written from the ring.
+- The job is the reference's frame (06 section 10.4): pipeline sync, address-space flush, state loads, frame control, buffers, fences, `SWITCH_BUFFER`, padded to 256 dwords.
+- **The write pointer is a count that never wraps** (the doorbell and the poll word get the 64-bit count; the ring offset is the count modulo the size). A wrapped pointer stalled the ring at its first wrap.
+
+Open: sway on the render node's card with `glmark2-es2-wayland` (screenshots), compute and DMA rings (R4.8), PRIME export of render buffers, the interrupt instead of polling for fences.
