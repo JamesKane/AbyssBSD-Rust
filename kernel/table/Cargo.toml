@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 acpi-platform = { path = "../../lib/acpi-platform" }
 ahci = { path = "../../drivers/ahci" }
+apei = { path = "../../drivers/apei" }
 acpi = { path = "../../sys/acpi" }
 bus = { path = "../../sys/bus" }
 cpufreq = { path = "../../sys/cpufreq" }
@@ -57,6 +58,7 @@ rx8803 = { path = "../../drivers/rx8803" }
 cix-mbox = { path = "../../drivers/cix-mbox" }
 sbsa-gwdt = { path = "../../drivers/sbsa-gwdt" }
 sky1-clk = { path = "../../drivers/sky1-clk" }
+sky1-gpt = { path = "../../drivers/sky1-gpt" }
 sky1-pinctrl = { path = "../../drivers/sky1-pinctrl" }
 sky1-reset = { path = "../../drivers/sky1-reset" }
 sky1-syscon = { path = "../../drivers/sky1-syscon" }

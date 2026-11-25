@@ -499,7 +499,7 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
   has that AbyssBSD's tree does not is in compat-deviations (Device tree). The media keys deliver
   events (2026-11-25, a Keychron K2 HE on the board: `hcons0`'s `event5` gave volume up and down,
   mute, play/pause, next and previous track, and brightness up and down, each as a press and a
-  release; `hsctrl0` saw no key, none being pressed). Still to decide: `apei` and `sky1_gpt`.
+  release; `hsctrl0` saw no key, none being pressed). `apei0` and `sky1_gpt0` attach (2026-11-25; compat-deviations says what is not done).
 - **Small gaps** (compat-deviations): `ichsmb` names, the old `mount(2)` for cd9660, writing BSD
   labels, `glabel`'s `label/` names, USB isochronous transfers and alternate settings.
 

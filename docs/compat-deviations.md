@@ -69,7 +69,6 @@ list is in both.
 |---|---|---|
 | `gic0`, `its0`, `generic_timer0`, `pmu0`, `psci0`, `smccc0`, `vgic0`, `smbios0`, `ram0` | No device nodes | The kernel owns the interrupt controllers, the timer, the performance monitor, firmware calls, RAM, and the SMBIOS tables itself (the rman row above; DRIVER-MODEL.md §8.1). `kenv`'s `smbios.*` and `/dev/mem` still work. |
 | `acpi_sysresource0` | No device | `PNP0C02` ranges are reserved in `acpi0`'s resource manager, with no node (the resource rows above). |
-| `apei0` | No driver | The ACPI Platform Error Interface (hardware error records) is not implemented. |
 | `acpi_acad0`, `battery0` | No driver | The AC adapter and the battery: M-D (ROADMAP). |
 | `hdac0`, `hdacc0`, `hdaa0`, `pcm0`, `sky1_audss0` | No driver on the board | Sound: M-D. |
 | `drm0` to `drm3`, `drm128`, `fbd0`, `panthor0`, `lkpi_iic0`, `misc0`, `misc1` | None; the display units attach as `komeda`N (below) | Graphics: M-G. FreeBSD's come from its linuxkpi drivers, and AbyssBSD's native stack has no DRM device nodes yet (ADR-0025). |
@@ -77,10 +76,11 @@ list is in both.
 | `armv8crypto0`, `cryptosoft0` | No driver | `crypto(9)`: M-Z. |
 | `nvme_sim0`, `nvme_sim1` | No node; the CAM buses exist (`camcontrol devlist`) | The NVMe driver registers its CAM bus directly, with no `nvme_sim` device between. |
 | `zy7_spi0`, `spibus0`, `spigen0`, `spigen1` | No driver | `spigen` is not planned (ROADMAP); the Cadence SPI controller's only child on the board is a TPM that `spigen` serves. |
-| `sky1_gpt0` | No driver | The general purpose timer has no consumer: the Arm generic timer is the clock and event source. |
 
 | What | FreeBSD | AbyssBSD | Why |
 |---|---|---|---|
+| `apeiN` | `hest` as a child, parsing the Hardware Error Source Table and taking the generic error sources' records (polled, by interrupt, by NMI) | The placeholder device only, with nothing under it | No machine AbyssBSD runs on has a HEST (the Orange Pi 6 Plus's firmware has none, nor do the X870E's, the Z690-A's, or the virtual machines' tables in the corpora), so error-source handling could not be tested. A real `PNP0C33` device is not claimed either |
+| `sky1_gptN` | A global event timer for deep idle (`kern.eventtimer.timer="Sky1 GPT"`, opt-in) | Attached, brought up, its counter checked against its clock and published in `dev.sky1_gpt.N` (`counter`, `frequency`); not one of the kernel's event timers | AbyssBSD has no idle state that stops the cores' timers, so nothing needs a broadcast timer, and the kernel's event timers are its own. Its one-shot compare is written and tested (`Gpt::arm`) for when one does |
 | `komeda`N | `komeda0` for display unit 4 only (`DPU4`) | `komeda1` to `komeda4`, one for each display unit the firmware enables | Different driver (native, ADR-0025), and every unit has its own transmitter. |
 | `sky1_dptxN` | `sky1_dptx0` for `DP04` only | `sky1_dptx2` and `sky1_dptx4` | As `komeda`. |
 | `sky1_udphyN` | `sky1_udphy0` for the PHY with `_UID` 3 | `sky1_udphy0` to `sky1_udphy3`, one for each PHY | As `komeda`. Name and description as the board's FreeBSD port has them. |

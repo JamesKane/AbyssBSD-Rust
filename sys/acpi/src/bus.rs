@@ -811,6 +811,10 @@ impl Driver for AcpiBus {
         let mut windows: Vec<(String, Vec<(u64, u64)>)> = Vec::new();
         // The system-resource devices' ranges, which acpi0 holds itself.
         let mut sysres: Vec<bus::Range> = Vec::new();
+        // FreeBSD adds `apei0` when the namespace has no ACPI error device.
+        let error_device = found.iter().any(|f| {
+            f.ident.hid.as_deref() == Some("PNP0C33") || f.ident.cids.iter().any(|c| c == "PNP0C33")
+        });
         for f in found {
             let system = crate::ranges::system_resource(&f.ident);
             if system {
@@ -864,6 +868,16 @@ impl Driver for AcpiBus {
                 )
             })
             .collect();
+        if !error_device {
+            cx.add_child(
+                Ident::AcpiChild {
+                    class: "apei",
+                    desc: "ACPI Platform Error Interface",
+                },
+                None,
+                Vec::new(),
+            );
+        }
         let child = |path: &str| added.iter().find(|a| a.0 == path).map(|a| a.1);
         for (_, id, deps, lines) in &added {
             for (d, kind, origin) in deps {

@@ -134,6 +134,13 @@ name = "aml"
 version = "0.0.0"
 
 [[package]]
+name = "apei"
+version = "0.0.0"
+dependencies = [
+ "bus",
+]
+
+[[package]]
 name = "arch-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -329,6 +336,7 @@ dependencies = [
  "amdsmn",
  "amdtemp",
  "aml",
+ "apei",
  "atrtc",
  "bus",
  "cdnc-i2c",
@@ -358,6 +366,7 @@ dependencies = [
  "sbsa-gwdt",
  "sky1-clk",
  "sky1-dp",
+ "sky1-gpt",
  "sky1-pinctrl",
  "sky1-reset",
  "sky1-syscon",
@@ -1107,6 +1116,23 @@ dependencies = [
  "abi",
  "kms-check",
  "sync",
+]
+
+[[package]]
+name = "sky1-gpt"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "acpi",
+ "acpi-corpus",
+ "acpi-platform",
+ "aml",
+ "bus",
+ "cix-sky1",
+ "devtree",
+ "regs",
+ "sync",
+ "sysctl",
 ]
 
 [[package]]

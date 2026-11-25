@@ -1,0 +1,12 @@
+[package]
+name = "apei"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bus = { path = "../../sys/bus" }
+
+[lints]
+workspace = true
