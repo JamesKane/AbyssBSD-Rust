@@ -15,14 +15,19 @@ use drm::DrmDriver as _;
 
 use crate::amd::{Amd, Bar5};
 
-/// How often the line is read.
-const PERIOD_NS: u64 = 250_000_000;
-/// Reads that must agree before a change counts (one second).
-const SETTLE: u8 = 4;
+/// How long the watcher sleeps when no interrupt comes: it looks at the
+/// lines anyway, so a lost interrupt costs a second, not a missed monitor.
+const PERIOD_NS: u64 = 1_000_000_000;
+/// How long a changed sense must hold before it counts (the filter's job in
+/// the hardware too; this covers a connector that bounces as it is pushed in).
+const SETTLE_NS: u64 = 500_000_000;
 
 /// Starts the watcher for `amd`, if the line reads "connected" now: a
 /// board whose line is not wired to the monitor reads 0 for ever, and then
-/// the connector stays connected as it always was.
+/// the connector stays connected as it always was. The first line's
+/// interrupt (client 4, source 9) wakes it at a change; every second it
+/// looks anyway. The other lines are only read, and a change in one is
+/// logged: no other connector is wired on the boards we have.
 pub(crate) fn start(amd: &Arc<Amd>) {
     let Some(sensed) = amd.hpd_sense() else {
         return;
@@ -34,19 +39,67 @@ pub(crate) fn start(amd: &Arc<Amd>) {
         return;
     }
     let me: Weak<Amd> = Arc::downgrade(amd);
+    let irq = Arc::clone(&amd.irq);
+    let queue = irq.hpd_queue();
+    // The interrupt on, for the change from what the line senses now.
+    irq.hpd_arm(0);
     let spawned = sched::spawn("amd-hpd", sched::Priority::KERNEL, move |s| {
-        let queue = sched::WaitQueue::new();
-        let mut settle = hpd::Debounce::new(true, SETTLE);
+        let sleep = bus::manager();
+        let mut state = true;
+        let mut others = [false; hpd::LINES];
         loop {
+            // An interrupt, or a second.
+            let _ = sleep.wait_timeout(s, &queue, &mut || irq.hpd_pending(), PERIOD_NS);
+            let events = irq.take_hpd_events();
+            let Some(a) = me.upgrade() else {
+                return;
+            };
+            if let Some(read) = a.hpd_sense()
+                && read != state
             {
+                // Hold: the change counts if the line still says so after a
+                // moment.
+                drop(a);
+                let _ = sleep.wait_timeout(s, &queue, &mut || false, SETTLE_NS);
                 let Some(a) = me.upgrade() else {
                     return;
                 };
-                if let Some(now) = a.hpd_sense().and_then(|read| settle.update(read)) {
-                    a.hotplug(s, now);
+                if a.hpd_sense() == Some(read) {
+                    state = read;
+                    a.log(format_args!(
+                        "hot-plug: the line changed ({})",
+                        if events & 1 != 0 {
+                            "interrupt"
+                        } else {
+                            "found by the poll"
+                        }
+                    ));
+                    a.hotplug(s, read);
+                }
+                // An interrupt that came during the wait is not another event.
+                let _ = irq.take_hpd_events();
+            } else {
+                drop(a);
+            }
+            // The other lines: read, and a change logged.
+            let Some(a) = me.upgrade() else {
+                return;
+            };
+            for (n, was) in others.iter_mut().enumerate().skip(1) {
+                if let Some(now) = a.hpd_line_sense(n)
+                    && now != *was
+                {
+                    *was = now;
+                    a.log(format_args!(
+                        "hot-plug: line {n} {}",
+                        if now {
+                            "senses a display"
+                        } else {
+                            "senses none"
+                        }
+                    ));
                 }
             }
-            let _ = bus::manager().wait_timeout(s, &queue, &mut || false, PERIOD_NS);
         }
     });
     if spawned.is_err() {
@@ -59,6 +112,13 @@ impl Amd {
     pub(crate) fn hpd_sense(&self) -> Option<bool> {
         let gpu = self.gpu().ok()?;
         let raw = Bar5(&gpu).read32(hpd::HPD0_INT_STATUS);
+        (raw != u32::MAX).then(|| hpd::sensed(raw))
+    }
+
+    /// Line `n`'s sense, `None` if the device does not answer.
+    pub(crate) fn hpd_line_sense(&self, n: usize) -> Option<bool> {
+        let gpu = self.gpu().ok()?;
+        let raw = Bar5(&gpu).read32(hpd::int_status(n));
         (raw != u32::MAX).then(|| hpd::sensed(raw))
     }
 

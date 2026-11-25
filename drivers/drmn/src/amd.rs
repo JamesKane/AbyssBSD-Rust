@@ -73,7 +73,7 @@ pub(crate) struct Amd {
     /// The graphics card, once registered.
     pub(crate) kms: SpinLock<Option<(Arc<amd_kms::AmdKms>, Arc<drm::Card>)>>,
     /// The interrupts.
-    irq: Arc<crate::interrupt::Irq>,
+    pub(crate) irq: Arc<crate::interrupt::Irq>,
     /// The page the hubs send faults and aperture misses to, while the
     /// hubs are set up.
     dummy: SpinLock<Option<vm::dma::DmaCoherent<u8>>>,
