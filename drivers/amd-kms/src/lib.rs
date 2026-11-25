@@ -39,7 +39,7 @@ use drm::{DriverInfo, DrmDriver, DumbLimits, KmsBuilder};
 use drm_fourcc::{Fourcc, format};
 use gop_kms::{FrameMemory, GemPixels, Rect, copy_region};
 use kms_check::Mode;
-use sync::SpinLock;
+use sync::{Once, SpinLock};
 
 /// The display and the video memory it reads, as the card needs them.
 pub trait Display: Send + Sync {
@@ -382,6 +382,27 @@ impl PlaneHw for Plane {
 pub struct AmdKms {
     kms: Kms,
     screen: Arc<Screen>,
+    /// The render side (the driver's own requests), once it is ready.
+    render: Once<Arc<dyn Render>>,
+}
+
+/// The render side of the card: the driver's own requests (`amdgpu`'s
+/// command range), which the render node takes.
+pub trait Render: Send + Sync {
+    /// Runs request `nr` (the absolute number, from 0x40) for file `cx`.
+    ///
+    /// # Errors
+    ///
+    /// `ENOTTY` for a request it lacks, others as the request says.
+    fn ioctl(
+        &self,
+        cx: &drm::IoctlCx<'_>,
+        nr: u8,
+        arg: &mut [u8],
+    ) -> Result<usize, abi::errno::Errno>;
+
+    /// A file closed: free what it kept.
+    fn file_closed(&self, file: u64);
 }
 
 impl core::fmt::Debug for AmdKms {
@@ -395,6 +416,12 @@ impl AmdKms {
     /// kernel has panicked and the console must be seen).
     pub fn restore(&self) {
         self.screen.restore();
+    }
+
+    /// Gives the card its render side; the card then has a render node.
+    /// Only the first call has an effect.
+    pub fn set_render(&self, r: Arc<dyn Render>) {
+        let _ = self.render.set(r);
     }
 }
 
@@ -440,12 +467,27 @@ pub fn create(g: Geometry, display: Arc<dyn Display>) -> Result<Arc<AmdKms>, Err
     let e = b.encoder(Arc::new(Encoder), 1 << c, 0);
     b.connector(Arc::new(Connector(screen.clone())), &[e]);
     let kms = b.build().map_err(|_| Error::Size)?;
-    Ok(Arc::new(AmdKms { kms, screen }))
+    Ok(Arc::new(AmdKms {
+        kms,
+        screen,
+        render: Once::new(),
+    }))
 }
 
 impl DrmDriver for AmdKms {
     fn info(&self) -> DriverInfo {
-        // Not "amdgpu": there is no render side yet (GRAPHICS.md §16.3).
+        // "amdgpu" 3.x is what the rendering libraries look for; without a
+        // render side the card is only a display (GRAPHICS.md §16.3).
+        if self.render.get().is_some() {
+            return DriverInfo {
+                name: "amdgpu",
+                desc: "AMD GPU",
+                date: "20261124",
+                major: 3,
+                minor: 64,
+                patch: 0,
+            };
+        }
         DriverInfo {
             name: "amd-display",
             desc: "AMD display",
@@ -453,6 +495,28 @@ impl DrmDriver for AmdKms {
             major: 0,
             minor: 1,
             patch: 0,
+        }
+    }
+
+    fn render(&self) -> bool {
+        self.render.get().is_some()
+    }
+
+    fn ioctl_cx(
+        &self,
+        cx: &drm::IoctlCx<'_>,
+        nr: u8,
+        arg: &mut [u8],
+    ) -> Result<usize, abi::errno::Errno> {
+        match self.render.get() {
+            Some(r) => r.ioctl(cx, nr, arg),
+            None => Err(abi::errno::Errno::ENOTTY),
+        }
+    }
+
+    fn file_closed(&self, file: u64) {
+        if let Some(r) = self.render.get() {
+            r.file_closed(file);
         }
     }
 

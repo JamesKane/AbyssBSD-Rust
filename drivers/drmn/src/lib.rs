@@ -33,6 +33,7 @@ mod gcring;
 mod interrupt;
 mod kms;
 mod psp;
+mod render;
 
 use alloc::string::String;
 use alloc::sync::Arc;

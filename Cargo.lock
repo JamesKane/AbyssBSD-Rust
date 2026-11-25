@@ -84,6 +84,7 @@ dependencies = [
  "drm-fourcc",
  "gop-kms",
  "kms-check",
+ "sched",
  "sync",
 ]
 
@@ -91,7 +92,9 @@ dependencies = [
 name = "amdgpu"
 version = "0.0.0"
 dependencies = [
+ "abi",
  "edid",
+ "kms-check",
 ]
 
 [[package]]
@@ -401,6 +404,7 @@ dependencies = [
  "drm",
  "edid",
  "irq",
+ "kms-check",
  "nvgpu",
  "sched",
  "sync",

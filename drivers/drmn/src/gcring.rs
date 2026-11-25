@@ -73,7 +73,6 @@ struct Ring {
 /// The started graphics block.
 #[derive(Debug)]
 pub(crate) struct Gfx {
-    /// The GPU address of the first byte of video memory.
     base: u64,
     #[allow(dead_code, reason = "the interface queue maps the queues after it")]
     kiq: Ring,
@@ -322,6 +321,51 @@ pub(crate) fn start(
     })
 }
 
+/// The word the kernel's fences are written to (a video memory offset): the
+/// sequence number of the last job the ring finished.
+const SEQ_AT: u64 = GFX_REPORT_AT + 0x400;
+
+impl Gfx {
+    /// The GPU address of the fence word.
+    pub(crate) fn seq_address(&self) -> u64 {
+        self.base + SEQ_AT
+    }
+
+    /// The sequence number of the last job the ring has finished.
+    pub(crate) fn finished(&self, gpu: &Arc<Aperture>) -> u32 {
+        let mem = crate::psp::vram_memory(gpu, self.base);
+        mem.invalidate();
+        mem.read32(self.base + SEQ_AT)
+    }
+
+    /// Waits for room for `dwords` more in the ring, `ms` at most; then
+    /// writes `packets` and rings the doorbell.
+    pub(crate) fn run(
+        &mut self,
+        gpu: &Arc<Aperture>,
+        packets: &[u32],
+        ms: u32,
+    ) -> Result<(), abi::errno::Errno> {
+        let mem = crate::psp::vram_memory(gpu, self.base);
+        let size = self.gfx.bytes / 4;
+        let need = u32::try_from(packets.len()).map_err(|_| abi::errno::Errno::E2BIG)?;
+        if need + 1 >= size {
+            return Err(abi::errno::Errno::E2BIG);
+        }
+        for _ in 0..=ms {
+            mem.invalidate();
+            let rptr = mem.read32(self.base + self.gfx.report) % size;
+            let used = (self.gfx.wptr + size - rptr) % size;
+            if size - used > need + 1 {
+                self.gfx.submit(gpu, &mem, packets);
+                return Ok(());
+            }
+            bus::manager().delay_us(1000);
+        }
+        Err(abi::errno::Errno::EAGAIN)
+    }
+}
+
 /// The ring test (06 section 11.6): a register written by the ring, then a
 /// word of memory and a fence. Logs and returns whether both were seen.
 pub(crate) fn test(
@@ -392,24 +436,39 @@ const VM_DATA_AT: u64 = VM_IB_AT + 0x1000;
 const VA_IB: u64 = 0x10_0000;
 const VA_DATA: u64 = 0x10_1000;
 
-/// Page tables in video memory: table `n` is at `VM_TABLES_AT + 4096 n`,
+/// Page tables in video memory: table `n` of a pool is at `at + 4096 n`,
 /// written through the aperture.
-struct VramTables {
+pub(crate) struct VramTables {
     gpu: Arc<Aperture>,
     /// The video memory's physical offset (the carve-out's address).
     phys: u64,
+    /// Where the pool starts (a video memory offset) and how many tables it
+    /// holds.
+    at: u64,
+    count: usize,
     used: usize,
 }
 
 impl VramTables {
+    /// A pool of `count` tables from video memory offset `at`.
+    pub(crate) fn new(gpu: Arc<Aperture>, phys: u64, at: u64, count: usize) -> Self {
+        Self {
+            gpu,
+            phys,
+            at,
+            count,
+            used: 0,
+        }
+    }
+
     fn at(&self, handle: usize) -> u64 {
-        VM_TABLES_AT + 4096 * handle as u64
+        self.at + 4096 * handle as u64
     }
 }
 
 impl amdgpu::vm::Tables for VramTables {
     fn alloc(&mut self) -> Option<usize> {
-        if self.used >= VM_TABLES {
+        if self.used >= self.count {
             return None;
         }
         let h = self.used;
@@ -439,7 +498,7 @@ impl amdgpu::vm::Tables for VramTables {
     }
 
     fn table_at(&self, entry: u64) -> Option<usize> {
-        let a = (entry & 0x0000_ffff_ffff_f000).checked_sub(self.phys + VM_TABLES_AT)?;
+        let a = (entry & 0x0000_ffff_ffff_f000).checked_sub(self.phys + self.at)?;
         let h = usize::try_from(a / 4096).ok()?;
         (h < self.used).then_some(h)
     }
@@ -460,11 +519,7 @@ pub(crate) fn vm_test(
     let w = Bar5(gpu);
     let mem = crate::psp::vram_memory(gpu, g.base);
     let phys = u64::from(w.read32(Hub::Gfx.reg(Reg::FbOffset))) << 24;
-    let tables = VramTables {
-        gpu: Arc::clone(gpu),
-        phys,
-        used: 0,
-    };
+    let tables = VramTables::new(Arc::clone(gpu), phys, VM_TABLES_AT, VM_TABLES);
     let Ok(mut space) = Space::new(tables) else {
         log(format_args!("VM: no memory for the root table"));
         return false;

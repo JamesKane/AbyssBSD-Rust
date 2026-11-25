@@ -471,6 +471,7 @@ impl Amd {
                 return;
             }
         };
+        card.set_render(crate::render::Render::new(self.me.clone(), 512 << 20));
         let node = match drm::register(card.clone()) {
             Ok(n) => n,
             Err(e) => {
@@ -801,6 +802,30 @@ impl Amd {
         let ok = crate::gcring::vm_test(&gpu, &mut g, &log);
         *self.gfx.lock() = Some(g);
         if ok { Ok(()) } else { Err(Errno::EIO) }
+    }
+
+    /// The aperture, for the render interface.
+    pub(crate) fn gpu_arc(&self) -> Result<Arc<Aperture>, abi::errno::Errno> {
+        self.gpu()
+    }
+
+    /// The video memory's physical offset (the carve-out's address), from
+    /// the graphics hub.
+    pub(crate) fn vram_phys(&self) -> Result<u64, abi::errno::Errno> {
+        use amdgpu::gmc::{Hub, Reg};
+        use amdgpu::regs::Window;
+        let gpu = self.gpu()?;
+        Ok(u64::from(Bar5(&gpu).read32(Hub::Gfx.reg(Reg::FbOffset))) << 24)
+    }
+
+    /// The started graphics block, locked.
+    pub(crate) fn gfx_lock(&self) -> sync::SpinGuard<'_, Option<crate::gcring::Gfx>> {
+        self.gfx.lock()
+    }
+
+    /// Whether the graphics ring has been started.
+    pub(crate) fn gfx_ready(&self) -> bool {
+        self.gfx.lock().is_some()
     }
 
     /// Logs the graphics block's state (reads only; see `gcload::snapshot`).
