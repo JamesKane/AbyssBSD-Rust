@@ -221,11 +221,21 @@ and mounted by `mount_cd9660` five ways (Rock Ridge, `-r`, `-r -j`, `-r -j -g`, 
 `/usr/tests/iso`; the kernel test mounts the image the same five ways and must print the same, and
 `lib/cd9660`'s host test compares its own listing with them.
 
+`cargo xtask deploy --machine x870e|opi6p [--kernel FILE] [--host H] [--reboot] [--dry-run]` puts
+a kernel (a release build, or `--kernel`) on a reference machine that is running AbyssBSD from its
+designated disk, and sets BootNext to AbyssBSD's entry. Nothing is written unless `/` is
+`gpt/abyssroot`, `gpt/abyssroot` and `gpt/abyssefi` are on one disk, that disk's serial number
+(`camcontrol identify`) is the machine's designated one, and the AbyssBSD boot entry's device path
+names that `abyssefi` partition. The old kernel is kept as `/boot/kernel/kernel.prev`; the new one's
+SHA-256 is checked before and after the move. `--reboot` restarts the machine and waits for it to
+come back in AbyssBSD with the same hash; `--dry-run` makes the checks only. The address is the
+last known one (both machines take theirs by DHCP): `--host` or `ABYSS_X870E_HOST` /
+`ABYSS_OPI6P_HOST` overrides it, and host keys go to `~/.ssh/known_hosts.abyss` (`--known-hosts`).
+It does not install AbyssBSD on a blank disk, the loader, or the root file system.
+
 Planned for later phases:
 
 ```
-cargo xtask deploy  --board {opi6p|x870e} [--usb <serial> | --media]   # install, set BootNext, collect logs
-                    # targets are identified by disk serial number; anything else is refused
 cargo xtask test    [--tier compat|full]
 cargo xtask perf    [--platform x870e|opi6p] [--compare <rev>]   # PERFORMANCE.md §6
 ```

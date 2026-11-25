@@ -10,6 +10,7 @@ mod build;
 mod cli;
 mod codegen;
 mod crash;
+mod deploy;
 mod diff;
 mod expect;
 mod fattest;
@@ -73,6 +74,9 @@ commands:
   kyua        [--resume] [--only DIR,...]                kyua's suite on AbyssBSD in bhyve, against FreeBSD's results (server only)
   kyua-board  --dir DIR --name NAME [--freebsd] [--out FILE]  a board run's results (tests/kyua/board), against the board's baseline
   fetch-base  [--arch <a|all>]                           FreeBSD base.txz: /rescue image, sysroot (server only)
+  deploy      --machine x870e|opi6p [--kernel FILE] [--host H] [--reboot] [--dry-run]
+                                                         install a kernel on a reference machine's AbyssBSD disk
+                                                         (checked by serial number), set BootNext
   acpidump    --arch <a> [--vmm qemu|bhyve] [--machine M] [--iommu] --out DIR
                                                          capture a VM's ACPI tables
   freebsd-record [--out DIR] [--usb | --shell-vm]        record FreeBSD's device tree in bhyve; --usb: its USB
@@ -143,6 +147,7 @@ fn run() -> Result<()> {
         "kyua" => kyua::cmd_kyua(args),
         "kyua-board" => kyua::cmd_kyua_board(args),
         "acpidump" => acpidump::cmd(args),
+        "deploy" => deploy::cmd(args),
         "check" => test::cmd_check(args),
         "policy" => policy::cmd(args),
         "syscallgen" => syscalls::cmd(args),

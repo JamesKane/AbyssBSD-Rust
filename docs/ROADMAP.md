@@ -497,12 +497,23 @@ named):
 ([ADR-0009](adr/0009-amd64-reference-machine-ryzen-x870e.md), HARDWARE.md §5), gating from then on.
 This is P8's X870E half (P8.2), with its ground truth already in the corpus (P8.0).
 
-- **Deploy:** `cargo xtask deploy --machine x870e` onto the media NVMe only, by serial number;
-  FreeBSD 15.1 beside it for baselines. Never the Fedora disk, the RAID members, the Fedora ESP, or
-  its boot entry.
-- **Drivers:** the RTL8125 family (`rge`), `amdsbwd`, the persistent log the loader saves to the
-  ESP, ACPI CPPC (`acpi_cppc`, shared with the Sky1), and whatever else the dependency graph shows
-  multi-user needs.
+Done (git, HARDWARE.md §5; 2026-11-23 to 25): AbyssBSD on the media NVMe (WD SN740,
+serial 24413C804394), booted unattended by BootNext, with stock FreeBSD 15.1 beside it; `cargo xtask
+deploy --machine x870e` for kernels, checked by serial number (BUILD-AND-TEST.md; proved on the
+Orange Pi, not yet on the X870E); the loader's persistent log on the ESP; `hwpstate_amd` (CPPC through
+the firmware's FFH registers), `amdsmn` and `amdtemp`; `rge` on the RTL8125D revision 1; `p2` against
+stock 15.1. Open:
+
+- **Deploy:** the first `deploy --machine x870e` (its last known address is `.23`). Never the Fedora
+  disk, the RAID members, the Fedora ESP, or its boot entry.
+- **Drivers:** `rge` on the RTL8125D revision 2 (programmed, host-tested only) and the other RTL8125
+  revisions; `amdsbwd` on the machine (host-tested only); `acpi_cppc` on amd64 if a machine needs it
+  (the X870E's frequency is `hwpstate_amd`'s); and whatever else multi-user needs.
+- **Defects:** one dark-screen hang after a reboot (no log, not seen again in later reboots);
+  `xhci` `StoppedLengthInvalid` messages in benchmark boots; HD Audio's ring memory not yet checked on
+  the machine (compat-deviations).
+- **Performance:** `p2` passes (0.621), but AbyssBSD ran the cores at 5465 MHz and stock at 4700: the
+  comparison needs the same clocks. `p3` to `p7`, `p7` over the RTL8125.
 - **Exit:** the `x86_64-multiuser` scenario from the framebuffer and a USB keyboard alone; fsx with
   `fsck_ffs` on the media NVMe and a USB disk; the device tree against FreeBSD's `devinfo`; every
   suite so far within 2% of FreeBSD on the machine, P7's over its physical NIC.

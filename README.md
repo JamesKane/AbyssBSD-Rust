@@ -131,7 +131,8 @@ and on the Orange Pi 6 Plus (CIX Sky1, ARM64) from its own NVMe, hardened (Phase
   unattended from its media NVMe by `BootNext`. Idle CPUs wait in `MWAIT` and are woken by a write,
   cross-CPU calls answer on their own cache lines, and `hwpstate_amd` controls CPU frequency through
   CPPC; with those, every component of `p2` passes on the machine (geometric mean 0.621 of FreeBSD
-  15.1's time). Drivers: `rge` for both revisions of the RTL8125D (the board's NIC), the HD Audio
+  15.1's time). Drivers: `rge` for the RTL8125D (the board's NIC, revision 1; revision 2 is
+  programmed but not yet run on hardware), the HD Audio
   controller with its codec and function group, and `vgapci`, FreeBSD's generic attachment for a
   display function. Ahead: the framebuffer and USB keyboard `multiuser` scenario, fsx, the `devinfo`
   comparison, and the rest of the performance gate.
