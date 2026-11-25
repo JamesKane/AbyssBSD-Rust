@@ -398,16 +398,25 @@ pub fn apply<W: Window + ?Sized>(w: &W, plan: &Plan) {
     }
 }
 
-/// Starts the pipe (08 section 3.7.4, step 5): the data source back on
-/// segment 0, the timing generator on (before the generator, as the reference
-/// does), the generator on with disable point 2; waits for it to show busy;
-/// then unblanks the plane.
+/// Blanks the plane (the first step of the reference's way off).
+pub fn blank<W: Window + ?Sized>(w: &W) {
+    w.write32(DCHUBP_CNTL, w.read32(DCHUBP_CNTL) | 1);
+}
+
+/// Unblanks the plane (the last step of the way on).
+pub fn unblank<W: Window + ?Sized>(w: &W) {
+    w.write32(DCHUBP_CNTL, w.read32(DCHUBP_CNTL) & !1);
+}
+
+/// Starts the pipe without unblanking the plane (08 section 3.7.4, step 5):
+/// the data source back on segment 0, the timing generator on (before the
+/// generator, as the reference does), the generator on with disable point
+/// 2; waits for it to show busy.
 ///
 /// # Errors
 ///
-/// [`Error::StartTimeout`] if the generator is not busy after 100 ms; the
-/// plane stays blanked.
-pub fn start<W: Window + ?Sized>(w: &W, pause_us: &dyn Fn(u32)) -> Result<(), Error> {
+/// [`Error::StartTimeout`] if the generator is not busy after 100 ms.
+pub fn start_blanked<W: Window + ?Sized>(w: &W, pause_us: &dyn Fn(u32)) -> Result<(), Error> {
     w.write32(ODM_DATA_SOURCE, ODM_RUNNING);
     w.write32(VTG_CONTROL, w.read32(VTG_CONTROL) | (1 << 31));
     w.write32(OTG_CONTROL, (w.read32(OTG_CONTROL) & !0x300) | (2 << 8) | 1);
@@ -415,12 +424,23 @@ pub fn start<W: Window + ?Sized>(w: &W, pause_us: &dyn Fn(u32)) -> Result<(), Er
     for _ in 0..100 {
         last = w.read32(OTG_CLOCK_CONTROL);
         if last & (1 << 16) != 0 {
-            w.write32(DCHUBP_CNTL, w.read32(DCHUBP_CNTL) & !1);
             return Ok(());
         }
         pause_us(1000);
     }
     Err(Error::StartTimeout(last))
+}
+
+/// [`start_blanked`], then unblanks the plane.
+///
+/// # Errors
+///
+/// [`Error::StartTimeout`] if the generator is not busy after 100 ms; the
+/// plane stays blanked.
+pub fn start<W: Window + ?Sized>(w: &W, pause_us: &dyn Fn(u32)) -> Result<(), Error> {
+    start_blanked(w, pause_us)?;
+    unblank(w);
+    Ok(())
 }
 
 #[cfg(test)]

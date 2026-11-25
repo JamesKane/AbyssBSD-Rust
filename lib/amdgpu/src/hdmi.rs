@@ -295,6 +295,45 @@ pub fn video_mode<W: Window + ?Sized>(w: &W, pause_us: &dyn Fn(u32)) {
     );
 }
 
+/// Stops the AVI info frame and the general packets (the first step of the
+/// reference's way off): packet 0's send and continue bits cleared.
+pub fn stop_packets<W: Window + ?Sized>(w: &W) {
+    update(w, GENERIC_PACKET_CONTROL0, 3, 0);
+    update(w, INFOFRAME_CONTROL0, 1 << 4, 0);
+}
+
+/// Sets the encoder's signal mode (`DIG_BE_CNTL` bits 18:16): 2 DVI, 3 HDMI.
+pub fn set_dig_mode<W: Window + ?Sized>(w: &W, mode: u32) {
+    update(w, DIG_BE_CNTL, 7 << 16, (mode & 7) << 16);
+}
+
+/// The stream controls of 08 section 4.5, without the clock pattern and the
+/// start pulse (the encoder-control command does that): packet generator
+/// version 1, keep-out mode, no extra null packets, no deep colour, no
+/// scrambling.
+pub fn stream_controls<W: Window + ?Sized>(w: &W) {
+    update(
+        w,
+        HDMI_CONTROL,
+        (1 << 24) | (3 << 28) | (1 << 4) | (1 << 3) | (1 << 2) | (1 << 1) | 1,
+        (1 << 4) | (1 << 3) | 1,
+    );
+}
+
+/// The link's read-only diagnostics (08 section 3.7.7): the encoder's FIFO
+/// status, the back and front ends' clock enables, the symbol clock enable,
+/// the HDMI status, and the output CRC and its result. (name, byte).
+pub const LINK_STATE: [(&str, usize); 8] = [
+    ("DIG_FIFO_STATUS", 0x15544),
+    ("DIG_BE_EN_CNTL", 0x155c4),
+    ("DIG_FE_CNTL", DIG_FE_CNTL),
+    ("SYMCLKA_CLOCK_ENABLE", 0x580),
+    ("HDMI_STATUS", 0x15550),
+    ("DIG_OUTPUT_CRC_CNTL", 0x15530),
+    ("DIG_OUTPUT_CRC_RESULT", 0x15534),
+    ("DCHUBP_CNTL", 0xeacc),
+];
+
 /// The AVI info frame for 1920x1080p60, RGB, 16:9, VIC 16 (08 section 4.5):
 /// the header dword and the eight body dwords.
 pub const AVI_1080P60: [u32; 9] = [0x000d_0282, 0x0028_1027, 0x0000_0010, 0, 0, 0, 0, 0, 0];
@@ -651,6 +690,27 @@ mod tests {
             assert!(f[3..].iter().all(|d| *d == 0));
         }
         assert_eq!(avi_for(16, true), AVI_1080P60);
+    }
+
+    #[test]
+    fn the_sequence_steps_change_only_their_bits() {
+        let m = Model::new();
+        m.set(DIG_BE_CNTL, 0x0002_0100);
+        m.set(HDMI_CONTROL, 0x0001_0011);
+        m.set(GENERIC_PACKET_CONTROL0, 0x8888_888b);
+        m.set(INFOFRAME_CONTROL0, 0x10);
+        set_dig_mode(&m, 3);
+        stream_controls(&m);
+        assert_eq!(m.get(DIG_BE_CNTL), 0x0003_0100);
+        assert_eq!(m.get(HDMI_CONTROL), 0x0001_0019);
+        // No clock pattern, no DIG_START pulse.
+        assert!(m.wrote(DIG_CLOCK_PATTERN).is_empty());
+        assert!(m.wrote(DIG_FE_CNTL).is_empty());
+        stop_packets(&m);
+        assert_eq!(m.get(GENERIC_PACKET_CONTROL0), 0x8888_8888);
+        assert_eq!(m.get(INFOFRAME_CONTROL0), 0);
+        set_dig_mode(&m, 2);
+        assert_eq!(m.get(DIG_BE_CNTL), 0x0002_0100);
     }
 
     #[test]

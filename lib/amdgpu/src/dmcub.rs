@@ -332,6 +332,54 @@ pub fn set_pixel_clock(clock_100hz: u32, crtc: u8) -> [u8; 20] {
     b
 }
 
+/// Subtype: the physical-layer transmitter control.
+pub const VBIOS_TRANSMITTER: u8 = 1;
+/// Subtype: the digital encoder control.
+pub const VBIOS_ENCODER: u8 = 0;
+
+/// A little-endian dword at `at` in `b`.
+fn put(b: &mut [u8], at: usize, v: u32) {
+    b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+/// The transmitter-control command, 1.7 layout, to turn the first physical
+/// layer's HDMI output off (header `0x3c000180`; 08 section 3.4.1): action
+/// 0, mode 3, HPD 1, the connector's object id `0x0c`, and `0xf6` in the
+/// byte after it (the "no HPO instance" value).
+#[must_use]
+pub fn transmitter_disable() -> [u8; 20] {
+    let mut b = [0u8; 20];
+    put(&mut b, 0, header(CMD_VBIOS, VBIOS_TRANSMITTER, false, 60));
+    put(&mut b, 4, 0x0003_0000);
+    put(&mut b, 12, 0xf60c_0001);
+    b
+}
+
+/// The same, to turn it on with the symbol clock `symbol_10khz` (the pixel
+/// clock in 10 kHz units at 8 bits per component): action 1, mode 3, four
+/// lanes, HPD 1, the connector id left 0.
+#[must_use]
+pub fn transmitter_enable(symbol_10khz: u32) -> [u8; 20] {
+    let mut b = [0u8; 20];
+    put(&mut b, 0, header(CMD_VBIOS, VBIOS_TRANSMITTER, false, 60));
+    put(&mut b, 4, 0x0403_0100);
+    put(&mut b, 8, symbol_10khz);
+    put(&mut b, 12, 0xf600_0001);
+    b
+}
+
+/// The encoder stream setup command (subtype 0, header `0x0c000080`): the
+/// first digital encoder, action `0x0f`, mode 3, four lanes, the pixel clock
+/// in 10 kHz units.
+#[must_use]
+pub fn encoder_stream_setup(clock_10khz: u32) -> [u8; 12] {
+    let mut b = [0u8; 12];
+    put(&mut b, 0, header(CMD_VBIOS, VBIOS_ENCODER, false, 12));
+    put(&mut b, 4, 0x0403_0f00);
+    put(&mut b, 8, clock_10khz);
+    b
+}
+
 /// The first four bytes of a command (08 section 3.3): the type, the
 /// subtype, whether a reply is wanted, and the payload size.
 #[must_use]
@@ -620,6 +668,43 @@ mod tests {
         }
         fn flush(&self) {}
         fn invalidate(&self) {}
+    }
+
+    #[test]
+    fn the_transmitter_and_encoder_commands_are_the_specifications_dwords() {
+        let dw = |b: &[u8], i: usize| {
+            u32::from_le_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]])
+        };
+        let off = transmitter_disable();
+        assert_eq!(
+            [
+                dw(&off, 0),
+                dw(&off, 1),
+                dw(&off, 2),
+                dw(&off, 3),
+                dw(&off, 4)
+            ],
+            [0x3c00_0180, 0x0003_0000, 0, 0xf60c_0001, 0]
+        );
+        // 148.5 MHz and 74.25 MHz (symbol clock in 10 kHz units).
+        let on = transmitter_enable(14_850);
+        assert_eq!(
+            [dw(&on, 0), dw(&on, 1), dw(&on, 2), dw(&on, 3), dw(&on, 4)],
+            [0x3c00_0180, 0x0403_0100, 0x0000_3a02, 0xf600_0001, 0]
+        );
+        let on = transmitter_enable(7_425);
+        assert_eq!(dw(&on, 2), 0x0000_1d01);
+        let enc = encoder_stream_setup(7_425);
+        assert_eq!(
+            [dw(&enc, 0), dw(&enc, 1), dw(&enc, 2)],
+            [0x0c00_0080, 0x0403_0f00, 0x0000_1d01]
+        );
+        // And the set-pixel-clock command's words.
+        let c = set_pixel_clock(1_485_000, 0);
+        assert_eq!(
+            [dw(&c, 0), dw(&c, 1), dw(&c, 2), dw(&c, 3)],
+            [0x1000_0280, 0x0016_a8c8, 0x0003_1e14, 0]
+        );
     }
 
     #[test]

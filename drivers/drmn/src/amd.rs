@@ -904,52 +904,108 @@ impl Amd {
         }
         let wide = u32::from(mode.hdisplay) * 9 == u32::from(mode.vdisplay) * 16;
         let before = flip::frame_count(&w);
+        let vram_base = u64::from(w.read32(flip::FB_LOCATION_BASE) & 0xffff) << 24;
+        let inbox = dmcub::Inbox::new(vram_base + crate::dmcub::MAILBOXES_AT as u64);
+        let mem = crate::psp::vram_memory(&gpu, vram_base);
+        // One firmware command, waited for; logs what it did.
+        let command = |what: &str, bytes: &[u8]| -> bool {
+            match inbox.submit(&w, &mem, bytes, 200, 1000, &pause) {
+                Ok(()) => {
+                    self.log(format_args!("mode: {what}: taken"));
+                    true
+                }
+                Err(e) => {
+                    self.log(format_args!("mode: {what}: {e:?}"));
+                    false
+                }
+            }
+        };
+        if clock_change {
+            // The way off (08 section 3.7.7): the packets stopped, the plane
+            // blanked, the transmitter off, then the generator stopped.
+            self.link_state(&w, "before");
+            hdmi::stop_packets(&w);
+            modeset::blank(&w);
+            if !command("transmitter off", &dmcub::transmitter_disable()) {
+                modeset::unblank(&w);
+                self.log(format_args!(
+                    "mode: nothing else was changed; the plane is unblanked again"
+                ));
+                return Err(Errno::EIO);
+            }
+        }
         if let Err(e) = modeset::stop(&w, &pause) {
             self.log(format_args!("mode: stop: {e:?}"));
             return Err(Errno::EIO);
         }
         self.log(format_args!("mode: generator stopped"));
         let mut apply = true;
+        let mut running_clock = clock;
         if clock_change {
-            let vram_base = u64::from(w.read32(flip::FB_LOCATION_BASE) & 0xffff) << 24;
-            let inbox = dmcub::Inbox::new(vram_base + crate::dmcub::MAILBOXES_AT as u64);
-            let mem = crate::psp::vram_memory(&gpu, vram_base);
-            let cmd = dmcub::set_pixel_clock(target_clock * 10, 0);
-            match inbox.submit(&w, &mem, &cmd, 200, 1000, &pause) {
-                Ok(()) => {
-                    self.log(format_args!(
-                        "mode: set-pixel-clock command taken ({} x 100 Hz)",
-                        target_clock * 10
-                    ));
-                    self.clock_khz.store(target_clock, Ordering::Release);
-                }
-                Err(e) => {
-                    self.log(format_args!(
-                        "mode: set-pixel-clock: {e:?}; restarting with the old timing"
-                    ));
-                    apply = false;
-                }
+            if command(
+                "set pixel clock",
+                &dmcub::set_pixel_clock(target_clock * 10, 0),
+            ) {
+                running_clock = target_clock;
+                self.clock_khz.store(target_clock, Ordering::Release);
+            } else {
+                self.log(format_args!(
+                    "mode: the clock did not change: restarting with the old timing at the old clock"
+                ));
+                apply = false;
             }
         }
         if apply {
             modeset::apply(&w, &plan);
         }
-        let started = modeset::start(&w, &pause);
+        let started = modeset::start_blanked(&w, &pause);
         self.irq.rearm_frame_start();
-        let clear = hdmi::write_packet(&w, 0, &hdmi::avi_for(code, wide), &pause);
+        if clock_change {
+            // The way on: the encoder in HDMI mode and its stream set up, the
+            // packets, the transmitter on with the new symbol clock.
+            let symbol = running_clock / 10;
+            hdmi::set_dig_mode(&w, 3);
+            command("encoder stream setup", &dmcub::encoder_stream_setup(symbol));
+            hdmi::stream_controls(&w);
+        }
+        let avi_code = if apply { code } else { 16 };
+        let avi_wide = if apply { wide } else { true };
+        let clear = hdmi::write_packet(&w, 0, &hdmi::avi_for(avi_code, avi_wide), &pause);
+        if clock_change {
+            hdmi::packet_controls(&w);
+            command(
+                "transmitter on",
+                &dmcub::transmitter_enable(running_clock / 10),
+            );
+        }
         if let Err(e) = started {
             self.log(format_args!("mode: start: {e:?} (the plane stays blanked)"));
             return Err(Errno::EIO);
         }
+        modeset::unblank(&w);
         self.log(format_args!(
-            "mode: generator running, AVI info frame for code {vic} written (no conflict: {clear}); frames {before} -> {}",
+            "mode: generator running, AVI info frame for code {avi_code} written (no conflict: {clear}); frames {before} -> {}",
             flip::frame_count(&w)
         ));
+        if clock_change {
+            bus::manager().delay_us(100_000);
+            self.link_state(&w, "after");
+        }
         let _ = self.refresh();
         if !apply {
             return Err(Errno::EIO);
         }
         Ok(())
+    }
+
+    /// Logs the link's read-only diagnostics (08 section 3.7.7) under `what`.
+    fn link_state(&self, w: &Bar5<'_>, what: &str) {
+        use amdgpu::hdmi;
+        use amdgpu::regs::Window;
+        self.log(format_args!("LINK: {what}:"));
+        for (name, at) in hdmi::LINK_STATE {
+            self.log(format_args!("  {name} @{at:#07x} = {:#010x}", w.read32(at)));
+        }
     }
 
     /// Reads what a mode change at another pixel clock or size depends on
