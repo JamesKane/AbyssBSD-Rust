@@ -300,6 +300,21 @@ const TABLE: &[Def] = &[
     ),
 ];
 
+/// Whether a request is one a render node takes: the version and the
+/// capabilities, the buffer handles and their sharing, the synchronisation
+/// objects, and the driver's own. Never mode setting, mastership or
+/// authentication.
+fn render_allowed(n: u8) -> bool {
+    // 0x00 VERSION, 0x0c GET_CAP, 0x0d SET_CLIENT_CAP, 0x09 GEM_CLOSE,
+    // 0x2d and 0x2e PRIME handle-to-fd and fd-to-handle, 0x01 GET_UNIQUE
+    // (read only), the synchronisation objects 0xbf to 0xcd, and the
+    // driver's own range.
+    matches!(
+        n,
+        0x00 | 0x01 | 0x09 | 0x0c | 0x0d | 0x2d | 0x2e | 0xbf..=0xcd
+    ) || (DRM_COMMAND_BASE..DRM_COMMAND_END).contains(&n)
+}
+
 /// Runs request `req` on `file`.
 pub(crate) fn dispatch(
     file: &Open,
@@ -314,6 +329,9 @@ pub(crate) fn dispatch(
         return Err(Errno::ENODEV);
     }
     let n = ioctl_nr(req);
+    if file.render && !render_allowed(n) {
+        return Err(Errno::ENOTTY);
+    }
     if (DRM_COMMAND_BASE..DRM_COMMAND_END).contains(&n) {
         return file
             .card

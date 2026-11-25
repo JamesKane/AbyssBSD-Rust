@@ -2465,6 +2465,9 @@ impl DrmDriver for Render {
     fn file_closed(&self, file: u64) {
         self.closed.lock().unwrap().push(file);
     }
+    fn render(&self) -> bool {
+        true
+    }
 }
 
 fn render_req(nr: u8, len: u32) -> u32 {
@@ -2516,4 +2519,39 @@ fn a_drivers_own_request_gets_the_file_and_its_handles_and_hears_when_the_file_c
         call(&b, render_req(9, 8), &mut [0u8; 8]),
         Err(Errno::ENOTTY)
     );
+}
+
+#[test]
+fn a_render_file_takes_rendering_requests_and_no_mode_setting_or_mastership() {
+    setup();
+    let closed = Arc::new(Mutex::new(Vec::new()));
+    let c = crate::register(Arc::new(Render {
+        closed,
+        seen_files: Arc::default(),
+    }))
+    .unwrap();
+    let r = c.open_render().unwrap();
+    assert!(r.is_render());
+    // The driver's own request and the capabilities work.
+    let mut arg = [0u8; 24];
+    arg[..8].copy_from_slice(&4096u64.to_le_bytes());
+    call(&r, render_req(0, 24), &mut arg).unwrap();
+    let mut cap = get_cap_arg(abi::drm::DRM_CAP_PRIME, 0);
+    call(&r, abi::drm::DRM_IOCTL_GET_CAP, &mut cap).unwrap();
+    // Mode setting and mastership are not for it.
+    let mut res = [0u8; 64];
+    assert_eq!(
+        call(&r, abi::drm::DRM_IOCTL_MODE_GETRESOURCES, &mut res),
+        Err(Errno::ENOTTY)
+    );
+    assert_eq!(
+        call(&r, abi::drm::DRM_IOCTL_SET_MASTER, &mut []),
+        Err(Errno::ENOTTY)
+    );
+    assert!(!r.is_master());
+    // A file on the card node is master as before; a card without a render
+    // side has no render node.
+    let m = open(&c);
+    assert!(!m.is_render());
+    assert!(card(false, false).open_render().is_err());
 }

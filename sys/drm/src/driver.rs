@@ -147,6 +147,14 @@ pub trait DrmDriver: Send + Sync {
     /// overrides it.
     fn panic_restore(&self) {}
 
+    /// Whether it has a render side: its card then also has a render node
+    /// (`dri/renderD<128 + N>`), which takes only rendering requests (the
+    /// driver's own, buffer handles, buffer sharing), never mode setting or
+    /// mastership.
+    fn render(&self) -> bool {
+        false
+    }
+
     /// Whether it publishes a display.
     fn has_kms(&self) -> bool {
         self.kms().is_some()

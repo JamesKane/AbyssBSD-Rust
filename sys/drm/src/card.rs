@@ -48,6 +48,8 @@ pub struct Card {
     /// Every open file, so a revoke can end them.
     files: SpinLock<Vec<alloc::sync::Weak<Open>>>,
     path: Once<String>,
+    /// The render node's path, if the driver has a render side.
+    render_path: Once<String>,
     /// The magic numbers files have asked for, until the master
     /// authenticates them.
     magics: SpinLock<alloc::collections::BTreeMap<u32, alloc::sync::Weak<Open>>>,
@@ -84,6 +86,7 @@ pub fn register(driver: Arc<dyn DrmDriver>) -> Result<Arc<Card>, Errno> {
         revoked: AtomicBool::new(false),
         files: SpinLock::new(Vec::new()),
         path: Once::new(),
+        render_path: Once::new(),
         magics: SpinLock::new(alloc::collections::BTreeMap::new()),
         next_magic: AtomicU32::new(1),
     });
@@ -94,6 +97,13 @@ pub fn register(driver: Arc<dyn DrmDriver>) -> Result<Arc<Card>, Errno> {
         return Err(Errno::ENXIO);
     }
     let _ = card.path.set(path);
+    if card.driver.render() {
+        let rpath = format!("dri/renderD{}", 128 + unit);
+        let rnode = Arc::new(RenderNode(Arc::clone(&card)));
+        if vfs::devices::make_dev(rpath.as_bytes(), CARD_MODE, 0, GID_VIDEO, rnode).is_some() {
+            let _ = card.render_path.set(rpath);
+        }
+    }
     CARDS.lock().insert(unit, Arc::downgrade(&card));
     if let Some(k) = card.driver.kms() {
         k.attach(unit);
@@ -153,6 +163,9 @@ impl Card {
         if let Some(p) = self.path.get() {
             vfs::devices::destroy_dev(s, p.as_bytes());
         }
+        if let Some(p) = self.render_path.get() {
+            vfs::devices::destroy_dev(s, p.as_bytes());
+        }
         let files: Vec<_> = self.files.lock().drain(..).collect();
         for f in files.iter().filter_map(alloc::sync::Weak::upgrade) {
             f.hangup();
@@ -182,6 +195,23 @@ impl Card {
     ///
     /// `ENODEV` if the card is gone.
     pub fn open_file(self: &Arc<Self>) -> Result<Arc<Open>, Errno> {
+        self.open_as(false)
+    }
+
+    /// A new open file on the render node: it takes rendering requests only
+    /// and never becomes master.
+    ///
+    /// # Errors
+    ///
+    /// `ENODEV` if the card is gone or has no render side.
+    pub fn open_render(self: &Arc<Self>) -> Result<Arc<Open>, Errno> {
+        if !self.driver.render() {
+            return Err(Errno::ENODEV);
+        }
+        self.open_as(true)
+    }
+
+    fn open_as(self: &Arc<Self>, render: bool) -> Result<Arc<Open>, Errno> {
         if self.is_revoked() {
             return Err(Errno::ENODEV);
         }
@@ -190,6 +220,7 @@ impl Card {
             me: me.clone(),
             card: Arc::clone(self),
             id,
+            render,
             handles: SpinLock::new(HandleTable::new()),
             events: SpinLock::new(Events::default()),
             wait: WaitQueue::new(),
@@ -200,7 +231,9 @@ impl Card {
             authenticated: AtomicBool::new(false),
             name: SpinLock::new(None),
         });
-        self.adopt_master(id);
+        if !render {
+            self.adopt_master(id);
+        }
         {
             let mut files = self.files.lock();
             files.retain(|w| w.strong_count() > 0);
@@ -255,6 +288,15 @@ impl Card {
 }
 
 /// The device node; each open is an [`Open`].
+struct RenderNode(Arc<Card>);
+
+impl CharDevice for RenderNode {
+    fn instance(&self, _: &Sleepable) -> Result<Option<Arc<dyn CharDevice>>, Errno> {
+        let open: Arc<dyn CharDevice> = self.0.open_render()?;
+        Ok(Some(open))
+    }
+}
+
 struct Node(Arc<Card>);
 
 impl CharDevice for Node {
@@ -288,6 +330,8 @@ pub struct Open {
     pub(crate) me: alloc::sync::Weak<Open>,
     pub(crate) card: Arc<Card>,
     pub(crate) id: u64,
+    /// Whether it is on the render node.
+    pub(crate) render: bool,
     pub(crate) handles: SpinLock<HandleTable>,
     events: SpinLock<Events>,
     wait: WaitQueue,
@@ -454,6 +498,12 @@ impl Open {
     #[must_use]
     pub fn is_master(&self) -> bool {
         self.card.is_master(self.id)
+    }
+
+    /// Whether it is on the render node.
+    #[must_use]
+    pub fn is_render(&self) -> bool {
+        self.render
     }
 
     /// The file's identity.
