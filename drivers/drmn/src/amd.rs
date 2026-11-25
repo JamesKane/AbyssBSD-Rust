@@ -709,6 +709,14 @@ impl Amd {
         }
     }
 
+    /// Logs the graphics block's state (reads only; see `gcload::snapshot`).
+    pub(crate) fn gc_probe(&self) -> Result<(), abi::errno::Errno> {
+        let gpu = self.gpu()?;
+        let log = |args: core::fmt::Arguments<'_>| self.log(args);
+        crate::gcload::snapshot(&gpu, "probe", &log);
+        Ok(())
+    }
+
     /// Hands the graphics, compute and DMA engines' firmware to the security
     /// processor and starts the RLC autoload (stage R4.1), on the calling
     /// kernel thread (which reads the files). The processor is brought up
@@ -754,10 +762,16 @@ impl Amd {
         crate::gcload::snapshot(&gpu, "before", &log);
         match crate::gcload::load(&gpu, &mut brought.psp, &files, &log) {
             Ok(()) => {
-                for ms in [10u32, 100, 1000] {
-                    bus::manager().delay_us(u64::from(ms) * 1000);
-                    crate::gcload::snapshot(&gpu, &alloc::format!("{ms} ms later"), &log);
-                }
+                let (cp, boot, done) = crate::gcload::wait_autoload(&gpu, 2000);
+                self.log(format_args!(
+                    "GC: autoload {}: CP_STAT {cp:#x}, RLC_RLCS_BOOTLOAD_STATUS {boot:#010x}",
+                    if done {
+                        "finished"
+                    } else {
+                        "did not finish in 2 s"
+                    }
+                ));
+                crate::gcload::snapshot(&gpu, "after the autoload", &log);
             }
             Err(e) => self.log(format_args!("GC: stopped: {e:?}")),
         }
@@ -1494,6 +1508,11 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             "link_reconnect",
             "Write 1 to put the encoder's front end back as before the last clock change (an experiment on a lost signal)",
             Amd::link_reconnect,
+        ),
+        (
+            "gc_probe",
+            "Write 1 to log the graphics block's power state and, if it is on, its registers (reads only)",
+            Amd::gc_probe,
         ),
         (
             "mode_probe",

@@ -41,19 +41,85 @@ pub(crate) enum Stopped {
     Status(&'static str, u32),
 }
 
-/// The registers read before and after (name, byte offset): read-only.
-pub(crate) const SNAPSHOT: &[(&str, usize)] = &[("CP_STAT", 0x8680)];
+/// `RLC_GPM_STAT` (Raphael byte): bit 1 the graphics power is on, bit 2 its
+/// clock is on. Read first: the rest of the graphics registers only if both
+/// are set (06 section 2.1).
+const RLC_GPM_STAT: usize = 0x3b9b8;
+/// `RLC_RLCS_BOOTLOAD_STATUS`: bit 31 boot complete, bit 0 the IRAM loaded.
+pub(crate) const BOOTLOAD_STATUS: usize = 0x3ba34;
+/// `CP_STAT`: 0 when the command processor is idle.
+pub(crate) const CP_STAT: usize = 0x8680;
 
-/// Logs the registers in [`SNAPSHOT`].
+/// The registers read before and after (name, byte offset): read-only.
+pub(crate) const SNAPSHOT: &[(&str, usize)] = &[
+    ("GRBM_STATUS", 0x8010),
+    ("GRBM_STATUS2", 0x8008),
+    ("GRBM_STATUS_SE0", 0x8014),
+    ("GRBM_STATUS_SE1", 0x8018),
+    ("CP_STAT", CP_STAT),
+    ("CP_BUSY_STAT", 0x867c),
+    ("CPF_STATUS", 0x821c),
+    ("CPC_STATUS", 0x8210),
+    ("CP_ME_CNTL", 0x86d8),
+    ("CP_MEC_CNTL", 0x86d4),
+    ("RLC_CNTL", 0x3b000),
+    ("RLC_STAT", 0x3b010),
+    ("RLC_PG_CNTL", 0x3b10c),
+    ("RLC_CGCG_CGLS_CTRL", 0x3b124),
+    ("RLC_SAFE_MODE", 0x3b280),
+    ("RLC_RLCS_BOOTLOAD_STATUS", BOOTLOAD_STATUS),
+    ("BOOTLOAD_ID_STATUS1", 0x3bbb0),
+    ("BOOTLOAD_ID_STATUS2", 0x3bbb4),
+    ("CP_RB0_BASE", 0xc100),
+    ("CP_RB0_CNTL", 0xc104),
+    ("CP_RB0_RPTR", 0x8700),
+    ("CP_RB0_WPTR", 0xc150),
+    ("SDMA0_F32_CNTL", 0x4a28),
+    ("SDMA0_STATUS_REG", 0x4a14),
+];
+
+/// Logs the graphics power and clock state and, if both are on and nothing
+/// reads as all ones, the registers in [`SNAPSHOT`] (06 section 2.1's read
+/// order: a read of a block that is off must not be the first).
 pub(crate) fn snapshot(gpu: &Arc<Aperture>, what: &str, log: &dyn Fn(core::fmt::Arguments<'_>)) {
     let w = Bar5(gpu);
-    log(format_args!("GC: {what}:"));
-    for (name, at) in SNAPSHOT {
+    let gpm = w.read32(RLC_GPM_STAT);
+    log(format_args!(
+        "GC: {what}: RLC_GPM_STAT @{RLC_GPM_STAT:#07x} = {gpm:#010x} (power {}, clock {})",
+        if gpm & 2 != 0 { "on" } else { "off" },
+        if gpm & 4 != 0 { "on" } else { "off" },
+    ));
+    if gpm == 0xffff_ffff || gpm & 6 != 6 {
         log(format_args!(
-            "  {name} @{at:#07x} = {:#010x}",
-            w.read32(*at)
+            "  the rest of the graphics registers not read"
         ));
+        return;
     }
+    for (name, at) in SNAPSHOT {
+        let v = w.read32(*at);
+        log(format_args!("  {name} @{at:#07x} = {v:#010x}"));
+        if v == 0xffff_ffff {
+            log(format_args!("  all ones: stopping the reads"));
+            return;
+        }
+    }
+}
+
+/// Waits for the autoload: `CP_STAT` 0 and the boot-complete bit, in one
+/// read pass (06 section 2.1). Polls every millisecond for up to `ms`.
+/// Returns the last `(CP_STAT, BOOTLOAD_STATUS)` and whether it finished.
+pub(crate) fn wait_autoload(gpu: &Arc<Aperture>, ms: u32) -> (u32, u32, bool) {
+    let w = Bar5(gpu);
+    let (mut cp, mut boot) = (0xffff_ffff, 0);
+    for _ in 0..ms {
+        cp = w.read32(CP_STAT);
+        boot = w.read32(BOOTLOAD_STATUS);
+        if cp == 0 && boot >> 31 != 0 {
+            return (cp, boot, true);
+        }
+        bus::manager().delay_us(1000);
+    }
+    (cp, boot, false)
 }
 
 /// Hands each image to the security processor and starts the autoload.
