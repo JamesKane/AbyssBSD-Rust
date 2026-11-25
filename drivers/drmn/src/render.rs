@@ -467,49 +467,6 @@ impl Render {
             };
             Ok((vmid, fs.slot, root, user_fence))
         })?;
-        // The first submissions' buffers are logged (the first dwords), to
-        // see what a client asks of the engine.
-        static TRACED: AtomicU32 = AtomicU32::new(0);
-        if TRACED.fetch_add(1, Ordering::Relaxed) < 3 {
-            let _ = self.with_file(&amd, cx.file_id(), |fs, _| {
-                for ib in &ibs {
-                    let Some(m) = fs
-                        .maps
-                        .iter()
-                        .find(|m| ib.va_start >= m.va && ib.va_start < m.va + m.pages * 4096)
-                    else {
-                        amd.log(format_args!(
-                            "render: IB at {:#x} is not mapped",
-                            ib.va_start
-                        ));
-                        continue;
-                    };
-                    let off = ib.va_start - m.va;
-                    let mut words = Vec::new();
-                    let n = (ib.ib_bytes as usize / 4).min(160);
-                    let _ = m.gem.with_page(off / 4096, &mut |page| {
-                        let at = (off % 4096) as usize;
-                        for i in 0..n {
-                            let b = at + 4 * i;
-                            if b + 4 > page.len() {
-                                break;
-                            }
-                            words.push(u32::from_le_bytes([
-                                page[b],
-                                page[b + 1],
-                                page[b + 2],
-                                page[b + 3],
-                            ]));
-                        }
-                    });
-                    amd.log(format_args!(
-                        "render: IB at {:#x}, {} bytes: {:08x?}",
-                        ib.va_start, ib.ib_bytes, words
-                    ));
-                }
-                Ok(())
-            });
-        }
         let seq = loop {
             let mut g = amd.gfx_lock();
             let gfx = g.as_mut().ok_or(Errno::ENXIO)?;
