@@ -122,9 +122,12 @@ for run in $(seq 0 $((RUNS - 1))); do
 		complete "$out" && continue
 		[ "$GOLDEN" = refresh ] && [ "$side" = abyss ] && continue
 		g=$(printf '%s/freebsd-%02d.log' "$GOLDEN_DIR" "$run")
-		if [ "$side" = freebsd ] && [ -n "$golden_ok" ] && [ -f "$g" ]; then
-			log "run $((run + 1))/$RUNS: freebsd from the golden set"
-			cp "$g" "$out"
+		if [ "$side" = freebsd ] && [ -n "$golden_ok" ]; then
+			# More runs than the set has: AbyssBSD's side only.
+			if [ -f "$g" ]; then
+				log "run $((run + 1))/$RUNS: freebsd from the golden set"
+				cp "$g" "$out"
+			fi
 			continue
 		fi
 		rm -f "$out.tmp"
