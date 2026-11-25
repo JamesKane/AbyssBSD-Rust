@@ -1277,3 +1277,23 @@ AbyssBSD the userspace is already there: Mesa 26.2 with `radeonsi_dri.so`, `libd
 Each stage logs what it reads and writes, is triggered by its own sysctl until the stage after it needs it, and is checked on the
 board before the next is built on it. Anything that can hang the machine is asked of the user first (a reboot clears it).
 
+### 16.22 R4.1: the engines' firmware loaded and the RLC autoload finished on the X870E (2026-11-24)
+
+- **Code.** `lib/amdgpu/src/gcfw.rs` reads the vendor's containers (CP and SDMA major 1, RLC major 2) and gives the load list in the
+  security processor's order; on the vendor's own Raphael files it gives exactly the specification's test vectors (SDMA 33,792;
+  CE 263,040; PFP and ME 263,168; MEC 267,440 twice; RLC lists `0x250`, `0x600`, `0x4480`; IRAM and DRAM `0x10200`; RLC_G 25,088). Four
+  host tests; the real-file test runs with `AMDGPU_FIRMWARE_DIR` pointing at the decompressed files. `drivers/drmn/src/gcload.rs`
+  runs it (`dev.drmn.1.gc_fw`, on a kernel thread, the files read from `/lib/firmware/amdgpu/`), each image through the 1 MiB
+  staging buffer, then the start-autoload command; `gc_probe` reads the graphics block's state without writing.
+- **State at handover** (`gc_probe`, read-only, in the specification's safe order: `RLC_GPM_STAT` first): `RLC_GPM_STAT`
+  `0x00f40016` (graphics power on, clock on, no power-gating error); `RLC_CNTL` 0 (the RLC not running); `CP_ME_CNTL`
+  `0x15000000` and `CP_MEC_CNTL` `0x50000000` (all command processors halted); `RLC_RLCS_BOOTLOAD_STATUS` 0; `CP_STAT` 0;
+  `SDMA0_F32_CNTL` 1 (halted). The platform firmware had not started the graphics engines.
+- **The load** (the display firmware already loaded and running): all twelve images answered status 0 (SDMA0, CE, PFP, ME, MEC1,
+  MEC2, the restore lists CNTL, GPM, SRM, IRAM, DRAM, RLC_G), the start-autoload command answered status 0, and
+  **within the 2 s wait `CP_STAT` was 0 and `RLC_RLCS_BOOTLOAD_STATUS` was `0xc0000001`** (boot complete, IRAM loaded;
+  `BOOTLOAD_ID_STATUS1` `0x833e`). Afterwards the RLC is running (`RLC_CNTL` 1) and `RLC_GPM_STAT` reads `0x00b40016`; the command
+  processors stay halted until they are released (06 section 2, steps 7 and 9). The display kept running (2,908 frame starts, no overflow).
+- **Next (R4.2):** the golden settings, `GRBM_CNTL`, the harvesting read and per-VMID shader memory configuration, the clear-state
+  buffer, releasing the command processors, then the rings (06 sections 2 to 9).
+
