@@ -772,13 +772,15 @@ Mesa's `radeonsi` on a render node, and runs Sway with hardware rendering. The N
   mode running (`current_vic`), loading the display firmware first if it is not up. Without that, a replugged
   monitor shows the right text through green noise, as photographed on the X870E. A line that reads
   disconnected when the watcher starts (not wired) is left alone and the connector stays connected. User space
-  is told with a device control notification, `!system=DRM subsystem=card<N> type=HOTPLUG
-  connector=HDMI-A-1 status=<connected|disconnected>`; **that string is a guess**: FreeBSD's linuxkpi makes
-  `kobject_uevent_env` do nothing, so what drm-kmod's userland (libudev-devd, wlroots) listens for is not
-  recorded here (DESKTOP.md lists it as to be recorded). Polling, not the hot-plug interrupt (08 section 2.5,
+  is told with the notification drm-kmod sends (`drm_sysfs_connector_hotplug_event` in `AbyssBSD/kmod/drm`):
+  `!system=DRM subsystem=CONNECTOR type=HOTPLUG cdev=dri/card<N> connector=<connector id>`, sent after the link
+  is trained again. libudev-devd turns it into a "change" event, which wlroots takes as a hot-plug (FreeBSD's
+  linuxkpi makes `kobject_uevent_env` do nothing, so this is the only path). Polling, not the hot-plug interrupt (08 section 2.5,
   source 9, enable `INT_CONTROL` bit 16): the interrupt control register's offset is not in the specification.
-  Verified on the X870E: unplug and replug of the HDMI cable, twice (disconnect and connect logged, EDID read,
-  link retrained, the console normal afterwards).
+  Verified on the X870E: unplug and replug of the HDMI cable (disconnect and connect logged, EDID read, link
+  retrained, the console normal afterwards), and with Sway 1.12 (gles2, render node) running: wlroots logs both
+  "udev event for card1 (change)" and its hot-plug scans, turns the output off on unplug, sets a mode on replug,
+  and Sway's picture comes back normal.
 - **Verified:** `tests/graphics/kmsflip.c` (raw ioctls) sets each mode and flips between two patterns; Sway 1.12
   with the pixman renderer, `foot` and glmark2 run on it (`tests/graphics/accept-x86_64-amd-display.png`); a
   ten-minute Sway soak ran 42,048 frames with no overflow.
@@ -979,8 +981,8 @@ reboot (always set `BootNext` first so the board does not boot Fedora).
 
 - Synchronisation-object and sync-file descriptors (need a descriptor kind with a wake-up for `poll`), and the
   dma-buf fence ioctls.
-- Hot-plug by interrupt (needs the line's interrupt control offset from the specification); the notice user
-  space listens for (§16.2); a compositor that survives a replug (Sway was not running in the test).
+- Hot-plug by interrupt (needs the line's interrupt control offset from the specification); the hot-plug
+  event for the other connector types (only HDMI-A-1 is watched).
 - Compute and graphics preemption verification; the wave-kill soft recovery; the DMA reset's freeze step.
 - Scanning out clients' buffers in place (a GART-mapped scan-out path) instead of copying.
 - Sound over HDMI; the Navi 22 (Z690-A) bring-up; the half-speed-after-reset cause (§16.8).

@@ -11,6 +11,7 @@ use core::sync::atomic::Ordering;
 
 use amdgpu::hpd;
 use amdgpu::regs::Window;
+use drm::DrmDriver as _;
 
 use crate::amd::{Amd, Bar5};
 
@@ -80,10 +81,18 @@ impl Amd {
         self.connected.store(now, Ordering::Release);
         let status = if now { "connected" } else { "disconnected" };
         self.log(format_args!("hot-plug: monitor {status}"));
+        // The notification drm-kmod sends (drm_sysfs_connector_hotplug_event):
+        // libudev-devd turns it into a "change" event with HOTPLUG=1, which
+        // is what wlroots listens for.
         let unit = self.dri_unit.load(Ordering::Acquire);
-        if unit >= 0 {
-            let data = format!("connector=HDMI-A-1 status={status}");
-            bus::manager().notify("DRM", &format!("card{unit}"), "HOTPLUG", Some(&data));
+        let id = self
+            .kms
+            .lock()
+            .as_ref()
+            .and_then(|(card, _)| card.kms().and_then(|k| k.connector_ids().first().copied()));
+        if let (true, Some(id)) = (unit >= 0, id) {
+            let data = format!("cdev=dri/card{unit} connector={id}");
+            bus::manager().notify("DRM", "CONNECTOR", "HOTPLUG", Some(&data));
         }
     }
 }

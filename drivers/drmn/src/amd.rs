@@ -71,7 +71,7 @@ pub(crate) struct Amd {
     /// The unit of the graphics card made for it, or -1.
     pub(crate) dri_unit: core::sync::atomic::AtomicI32,
     /// The graphics card, once registered.
-    kms: SpinLock<Option<(Arc<amd_kms::AmdKms>, Arc<drm::Card>)>>,
+    pub(crate) kms: SpinLock<Option<(Arc<amd_kms::AmdKms>, Arc<drm::Card>)>>,
     /// The interrupts.
     irq: Arc<crate::interrupt::Irq>,
     /// The page the hubs send faults and aperture misses to, while the
