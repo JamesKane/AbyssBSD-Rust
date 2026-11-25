@@ -73,7 +73,7 @@ pub(crate) struct Amd {
     /// The graphics card, once registered.
     pub(crate) kms: SpinLock<Option<(Arc<amd_kms::AmdKms>, Arc<drm::Card>)>>,
     /// The interrupts.
-    irq: Arc<crate::interrupt::Irq>,
+    pub(crate) irq: Arc<crate::interrupt::Irq>,
     /// The page the hubs send faults and aperture misses to, while the
     /// hubs are set up.
     dummy: SpinLock<Option<vm::dma::DmaCoherent<u8>>>,
@@ -115,6 +115,16 @@ pub(crate) struct Amd {
     pub(crate) connected: core::sync::atomic::AtomicBool,
     /// The code of the mode now running (16 = the firmware's 1080p60).
     pub(crate) current_vic: core::sync::atomic::AtomicU8,
+    /// The display hub's translation context is set up (scan-out from system
+    /// memory).
+    pub(crate) display_vm: core::sync::atomic::AtomicBool,
+    /// How many pictures were shown from system memory in place.
+    pub(crate) scanout_frames: core::sync::atomic::AtomicU64,
+    /// Link health: consecutive bad looks, recoveries tried, and whether the
+    /// link has been seen healthy since the last mode set.
+    pub(crate) link_bad: core::sync::atomic::AtomicU8,
+    pub(crate) link_recoveries: core::sync::atomic::AtomicU8,
+    pub(crate) link_seen_healthy: core::sync::atomic::AtomicBool,
     /// The next mode set takes the full way off and on even at the pixel
     /// clock already running (a monitor plugged in again needs the link
     /// trained again).
@@ -176,6 +186,11 @@ impl Amd {
             connected: core::sync::atomic::AtomicBool::new(true),
             current_vic: core::sync::atomic::AtomicU8::new(16),
             relink: core::sync::atomic::AtomicBool::new(false),
+            display_vm: core::sync::atomic::AtomicBool::new(false),
+            scanout_frames: core::sync::atomic::AtomicU64::new(0),
+            link_bad: core::sync::atomic::AtomicU8::new(0),
+            link_recoveries: core::sync::atomic::AtomicU8::new(0),
+            link_seen_healthy: core::sync::atomic::AtomicBool::new(false),
             reset_busy: core::sync::atomic::AtomicBool::new(false),
             skip_asic_init: core::sync::atomic::AtomicBool::new(false),
             render: SpinLock::new(None),
@@ -867,6 +882,9 @@ impl Amd {
 
     fn set_mode_by_code(&self, vic: i32, measure: bool) -> Result<(), abi::errno::Errno> {
         use abi::errno::Errno;
+        // The link is not trusted healthy again until it reads so.
+        self.link_seen_healthy
+            .store(false, core::sync::atomic::Ordering::Release);
         use amdgpu::regs::Window;
         use amdgpu::{dmcub, flip, hdmi, modeset};
         use core::sync::atomic::Ordering;
@@ -970,7 +988,12 @@ impl Amd {
         // after the way on, step 12 of the reference).
         let front_end = w.read32(hdmi::DIG_FE_CNTL);
         if clock_change {
-            *self.link_saved.lock() = Some((front_end, w.read32(hdmi::DIG_BE_CNTL)));
+            // What the front end was connected to, saved to be put back. A
+            // link already taken down (the transmitter off) has no front end:
+            // the saved connection of the working link is kept then.
+            if front_end != 0 || self.link_saved.lock().is_none() {
+                *self.link_saved.lock() = Some((front_end, w.read32(hdmi::DIG_BE_CNTL)));
+            }
             // The way off (08 section 3.7.7): the packets stopped, the plane
             // blanked, the transmitter off, then the generator stopped.
             self.link_state(&w, "before");
@@ -1042,6 +1065,15 @@ impl Amd {
             "mode: generator running, AVI info frame for code {avi_code} written (no conflict: {clear}); frames {before} -> {}",
             flip::frame_count(&w)
         ));
+        // Audio follows the pixel clock: the audio clock's module and the
+        // clock regeneration pairs, if the audio side was set up.
+        if apply && hdmi::audio_prepared(&w) {
+            hdmi::audio_clock_for(&w, target_clock);
+            hdmi::audio_regeneration(&w, target_clock);
+            self.log(format_args!(
+                "mode: the audio clock and clock regeneration set for {target_clock} kHz"
+            ));
+        }
         if clock_change {
             bus::manager().delay_us(100_000);
             self.link_state(&w, "after");
@@ -1054,6 +1086,101 @@ impl Amd {
         }
         self.current_vic.store(code, Ordering::Release);
         Ok(())
+    }
+
+    /// Makes scan-out from system memory possible (08 section 2.3.1): the
+    /// translation hubs set up if they are not (the GART is shared), then the
+    /// display hub's context 0 programmed as a copy of it, once.
+    pub(crate) fn scanout_prepare(&self) -> Result<(), abi::errno::Errno> {
+        use abi::errno::Errno;
+        use amdgpu::gmc::{Hub, Reg};
+        use amdgpu::regs::Window;
+        use core::sync::atomic::Ordering::AcqRel;
+        if self.dummy.lock().is_none() {
+            self.gmc(Hub::Gfx)?;
+            self.gmc(Hub::Mm)?;
+        }
+        if self.display_vm.load(core::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        let table = (u64::from(w.read32(Hub::Mm.reg(Reg::FbOffset))) << 24) + GART_AT as u64;
+        let pause = || bus::manager().delay_us(5);
+        if self.display_vm.swap(true, AcqRel) {
+            return Ok(());
+        }
+        match amdgpu::scanout::program_context0(&w, table, 10_000, &pause) {
+            Ok(()) => {
+                self.log(format_args!(
+                    "scan-out from system memory: the display's translation context set up for the GART at {table:#x}"
+                ));
+                Ok(())
+            }
+            Err(e) => {
+                self.display_vm
+                    .store(false, core::sync::atomic::Ordering::Release);
+                self.log(format_args!("scan-out from system memory: {e:?}"));
+                Err(Errno::EIO)
+            }
+        }
+    }
+
+    /// Looks at the link's health once a second (the hot-plug watcher calls
+    /// it): the encoder's FIFO calibrated and error free. A link that was
+    /// healthy and reads bad three times running is trained again, up to
+    /// three times; one that stays bad after that is left alone and logged,
+    /// so a monitor that cannot be recovered does not flicker for ever.
+    pub(crate) fn check_link(&self, s: &sched::Sleepable) {
+        use amdgpu::hdmi;
+        use amdgpu::regs::Window;
+        use core::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+        if !self.connected() || self.modeset_busy.load(Acquire) {
+            return;
+        }
+        let Ok(gpu) = self.gpu() else {
+            return;
+        };
+        let fifo = Bar5(&gpu).read32(hdmi::DIG_FIFO_STATUS);
+        if fifo == u32::MAX {
+            return;
+        }
+        if hdmi::link_healthy(fifo) {
+            self.link_bad.store(0, Release);
+            self.link_seen_healthy.store(true, Release);
+            // The working link's front end connection, kept for a recovery.
+            let w = Bar5(&gpu);
+            let fe = w.read32(hdmi::DIG_FE_CNTL);
+            if fe != 0 {
+                *self.link_saved.lock() = Some((fe, w.read32(hdmi::DIG_BE_CNTL)));
+            }
+            return;
+        }
+        if !self.link_seen_healthy.load(Acquire) {
+            return;
+        }
+        if self.link_bad.fetch_add(1, AcqRel) + 1 < 3 {
+            return;
+        }
+        self.link_bad.store(0, Release);
+        if self.link_recoveries.load(Acquire) >= 3 {
+            return;
+        }
+        let n = self.link_recoveries.fetch_add(1, AcqRel) + 1;
+        self.log(format_args!(
+            "link: the encoder reports the link down (FIFO status {fifo:#010x}); training it again ({n} of 3)"
+        ));
+        let r = self.relink_now(s);
+        let healthy = self
+            .gpu()
+            .is_ok_and(|g| hdmi::link_healthy(Bar5(&g).read32(hdmi::DIG_FIFO_STATUS)));
+        self.log(format_args!(
+            "link: trained again: {r:?}, now {}",
+            if healthy { "healthy" } else { "still down" }
+        ));
+        if healthy {
+            self.link_recoveries.store(0, Release);
+        }
     }
 
     /// Takes the link down and up again at the mode running: a monitor that
@@ -1218,6 +1345,36 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         "irq",
         "What the interrupts have done",
         sysctl::Value::Str(Box::new(move |out| out.push_str(&r.irq.summary()))),
+    );
+    let r = Arc::clone(a);
+    let _ = t.add_value(
+        node,
+        sysctl::Number::Auto,
+        "scanout",
+        "How many pictures were shown in place from system memory, not copied",
+        sysctl::Value::Str(Box::new(move |out| {
+            let _ = core::fmt::Write::write_fmt(
+                out,
+                format_args!(
+                    "{} in place",
+                    r.scanout_frames.load(core::sync::atomic::Ordering::Relaxed)
+                ),
+            );
+        })),
+    );
+    let r = Arc::clone(a);
+    let _ = t.add_value(
+        node,
+        sysctl::Number::Auto,
+        "render",
+        "What the render node's submissions looked like",
+        sysctl::Value::Str(Box::new(move |out| {
+            let render = r.render.lock().as_ref().and_then(Weak::upgrade);
+            match render {
+                Some(render) => out.push_str(&render.summary()),
+                None => out.push_str("no render node"),
+            }
+        })),
     );
     if crate::debug_enabled() {
         debug::publish(t, node, a);

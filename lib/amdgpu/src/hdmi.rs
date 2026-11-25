@@ -112,6 +112,17 @@ pub const CODEC_RATES: usize = 0xe32c;
 /// The codec's power-state register.
 pub const CODEC_POWER: usize = 0xe334;
 
+/// `DIG_FIFO_STATUS`: bit 0 the FIFO's level error, bit 29 calibrated.
+pub const DIG_FIFO_STATUS: usize = 0x15544;
+
+/// Whether the encoder's FIFO says the link is up: calibrated, no level
+/// error (`0x22099000` is what a running 1080p60 link reads; a link taken
+/// down by the transmitter-off command reads 0).
+#[must_use]
+pub const fn link_healthy(fifo: u32) -> bool {
+    fifo & (1 << 29) != 0 && fifo & 1 == 0
+}
+
 /// Registers worth a line in the log, before and after: (name, byte).
 pub const WATCH: &[(&str, usize)] = &[
     ("DIG_FE_CNTL", DIG_FE_CNTL),
@@ -145,6 +156,44 @@ pub const fn acr_cts(cts: u32) -> u32 {
     cts << 12
 }
 
+/// The audio clock regeneration values for audio rates 32, 44.1 and 48 kHz
+/// at a pixel (TMDS) clock of `clock_khz`: `(N, CTS)` for each, from the
+/// HDMI specification's table where it lists the clock, else by the
+/// formula it is built on (N 4096, 6272 and 6144; CTS = the clock times N
+/// over 128 times the rate).
+#[must_use]
+pub const fn acr_values(clock_khz: u32) -> [(u32, u32); 3] {
+    match clock_khz {
+        // 25.2 / 1.001 MHz (640x480 at 59.94 Hz).
+        25_175 | 25_174 => [(4576, 28_125), (7007, 31_250), (6864, 28_125)],
+        // 25.2 MHz.
+        25_200 => [(4096, 25_200), (6272, 28_000), (6144, 25_200)],
+        // 27 MHz and 27.027 MHz (480p and 576p).
+        27_000 => [(4096, 27_000), (6272, 30_000), (6144, 27_000)],
+        27_027 => [(4096, 27_027), (6272, 30_030), (6144, 27_027)],
+        74_250 => [(4096, 74_250), (6272, 82_500), (6144, 74_250)],
+        148_500 => [(4096, 148_500), (6272, 165_000), (6144, 148_500)],
+        _ => [
+            (4096, clock_khz),
+            // 10/9 of the clock: below 2^32 for any clock that fits one.
+            (
+                6272,
+                clock_khz / 441 * 6272 * 10 / 128 + clock_khz % 441 * 6272 * 10 / (128 * 441),
+            ),
+            (6144, clock_khz),
+        ],
+    }
+}
+
+/// Writes the three clock regeneration pairs for `clock_khz`.
+pub fn audio_regeneration<W: Window + ?Sized>(w: &W, clock_khz: u32) {
+    let v = acr_values(clock_khz);
+    for (pair, (n, cts)) in [ACR_32, ACR_44_1, ACR_48].into_iter().zip(v) {
+        w.write32(pair.0, acr_cts(cts));
+        update(w, pair.1, 0x000f_ffff, n);
+    }
+}
+
 /// Step 1 of the audio side (08 section 4.6): the encoder's audio setup for
 /// stereo from endpoint `endpoint`: the audio clock on, the formatter's
 /// memory powered, channel numbers, the audio delay, the three clock
@@ -157,14 +206,7 @@ pub fn audio_encoder<W: Window + ?Sized>(w: &W, endpoint: u32) {
     update(w, AUDIO_PACKET_CONTROL, 0x30, 1 << 4);
     // 148.5 MHz: 32 kHz N 4096 / CTS 148500, 44.1 kHz N 6272 / CTS 165000,
     // 48 kHz N 6144 / CTS 148500 (the HDMI specification's table).
-    for (pair, cts, n) in [
-        (ACR_32, 148_500, 4096),
-        (ACR_44_1, 165_000, 6272),
-        (ACR_48, 148_500, 6144),
-    ] {
-        w.write32(pair.0, acr_cts(cts));
-        update(w, pair.1, 0x000f_ffff, n);
-    }
+    audio_regeneration(w, 148_500);
     // Auto-send on, hardware-computed CTS, normal priority.
     update(
         w,
@@ -269,9 +311,22 @@ pub fn endpoint_configure_for<W: Window + ?Sized>(w: &W, sink: &edid::Edid) {
 /// Step 3: the audio clock for 148.5 MHz, in the order the specification
 /// insists on: the source first, then the module, then the phase.
 pub fn audio_clock<W: Window + ?Sized>(w: &W) {
+    audio_clock_for(w, 148_500);
+}
+
+/// The audio clock for a pixel clock of `clock_khz`: the module is the pixel
+/// clock in 100 Hz units, the phase the 24 MHz reference.
+pub fn audio_clock_for<W: Window + ?Sized>(w: &W, clock_khz: u32) {
     update(w, AUDIO_DTO_SOURCE, 0x77, 0);
-    w.write32(AUDIO_DTO0_MODULE, PIXEL_CLOCK_100HZ);
+    w.write32(AUDIO_DTO0_MODULE, clock_khz * 10);
     w.write32(AUDIO_DTO0_PHASE, AUDIO_REFERENCE_100HZ);
+}
+
+/// Whether the audio side has been set up (the encoder's audio clock is on
+/// and the audio clock module written): a mode change then redoes the
+/// clock and the clock regeneration for its pixel clock.
+pub fn audio_prepared<W: Window + ?Sized>(w: &W) -> bool {
+    w.read32(AFMT_CNTL) & 1 != 0 && w.read32(AUDIO_DTO0_MODULE) != 0
 }
 
 /// Step 4a: the encoder into HDMI mode (08 section 4.5): the back-end mode,
@@ -512,6 +567,52 @@ mod tests {
                 _ => self.set(o, v),
             }
         }
+    }
+
+    #[test]
+    fn the_link_is_healthy_when_the_fifo_is_calibrated_without_error() {
+        assert!(link_healthy(0x2209_9000));
+        assert!(!link_healthy(0));
+        assert!(!link_healthy(0x2209_9001));
+        assert!(!link_healthy(0x0009_9000));
+    }
+
+    #[test]
+    fn the_regeneration_values_follow_the_clock() {
+        // Listed clocks are the table's.
+        assert_eq!(acr_values(148_500)[1], (6272, 165_000));
+        assert_eq!(acr_values(74_250)[0], (4096, 74_250));
+        assert_eq!(acr_values(25_175)[0], (4576, 28_125));
+        // Unlisted: the formula, which reproduces the table where it applies.
+        for khz in [27_000u32, 74_250, 148_500, 54_000] {
+            let [a, b, c] = acr_values(khz);
+            assert_eq!(a, (4096, khz));
+            assert_eq!(c, (6144, khz));
+            assert_eq!(b.0, 6272);
+            assert_eq!(u64::from(b.1), u64::from(khz) * 6272 * 10 / (128 * 441));
+        }
+        // CTS = clock * N / (128 * fs) for every pair (to a rounding).
+        for khz in [54_000u32, 297_000] {
+            let v = acr_values(khz);
+            for ((n, cts), fs) in v.into_iter().zip([32_000u64, 44_100, 48_000]) {
+                let want = u64::from(khz) * 1000 * u64::from(n) / (128 * fs);
+                assert!(
+                    u64::from(cts).abs_diff(want) <= 1,
+                    "{khz} kHz at {fs}: {cts} vs {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_audio_clock_module_is_the_pixel_clock_in_hundreds_of_hertz() {
+        let m = Model::new();
+        audio_clock_for(&m, 74_250);
+        assert_eq!(m.get(AUDIO_DTO0_MODULE), 742_500);
+        assert_eq!(m.get(AUDIO_DTO0_PHASE), AUDIO_REFERENCE_100HZ);
+        audio_clock(&m);
+        assert_eq!(m.get(AUDIO_DTO0_MODULE), PIXEL_CLOCK_100HZ);
+        assert!(!audio_prepared(&Model::new()));
     }
 
     #[test]

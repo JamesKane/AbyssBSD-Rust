@@ -70,6 +70,22 @@ pub trait Display: Send + Sync {
     fn modes(&self) -> Vec<Mode> {
         Vec::new()
     }
+    /// Starts showing the picture in `pages` (the physical addresses of 4 KiB
+    /// pages, a whole surface of the firmware's pitch) in place, from the
+    /// next vertical update: no copy. `slot` (0 or 1) says which of two
+    /// places in the translation table to use, the one not being shown. The
+    /// display reads memory the processor wrote, so the implementation
+    /// writes the pages back first. An error leaves the display as it was
+    /// and the caller copies instead.
+    ///
+    /// # Errors
+    ///
+    /// `ENOTSUP` (the default) when the display cannot, other errors when
+    /// this time it could not.
+    fn show_pages(&self, pages: &[u64], slot: u8) -> Result<(), Errno> {
+        let _ = (pages, slot);
+        Err(Errno::ENOTSUP)
+    }
     /// Whether a monitor is connected (the hot-plug line's sense). Asked on
     /// every connector probe.
     fn connected(&self) -> bool {
@@ -123,6 +139,24 @@ fn surfaces(bytes: usize) -> (usize, usize) {
 /// The longest a flip is waited for: several frames.
 const SETTLE_US: u32 = 200_000;
 
+/// Whether a client's buffer can be shown in place: the plane at the
+/// corner, showing the buffer from its start, exactly the firmware
+/// surface's size and pitch, and the buffer big enough for it.
+fn in_place_fits(
+    g: Geometry,
+    pitch: u32,
+    offset: u32,
+    v: &kms_check::Visible,
+    gem_bytes: u64,
+) -> bool {
+    (v.dst.x, v.dst.y) == (0, 0)
+        && (v.src.x, v.src.y) == (0, 0)
+        && (v.dst.w, v.dst.h) == (g.width, g.height)
+        && u64::from(pitch) == u64::from(g.width) * 4
+        && offset == 0
+        && gem_bytes >= u64::from(pitch) * u64::from(g.height)
+}
+
 /// Which surface the display shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Front {
@@ -130,6 +164,9 @@ enum Front {
     Console,
     A,
     B,
+    /// A client's buffer, shown in place from system memory, in the
+    /// translation table's slot 0 or 1.
+    Client(u8),
 }
 
 impl Front {
@@ -139,6 +176,8 @@ impl Front {
             Self::Console => 0,
             Self::A => a,
             Self::B => b,
+            // Not in video memory: the copy path never asks.
+            Self::Client(_) => 0,
         }
     }
 
@@ -184,6 +223,9 @@ struct Screen {
     at: (usize, usize),
     display: Arc<dyn Display>,
     front: SpinLock<Front>,
+    /// The buffer being shown in place, kept alive (and its pages with it)
+    /// until the display has moved on to another surface.
+    held: SpinLock<Option<Arc<drm::gem::Gem>>>,
 }
 
 impl Screen {
@@ -211,7 +253,46 @@ impl Screen {
             self.settle();
             self.display.show(0);
             *front = Front::Console;
+            // The display has moved off the client's pages.
+            self.held.lock().take();
         }
+    }
+
+    /// Shows `gem` in place if it is exactly the firmware's surface: the
+    /// plane at the corner, the surface's size and pitch, the buffer at its
+    /// start. Returns whether it did (otherwise the caller copies).
+    fn show_in_place(
+        &self,
+        front: &mut Front,
+        fb: &drm::kms::Fb,
+        gem: &Arc<drm::gem::Gem>,
+        v: &kms_check::Visible,
+    ) -> bool {
+        let g = self.geometry;
+        let pitch = u64::from(g.width) * 4;
+        if !in_place_fits(g, fb.pitches[0], fb.offsets[0], v, gem.size()) {
+            return false;
+        }
+        let h = v.dst.h;
+        let Ok(pages) = gem.phys_pages() else {
+            return false;
+        };
+        let need = usize::try_from((pitch * u64::from(h)).div_ceil(4096)).unwrap_or(usize::MAX);
+        if pages.len() < need {
+            return false;
+        }
+        let slot = match *front {
+            Front::Client(s) => s ^ 1,
+            _ => 0,
+        };
+        if self.display.show_pages(&pages[..need], slot).is_err() {
+            return false;
+        }
+        // The previous buffer is let go after this flip latches (the next
+        // commit settles first); this one is held while it is shown.
+        *self.held.lock() = Some(Arc::clone(gem));
+        *front = Front::Client(slot);
+        true
     }
 }
 
@@ -371,6 +452,15 @@ impl PlaneHw for Plane {
         let (w, h) = (v.dst.w.min(g.width), v.dst.h.min(g.height));
         let mut front = s.front.lock();
         s.settle();
+        // A client buffer shown before is let go once the display has moved
+        // off it (this commit waited for the last flip to latch).
+        if !matches!(*front, Front::Client(_)) {
+            s.held.lock().take();
+        }
+        // In place, when the buffer is the firmware's surface exactly.
+        if s.show_in_place(&mut front, fb, gem, &v) {
+            return;
+        }
         let back = front.back();
         let mem = Opaque {
             display: &*s.display,
@@ -477,6 +567,7 @@ pub fn create(g: Geometry, display: Arc<dyn Display>) -> Result<Arc<AmdKms>, Err
         at,
         display,
         front: SpinLock::new(Front::Console),
+        held: SpinLock::new(None),
     });
     let mut b = KmsBuilder::new(KmsLimits {
         min_width: 1,

@@ -8,8 +8,58 @@
 /// `HPD0_DC_HPD_INT_STATUS` (byte address; the blocks are `0x20` apart).
 pub const HPD0_INT_STATUS: usize = 0x14f50;
 
+/// `HPD0_DC_HPD_INT_CONTROL` (08 section 4.3): the interrupt's acknowledge,
+/// polarity and enable.
+pub const HPD0_INT_CONTROL: usize = 0x14f54;
+/// The distance between the hot-plug lines' register blocks.
+pub const LINE_STRIDE: usize = 0x20;
+/// How many hot-plug lines the display has.
+pub const LINES: usize = 5;
+
+/// `INT_STATUS` of line `n`.
+#[must_use]
+pub const fn int_status(n: usize) -> usize {
+    HPD0_INT_STATUS + n * LINE_STRIDE
+}
+
+/// `INT_CONTROL` of line `n`.
+#[must_use]
+pub const fn int_control(n: usize) -> usize {
+    HPD0_INT_CONTROL + n * LINE_STRIDE
+}
+
 /// Status bit 1: the line's sense, 1 = a monitor is connected.
 pub const SENSE: u32 = 1 << 1;
+/// Status bit 4: the sense after the connect and disconnect filter.
+pub const SENSE_DEBOUNCED: u32 = 1 << 4;
+/// Control bit 0: acknowledge the event.
+pub const CONTROL_ACK: u32 = 1 << 0;
+/// Control bit 8: the polarity the line interrupts on (1: connected).
+pub const CONTROL_POLARITY: u32 = 1 << 8;
+/// Control bit 16: the interrupt is enabled.
+pub const CONTROL_ENABLE: u32 = 1 << 16;
+
+/// The interrupt's source number in an interrupt entry of the display's
+/// client (4); the line is the entry's first source data word.
+pub const IH_SOURCE: u8 = 9;
+
+/// `INT_CONTROL` after an event, or when arming the interrupt: the event
+/// acknowledged (if `ack`), the interrupt enabled, and the polarity the
+/// opposite of the filtered sense in `status`, so the line interrupts again
+/// at the next change, in either direction (the interrupt is level-type).
+#[must_use]
+pub const fn control_for(control: u32, status: u32, ack: bool) -> u32 {
+    let mut c = control | CONTROL_ENABLE;
+    if ack {
+        c |= CONTROL_ACK;
+    }
+    if status & SENSE_DEBOUNCED != 0 {
+        c &= !CONTROL_POLARITY;
+    } else {
+        c |= CONTROL_POLARITY;
+    }
+    c
+}
 
 /// Whether the status register says a monitor is connected.
 #[must_use]
@@ -70,6 +120,28 @@ mod tests {
         assert!(sensed(0x12));
         assert!(!sensed(0x10));
         assert!(!sensed(0));
+    }
+
+    #[test]
+    fn the_interrupt_arms_for_the_opposite_polarity_of_the_filtered_sense() {
+        // Connected (filtered sense set): interrupt on disconnect, polarity 0.
+        let c = control_for(0, 0x12, false);
+        assert_eq!(c, CONTROL_ENABLE);
+        // Disconnected: polarity 1, so the next connect interrupts.
+        let c = control_for(CONTROL_ENABLE, 0x02, true);
+        assert_eq!(c, CONTROL_ENABLE | CONTROL_POLARITY | CONTROL_ACK);
+        // Other bits are left alone; the polarity follows the sense.
+        let c = control_for(0x0000_0100 | 0x20, 0x10, true);
+        assert_eq!(c & CONTROL_POLARITY, 0);
+        assert_eq!(c & 0x20, 0x20);
+    }
+
+    #[test]
+    fn the_lines_registers_are_a_stride_apart() {
+        assert_eq!(int_status(0), 0x14f50);
+        assert_eq!(int_control(0), 0x14f54);
+        assert_eq!(int_status(4), 0x14fd0);
+        assert_eq!(int_control(1), 0x14f74);
     }
 
     #[test]

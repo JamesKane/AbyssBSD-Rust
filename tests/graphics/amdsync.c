@@ -4,6 +4,7 @@
  * back into a synchronisation object.
  * Usage: amdsync [node] */
 #include <sys/ioctl.h>
+#include <sys/sysctl.h>
 #include <sys/event.h>
 #include <sys/eventfd.h>
 #include <sys/mman.h>
@@ -87,6 +88,20 @@ static int submit_ex(uint32_t h, uint64_t point, uint32_t list, unsigned packets
 }
 
 static int submit(uint32_t h, unsigned packets) { return submit_ex(h, 0, 0, packets); }
+
+/* One small compute job (ip type 1) with buffer list `list`: a WRITE_DATA at IB offset 0xf000. */
+static int submit_compute(uint32_t list)
+{
+	uint32_t *c = (uint32_t *)((char *)ibmap + 0xf000);
+	uint64_t at = va_data + 3000;
+	c[0] = 0xc0033702; c[1] = (5 << 8) | (1 << 20);
+	c[2] = (uint32_t)at; c[3] = (uint32_t)(at >> 32); c[4] = 0xc0de0001;
+	struct ib ib = { .va = va_ib + 0xf000, .bytes = 5 * 4, .ip = 1, .ring = 0 };
+	struct chunk ck = { .id = 1, .len = sizeof ib / 4, .data = (uintptr_t)&ib };
+	uint64_t chunks[1] = { (uintptr_t)&ck };
+	struct cs cs = { .ctx = ctx, .list = list, .nchunks = 1, .chunks = (uintptr_t)chunks };
+	return ioctl(fd, CMD(0x04, struct cs), &cs);
+}
 
 static uint32_t sobj_new(void)
 {
@@ -309,6 +324,57 @@ int main(int argc, char **argv)
 			CHECK(ioctl(pr1.fd, DMABUF_EXPORT_SYNC, &badf) < 0 && errno == EINVAL, "flags 0 should be EINVAL");
 		}
 		close(pr1.fd);
+	}
+
+	/* 10. Ordering between rings: a long graphics job on a buffer, then a compute job on the same
+	 * buffer. Returning from the second submission, the first job must have finished. */
+	{
+		struct bo_entry be = { .handle = h[1], .priority = 0 };
+		struct bo_list bl = { .op = 0, .count = 1, .entry_size = sizeof be, .entries = (uintptr_t)&be };
+		if (ioctl(fd, CMD(0x03, struct bo_list), &bl) < 0) { perror("BO_LIST"); bad = 1; }
+		uint32_t list = *(uint32_t *)&bl;
+		int ordered = 0, trials = 20;
+		for (int t = 0; t < trials; t++) {
+			uint32_t a = sobj_new();
+			if (submit_ex(a, 0, list, 3000) < 0) { perror("CS (gfx)"); bad = 1; break; }
+			int sfa = export_sync_file(a);
+			if (submit_compute(list) < 0) { perror("CS (compute)"); bad = 1; break; }
+			ordered += ready(sfa, 0);
+			close(sfa);
+		}
+		int unordered = 0;
+		for (int t = 0; t < trials; t++) {
+			uint32_t a = sobj_new();
+			if (submit_ex(a, 0, 0, 3000) < 0) { perror("CS (gfx)"); bad = 1; break; }
+			int sfa = export_sync_file(a);
+			if (submit_compute(0) < 0) { perror("CS (compute)"); bad = 1; break; }
+			unordered += ready(sfa, 0);
+			close(sfa);
+			ready(sfa, 1);
+		}
+		printf("cross-ring: with a shared buffer the first job was done %d of %d times; without one %d of %d\n",
+		       ordered, trials, unordered, trials);
+		CHECK(ordered == trials, "a job on another ring ran before the first one finished (%d of %d)", ordered, trials);
+	}
+
+	/* 11. A wait with a deadline: the job's fence is told (the render sysctl counts the hints). */
+	{
+		char before[256] = "", after[256] = "";
+		size_t n = sizeof before;
+		sysctlbyname("dev.drmn.1.render", before, &n, NULL, 0);
+		uint32_t dl = sobj_new();
+		if (submit(dl, 3000) < 0) { perror("CS"); bad = 1; }
+		struct timespec t;
+		clock_gettime(CLOCK_MONOTONIC, &t);
+		int64_t nowns = (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
+		struct sobj_wait w = { .handles = (uintptr_t)&dl, .timeout = nowns + 2000000000LL, .count = 1, .flags = 8,
+		                       .deadline = (uint64_t)nowns + 1000000 };
+		int r = ioctl(fd, SOBJ_WAIT, &w);
+		n = sizeof after;
+		sysctlbyname("dev.drmn.1.render", after, &n, NULL, 0);
+		printf("deadline wait %d\n  before: %s\n  after:  %s\n", r, before, after);
+		CHECK(r == 0, "the wait with a deadline failed (%d)", errno);
+		CHECK(strcmp(before, after) != 0, "the hint was not counted");
 	}
 
 	printf(bad ? "amdsync: FAILED\n" : "amdsync: ok\n");

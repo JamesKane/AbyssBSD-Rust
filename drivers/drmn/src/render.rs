@@ -263,6 +263,14 @@ pub(crate) struct Render {
     /// wakes them is running.
     fence_wakers: SpinLock<Vec<Arc<dyn vfs::event::Wake>>>,
     notifier_running: core::sync::atomic::AtomicBool,
+    /// Submissions, how many named a buffer list, and how many carried the
+    /// handles inline (`BO_HANDLES`).
+    cs_count: AtomicU32,
+    cs_with_list: AtomicU32,
+    cs_with_handles: AtomicU32,
+    /// Deadline hints from waiters, and the last one's time.
+    deadline_hints: AtomicU32,
+    latest_deadline: core::sync::atomic::AtomicU64,
     /// The engines (bit per [`Engine::index`]) that a waiting fence is on:
     /// the only ones the notifier looks for a hung ring on.
     waited_engines: AtomicU32,
@@ -304,6 +312,11 @@ impl Render {
             fence_wakers: SpinLock::new(Vec::new()),
             notifier_running: core::sync::atomic::AtomicBool::new(false),
             waited_engines: AtomicU32::new(0),
+            cs_count: AtomicU32::new(0),
+            cs_with_list: AtomicU32::new(0),
+            cs_with_handles: AtomicU32::new(0),
+            deadline_hints: AtomicU32::new(0),
+            latest_deadline: core::sync::atomic::AtomicU64::new(0),
             state: PreemptLock::new(State {
                 files: BTreeMap::new(),
                 slots: [false; VMIDS],
@@ -315,6 +328,18 @@ impl Render {
             }),
             vram_bytes,
         })
+    }
+
+    /// What the submissions looked like, for the `render` sysctl.
+    pub(crate) fn summary(&self) -> alloc::string::String {
+        alloc::format!(
+            "{} submissions, {} with a buffer list, {} with inline buffer handles, {} ring resets, {} deadline hints",
+            self.cs_count.load(Ordering::Relaxed),
+            self.cs_with_list.load(Ordering::Relaxed),
+            self.cs_with_handles.load(Ordering::Relaxed),
+            self.resets.load(Ordering::Relaxed),
+            self.deadline_hints.load(Ordering::Relaxed),
+        )
     }
 
     /// The counter the fence interrupt bumps.
@@ -700,9 +725,14 @@ impl Render {
         }
         // The chunks, read from the caller's memory before any lock.
         let ctx_id = r.ctx_id;
+        self.cs_count.fetch_add(1, Ordering::Relaxed);
+        if r.bo_list != 0 {
+            self.cs_with_list.fetch_add(1, Ordering::Relaxed);
+        }
         let mut ibs = Vec::new();
         let mut engine: Option<Engine> = None;
         let mut fence: Option<(u32, u32)> = None;
+        let mut inline_bos: Option<Vec<u32>> = None;
         let mut out_syncobjs: Vec<(u32, u64)> = Vec::new();
         // What the job waits for before it runs: objects (at points).
         let mut in_syncobjs: Vec<(u32, u64)> = Vec::new();
@@ -714,9 +744,13 @@ impl Render {
             let c = uapi::Chunk::decode(&h).map_err(|_| Errno::EINVAL)?;
             // The lists of buffers and the like are not needed: only the
             // chunks read below are fetched.
+            if c.id == uapi::chunk::BO_HANDLES {
+                self.cs_with_handles.fetch_add(1, Ordering::Relaxed);
+            }
             if !matches!(
                 c.id,
                 uapi::chunk::IB
+                    | uapi::chunk::BO_HANDLES
                     | uapi::chunk::FENCE
                     | uapi::chunk::SYNCOBJ_OUT
                     | uapi::chunk::SYNCOBJ_IN
@@ -757,6 +791,12 @@ impl Render {
                             .map(|c| (u32::from_le_bytes(*c), 0)),
                     );
                 }
+                // The buffers inline (the same request as a list's creation):
+                // used for this job instead of a list's.
+                uapi::chunk::BO_HANDLES => {
+                    let req = uapi::BoListRequest::decode(&data).map_err(|_| Errno::EINVAL)?;
+                    inline_bos = Some(bo_list_handles(cx, &req)?);
+                }
                 // Objects waited on, and objects (with points) to signal.
                 uapi::chunk::SYNCOBJ_IN => {
                     in_syncobjs.extend(
@@ -784,14 +824,15 @@ impl Render {
         // The buffers of the job's list: what it waits for from outside,
         // and what its fence goes on.
         let list_amd = self.amd()?;
-        let bos: Vec<Arc<drm::gem::Gem>> = self
-            .with_file(&list_amd, cx.file_id(), |fs, _| {
+        let bos: Vec<Arc<drm::gem::Gem>> = match inline_bos {
+            Some(handles) => handles,
+            None => self.with_file(&list_amd, cx.file_id(), |fs, _| {
                 Ok(fs.lists.get(&r.bo_list).cloned().unwrap_or_default())
-            })?
-            .into_iter()
-            .filter_map(|h| cx.gem(h))
-            .collect();
-        wait_dependencies(cx, &in_syncobjs, &bos)?;
+            })?,
+        }
+        .into_iter()
+        .filter_map(|h| cx.gem(h))
+        .collect();
         // A point that does not follow the last is refused before the job
         // runs, not after.
         for (h, point) in &out_syncobjs {
@@ -822,6 +863,10 @@ impl Render {
             })?;
             engine = Engine::Compute(hw);
         }
+        // What the job waits for before it runs: its objects, and the fences
+        // on its buffers from other rings and from outside (its own ring
+        // orders its own jobs).
+        wait_dependencies(cx, &in_syncobjs, &bos, engine)?;
         let gpu = amd.gpu_arc()?;
         // The address space's root and the user fence's address, under the
         // state lock; the job itself under the ring's.
@@ -1091,7 +1136,11 @@ impl Render {
         // Whoever uses these buffers next waits for this job (implicit
         // synchronisation, which sync files export and import).
         for g in &bos {
-            g.reservation().lock().add(Arc::clone(&job), true, false);
+            g.reservation().lock().add(
+                Arc::clone(&job),
+                true,
+                u32::try_from(engine.index()).unwrap_or(0),
+            );
         }
         let handle = match engine {
             Engine::Compute(q) => compute_handle(q, seq),
@@ -1406,6 +1455,17 @@ impl drm::Fence for JobFence {
             r.add_waker(w, self.engine);
         }
     }
+
+    /// A waiter needs this job by a time. The engine runs at the power
+    /// firmware's automatic clock, which is its top clock under load, so
+    /// there is no clock to raise; the hint is counted (`render` sysctl).
+    fn set_deadline(&self, ns: u64) {
+        if let Some(r) = self.render.upgrade() {
+            r.deadline_hints.fetch_add(1, Ordering::Relaxed);
+            r.latest_deadline
+                .store(ns, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 /// Whether job `seq` of `engine` has finished: its fence word has reached it.
@@ -1508,6 +1568,7 @@ fn wait_dependencies(
     cx: &IoctlCx<'_>,
     objects: &[(u32, u64)],
     bos: &[Arc<drm::gem::Gem>],
+    engine: Engine,
 ) -> Result<(), Errno> {
     let mut fences: Vec<Arc<dyn drm::Fence>> = Vec::new();
     for (h, point) in objects {
@@ -1518,13 +1579,20 @@ fn wait_dependencies(
         fences.push(slot.find(*point)?.ok_or(Errno::EINVAL)?);
     }
     for g in bos {
-        fences.extend(g.reservation().lock().blocking(true, true));
+        fences.extend(
+            g.reservation()
+                .lock()
+                .blocking(true, Some(u32::try_from(engine.index()).unwrap_or(0))),
+        );
     }
     let start = sched::now_ns();
     for f in fences {
         while !f.signaled() {
             if sched::now_ns().saturating_sub(start) > DEPENDENCY_WAIT_NS {
                 return Err(Errno::ETIMEDOUT);
+            }
+            if sched::current().is_interrupted() {
+                return Err(Errno::EINTR);
             }
             let _ = f.wait(cx.sleepable(), 20_000_000);
         }

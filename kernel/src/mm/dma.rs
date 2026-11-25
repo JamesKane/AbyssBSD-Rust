@@ -72,7 +72,11 @@ unsafe impl DmaMemory for KernelDma {
         #[cfg(target_arch = "aarch64")]
         crate::arch::cache::clean_to_poc(va as usize, len);
         #[cfg(target_arch = "x86_64")]
-        let _ = (va, len);
+        // SAFETY: the caller passes a mapped range (a direct map address
+        // of DMA memory); the cache lines are written back and dropped.
+        unsafe {
+            crate::arch::cpu::flush_cache_range(va, len);
+        }
     }
 
     fn invalidate(&self, va: *const u8, len: usize) {

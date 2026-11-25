@@ -41,6 +41,111 @@ impl Amd {
         self.asic_init()
     }
 
+    /// Takes the link down the way a lost signal does: the transmitter off
+    /// (through the display firmware), nothing else. The watcher then finds
+    /// the link down and trains it again; this is how that is tested.
+    pub(crate) fn link_break(&self) -> Result<(), abi::errno::Errno> {
+        use amdgpu::regs::Window as _;
+        use amdgpu::{dmcub, flip};
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        if !self.dmcub_up.load(Ordering::Acquire) || !dmcub::running(&w) {
+            self.log(format_args!(
+                "link break: the display firmware is not running (write 1 to `dmcub` first)"
+            ));
+            return Err(abi::errno::Errno::ENXIO);
+        }
+        let pause = |us: u32| bus::manager().delay_us(u64::from(us));
+        let vram_base = u64::from(w.read32(flip::FB_LOCATION_BASE) & 0xffff) << 24;
+        let inbox = dmcub::Inbox::new(vram_base + crate::dmcub::MAILBOXES_AT as u64);
+        let mem = crate::psp::vram_memory(&gpu, vram_base);
+        let r = inbox.submit(&w, &mem, &dmcub::transmitter_disable(), 200, 1000, &pause);
+        self.log(format_args!(
+            "link break: transmitter off: {r:?}; FIFO status {:#010x}",
+            w.read32(amdgpu::hdmi::DIG_FIFO_STATUS)
+        ));
+        r.map_err(|_| abi::errno::Errno::EIO)
+    }
+
+    /// A test of scan-out from system memory: a gradient in 8 MiB of system
+    /// memory is shown through the GART for three seconds, then the
+    /// firmware's surface is shown again. Logs the frame counter and the
+    /// translation hubs' fault status around it.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a test pattern: coordinates scaled to a byte, a small page count"
+    )]
+    pub(crate) fn scanout_test(&self) -> Result<(), abi::errno::Errno> {
+        use amdgpu::regs::Window as _;
+        use amdgpu::{flip, scanout};
+        let me = self.me.upgrade().ok_or(abi::errno::Errno::ENXIO)?;
+        let gpu = self.gpu()?;
+        let tag = gpu.dma_tag().ok_or(abi::errno::Errno::ENXIO)?;
+        let (width, height) = (1920usize, 1080usize);
+        let bytes = width * height * 4;
+        let pages = scanout::pages_for(bytes as u64) as usize;
+        let buf = tag
+            .coherent::<u8>(pages * 4096)
+            .map_err(|_| abi::errno::Errno::ENOMEM)?;
+        // A gradient, with the eight colour bars along the top eighth.
+        let mut line = alloc::vec![0u8; width * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let px = &mut line[x * 4..x * 4 + 4];
+                if y < height / 8 {
+                    let bar = x * 8 / width;
+                    let c = [0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0xff, 0x00];
+                    px.copy_from_slice(&[
+                        c[(bar + 5) % 8],
+                        c[(bar + 3) % 8],
+                        c[(bar + 1) % 8],
+                        0xff,
+                    ]);
+                } else {
+                    px.copy_from_slice(&[
+                        (x * 255 / width) as u8,
+                        (y * 255 / height) as u8,
+                        0x40,
+                        0xff,
+                    ]);
+                }
+            }
+            buf.copy_from_slice(y * width * 4, &line);
+        }
+        let base = buf.bus_addr();
+        let list: alloc::vec::Vec<u64> = (0..pages).map(|i| base + (i as u64) * 4096).collect();
+        let w = Bar5(&gpu);
+        let faults = |w: &Bar5<'_>| (w.read32(0xa0a0), w.read32(0x69c30));
+        let before = flip::frame_count(&w);
+        self.log(format_args!(
+            "scan-out test: {pages} pages at {base:#x}; frames {before}; fault status {:?}",
+            faults(&w)
+        ));
+        if let Err(e) = crate::kms::show_system_pages(&me, &gpu, &list, 0) {
+            self.log(format_args!("scan-out test: {e:?}"));
+            return Err(e);
+        }
+        bus::manager().delay_us(3_000_000);
+        let mid = flip::frame_count(&w);
+        self.log(format_args!(
+            "scan-out test: shown for 3 s; frames {mid}; fault status {:?}",
+            faults(&w)
+        ));
+        // Back to the firmware's surface (the console's).
+        flip::flip(
+            &w,
+            u64::from(w.read32(flip::FB_LOCATION_BASE) & 0xffff) << 24,
+        );
+        bus::manager().delay_us(200_000);
+        self.log(format_args!(
+            "scan-out test: the console's surface again; frames {}; fault status {:?}",
+            flip::frame_count(&w),
+            faults(&w)
+        ));
+        drop(buf);
+        Ok(())
+    }
+
     /// Reads the audio path's registers (the encoder's audio formatter, the
     /// packet and clock-regeneration controls, the audio clock, endpoint 0)
     /// and logs them: reads only. Run it while a tone plays.
@@ -1048,6 +1153,16 @@ pub(super) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             "asic_init",
             "Write 1 to run the video BIOS's initialisation table on the running chip (it writes a few registers)",
             Amd::asic_init_trigger,
+        ),
+        (
+            "link_break",
+            "Write 1 to take the HDMI link down the way a lost signal does (transmitter off, through the display firmware); the watcher should train it again within a few seconds. The picture goes",
+            Amd::link_break,
+        ),
+        (
+            "scanout_test",
+            "Write 1 to show a gradient from system memory through the GART for three seconds, then the console's surface again (a test of scan-out in place); the picture changes",
+            Amd::scanout_test,
         ),
         (
             "afmt_probe",

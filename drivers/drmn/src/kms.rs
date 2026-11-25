@@ -18,6 +18,13 @@ use crate::amd::Bar5;
 /// width in the lower.
 const VIEWPORT_DIMENSION: usize = 0xeaa8;
 
+/// Where the two scan-out slots are in the GART's address space (0 to 1
+/// GiB): above the first half, which nothing else uses, 16 MiB apiece.
+const SCANOUT_GART_BASE: u64 = 0x2000_0000;
+const SLOT_BYTES: u64 = 16 << 20;
+/// The pages in a slot.
+const SLOT_PAGES: usize = (SLOT_BYTES / 4096) as usize;
+
 /// The display, as the card drives it.
 struct Scanout {
     gpu: Weak<Aperture>,
@@ -86,6 +93,14 @@ impl Display for Scanout {
         self.amd.upgrade().is_none_or(|a| a.connected())
     }
 
+    /// Shows the pages as the surface, through the GART (see
+    /// [`show_system_pages`]).
+    fn show_pages(&self, pages: &[u64], slot: u8) -> Result<(), abi::errno::Errno> {
+        let amd = self.amd.upgrade().ok_or(abi::errno::Errno::ENXIO)?;
+        let gpu = self.gpu.upgrade().ok_or(abi::errno::Errno::ENXIO)?;
+        show_system_pages(&amd, &gpu, pages, slot)
+    }
+
     fn modes(&self) -> alloc::vec::Vec<kms_check::Mode> {
         // What the monitor's EDID allows of the modes the card can set.
         match self.amd.upgrade() {
@@ -122,6 +137,51 @@ pub(crate) enum Refused {
     /// aperture, so the picture on the screen is not this device's.
     NotTheConsole,
     Size,
+}
+
+/// Shows `pages` (physical addresses of 4 KiB pages) as the display's
+/// surface, through the GART: entries for them in slot `slot` of the table
+/// (uncached, not snooped), the pages written back from the processor's
+/// caches, the hubs' translation caches invalidated, then a flip to the
+/// slot's GART address.
+pub(crate) fn show_system_pages(
+    amd: &Arc<crate::amd::Amd>,
+    gpu: &Arc<Aperture>,
+    pages: &[u64],
+    slot: u8,
+) -> Result<(), abi::errno::Errno> {
+    use abi::errno::Errno;
+    use amdgpu::gmc::{self, Hub};
+    if slot > 1 || pages.is_empty() || pages.len() > SLOT_PAGES {
+        return Err(Errno::EINVAL);
+    }
+    let tag = gpu.dma_tag().ok_or(Errno::ENXIO)?;
+    amd.scanout_prepare()?;
+    let at = SCANOUT_GART_BASE + u64::from(slot) * SLOT_BYTES;
+    let first = usize::try_from(at >> 12).map_err(|_| Errno::EINVAL)?;
+    let mem = tag.memory();
+    for (i, pa) in pages.iter().enumerate() {
+        // The page is written back and dropped from the caches: the display
+        // reads memory without snooping them.
+        mem.clean(mem.virt(*pa).as_ptr(), 4096);
+        let e = amdgpu::scanout::entry(*pa);
+        let off = crate::amd::GART_AT + (first + i) * 8;
+        gpu.vram_write32(off, u32::try_from(e & 0xffff_ffff).unwrap_or(0));
+        gpu.vram_write32(off + 4, u32::try_from(e >> 32).unwrap_or(0));
+    }
+    let w = Bar5(gpu);
+    // The table is in video memory: the writes complete, then are made
+    // visible; the hubs forget what they had translated.
+    let _ = gpu.vram_read32(crate::amd::GART_AT);
+    flip::hdp_flush(&w);
+    let pause = || bus::manager().delay_us(10);
+    for hub in [Hub::Gfx, Hub::Mm] {
+        let _ = gmc::invalidate(&w, hub, 0, 1000, &pause);
+    }
+    flip::flip(&w, at);
+    amd.scanout_frames
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
 
 /// The card for `gpu`'s display, if it is the one the console shows.

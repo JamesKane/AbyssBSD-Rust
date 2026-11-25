@@ -36,6 +36,9 @@ const CREATE_SIGNALED: u32 = 1;
 const WAIT_ALL: u32 = 1;
 const WAIT_FOR_SUBMIT: u32 = 2;
 const WAIT_AVAILABLE: u32 = 4;
+/// The request carries a deadline (`deadline_nsec`, absolute, in the same
+/// clock as the timeout): the fences being waited for are told.
+const WAIT_DEADLINE: u32 = 8;
 /// `HANDLE_TO_FD`: the descriptor is a sync file of the fence now in the
 /// object. `FD_TO_HANDLE`: the descriptor is a sync file whose fence goes
 /// in the object.
@@ -64,6 +67,13 @@ pub trait Fence: Send + Sync {
         let _ = (s, ns);
         sched::yield_now();
         self.signaled()
+    }
+
+    /// Tells it that someone needs it finished by `ns` (nanoseconds of
+    /// uptime, as the wait's timeout is), so a driver may raise the clock
+    /// of what runs it. The default does nothing.
+    fn set_deadline(&self, ns: u64) {
+        let _ = ns;
     }
 
     /// Asks to have `w` woken, from thread context, once it may have
@@ -102,6 +112,14 @@ impl Fence for All {
                 self.signaled()
             }
             None => true,
+        }
+    }
+
+    fn set_deadline(&self, ns: u64) {
+        for f in &self.0 {
+            if !f.signaled() {
+                f.set_deadline(ns);
+            }
         }
     }
 
@@ -626,9 +644,20 @@ fn wait(f: &Open, s: &sched::Sleepable, a: &mut [u8], timeline: bool) -> Result<
     };
     let timeout = u64_at(a, timeout_at)?;
     let flags = u32_at(a, flags_at)?;
+    if flags & !(WAIT_ALL | WAIT_FOR_SUBMIT | WAIT_AVAILABLE | WAIT_DEADLINE) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    // The deadline is the last field of the request: after the padding.
+    let deadline = if flags & WAIT_DEADLINE != 0 {
+        Some(u64_at(a, if timeline { 40 } else { 32 })?)
+    } else {
+        None
+    };
     let env = crate::env().ok_or(Errno::ENXIO)?;
     let all = flags & WAIT_ALL != 0;
     let objects = slots(f, &list)?;
+    // Each fence is told the deadline once.
+    let mut told: Vec<*const ()> = Vec::new();
     loop {
         let mut missing = false;
         let mut first = None;
@@ -646,8 +675,17 @@ fn wait(f: &Open, s: &sched::Sleepable, a: &mut [u8], timeline: bool) -> Result<
                     if flags & WAIT_AVAILABLE != 0 || fe.signaled() {
                         done += 1;
                         first.get_or_insert(i);
-                    } else if pending.is_none() {
-                        pending = Some(fe);
+                    } else {
+                        if let Some(d) = deadline {
+                            let key = Arc::as_ptr(&fe).cast::<()>();
+                            if !told.contains(&key) {
+                                told.push(key);
+                                fe.set_deadline(d);
+                            }
+                        }
+                        if pending.is_none() {
+                            pending = Some(fe);
+                        }
                     }
                 }
             }

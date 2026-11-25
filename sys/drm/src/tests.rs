@@ -2686,6 +2686,8 @@ fn the_console_comes_back_when_the_last_file_on_the_cards_own_node_closes() {
 struct Gate {
     open: std::sync::atomic::AtomicBool,
     wakers: Mutex<Vec<Arc<dyn vfs::event::Wake>>>,
+    /// The deadline a waiter gave, and how many times it was told.
+    deadline: Mutex<Vec<u64>>,
 }
 
 impl Gate {
@@ -2704,6 +2706,9 @@ impl crate::Fence for Gate {
     }
     fn register(&self, w: &Arc<dyn vfs::event::Wake>) {
         self.wakers.lock().unwrap().push(Arc::clone(w));
+    }
+    fn set_deadline(&self, ns: u64) {
+        self.deadline.lock().unwrap().push(ns);
     }
 }
 
@@ -3137,11 +3142,11 @@ fn a_dma_buf_exports_the_fences_its_users_wait_for_and_takes_a_sync_files() {
     buf.gem()
         .reservation()
         .lock()
-        .add(reader.clone() as Arc<dyn crate::Fence>, false, false);
+        .add(reader.clone() as Arc<dyn crate::Fence>, false, 0);
     buf.gem()
         .reservation()
         .lock()
-        .add(writer.clone() as Arc<dyn crate::Fence>, true, false);
+        .add(writer.clone() as Arc<dyn crate::Fence>, true, 0);
     let export = |flags: u32| {
         let mut a = [0u8; 8];
         a[..4].copy_from_slice(&flags.to_le_bytes());
@@ -3177,10 +3182,13 @@ fn a_dma_buf_exports_the_fences_its_users_wait_for_and_takes_a_sync_files() {
     a[4..8].copy_from_slice(&fd.to_le_bytes());
     crate::dmabuf::ioctl(&buf, &s(), DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &mut a).unwrap();
     assert_eq!(
-        buf.gem().reservation().lock().blocking(false, false).len(),
+        buf.gem().reservation().lock().blocking(false, None).len(),
         1
     );
-    assert_eq!(buf.gem().reservation().lock().blocking(true, true).len(), 1);
+    assert_eq!(
+        buf.gem().reservation().lock().blocking(true, Some(0)).len(),
+        1
+    );
     assert!(!export(1).unwrap().signaled());
     gate.finish();
     assert!(export(1).unwrap().signaled());
@@ -3189,4 +3197,71 @@ fn a_dma_buf_exports_the_fences_its_users_wait_for_and_takes_a_sync_files() {
         crate::dmabuf::ioctl(&buf, &s(), 0x1234, &mut a),
         Err(Errno::ENOTTY)
     );
+}
+
+#[test]
+fn a_ring_waits_for_other_rings_and_outsiders_but_not_for_its_own_jobs() {
+    let mut r = crate::resv::Reservation::default();
+    let (a, b, outside) = (
+        Arc::new(Gate::default()),
+        Arc::new(Gate::default()),
+        Arc::new(Gate::default()),
+    );
+    r.add(a.clone() as Arc<dyn crate::Fence>, true, 0);
+    r.add(b.clone() as Arc<dyn crate::Fence>, true, 1);
+    r.add(
+        outside.clone() as Arc<dyn crate::Fence>,
+        true,
+        crate::resv::EXTERNAL,
+    );
+    // Ring 0 does not wait for itself; ring 1 does not either; a third ring
+    // waits for all.
+    assert_eq!(r.blocking(true, Some(0)).len(), 2);
+    assert_eq!(r.blocking(true, Some(1)).len(), 2);
+    assert_eq!(r.blocking(true, Some(2)).len(), 3);
+    // An export waits for everything.
+    assert_eq!(r.blocking(true, None).len(), 3);
+    // Finished fences are not waited for.
+    b.finish();
+    assert_eq!(r.blocking(true, Some(0)).len(), 1);
+    // A reader waits only for writers; this one wrote nothing.
+    let mut readers = crate::resv::Reservation::default();
+    readers.add(a.clone() as Arc<dyn crate::Fence>, false, 0);
+    a.finish();
+    assert!(readers.blocking(false, Some(1)).is_empty());
+}
+
+#[test]
+fn a_wait_tells_the_fences_its_deadline_once() {
+    let c = card(true, true);
+    let f = open(&c);
+    let h = new_obj(&f);
+    let gate = Arc::new(Gate::default());
+    f.syncobjs
+        .lock()
+        .get(h)
+        .unwrap()
+        .set(Some(gate.clone() as Arc<dyn crate::Fence>));
+    put(0xc000, &h.to_le_bytes());
+    // A wait with a deadline: the fence is told it once, however many times
+    // the wait looks again before it times out.
+    let wait = |flags: u32, deadline: u64, len: usize| {
+        let mut w = std::vec![0u8; len];
+        w[..8].copy_from_slice(&(BASE + 0xc000).to_le_bytes());
+        w[8..16].copy_from_slice(&4_000_000_000u64.to_le_bytes());
+        w[16..20].copy_from_slice(&1u32.to_le_bytes());
+        w[20..24].copy_from_slice(&flags.to_le_bytes());
+        if len >= 40 {
+            w[32..40].copy_from_slice(&deadline.to_le_bytes());
+        }
+        call(&f, sreq(0xc3, 40), &mut w)
+    };
+    assert_eq!(wait(8, 5_500_000_000, 40), Err(Errno::ETIMEDOUT));
+    assert_eq!(*gate.deadline.lock().unwrap(), std::vec![5_500_000_000]);
+    // Without the flag, nothing is passed on; an unknown flag is refused; a
+    // request too short for the field is refused.
+    assert_eq!(wait(0, 9, 40), Err(Errno::ETIMEDOUT));
+    assert_eq!(gate.deadline.lock().unwrap().len(), 1);
+    assert_eq!(wait(16, 0, 40), Err(Errno::EINVAL));
+    assert_eq!(wait(8, 0, 32), Err(Errno::EINVAL));
 }

@@ -45,6 +45,10 @@ const SOURCE_EOP: u8 = 181;
 const CLIENT_SDMA0: u8 = amdgpu::sdma::IH_CLIENT;
 const SOURCE_SDMA_TRAP: u8 = amdgpu::sdma::IH_SOURCE_TRAP;
 
+/// The hot-plug source's line number is the entry's first data word; lines
+/// above this are not watched.
+const HPD_LINES: usize = amdgpu::hpd::LINES;
+
 /// What an interrupt entry announces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Event {
@@ -88,6 +92,13 @@ pub(crate) struct Irq {
     overflows: AtomicU64,
     /// The client and source of the last entry that was not a frame event.
     last_other: AtomicU32,
+    /// The hot-plug lines that interrupted since the watcher looked (a bit
+    /// per line), and where the watcher sleeps.
+    hpd_events: AtomicU32,
+    hpd_queue: Arc<sched::WaitQueue>,
+    /// The hot-plug interrupt is armed (a restart arms it again).
+    hpd_armed: AtomicBool,
+    hpd_interrupts: AtomicU64,
 }
 
 impl core::fmt::Debug for Irq {
@@ -112,7 +123,44 @@ impl Irq {
             other: AtomicU64::new(0),
             overflows: AtomicU64::new(0),
             last_other: AtomicU32::new(0),
+            hpd_events: AtomicU32::new(0),
+            hpd_queue: Arc::new(sched::WaitQueue::new()),
+            hpd_armed: AtomicBool::new(false),
+            hpd_interrupts: AtomicU64::new(0),
         }
+    }
+
+    /// Where the hot-plug watcher sleeps.
+    pub(crate) fn hpd_queue(&self) -> Arc<sched::WaitQueue> {
+        Arc::clone(&self.hpd_queue)
+    }
+
+    /// The hot-plug lines that interrupted since the last call (a bit per
+    /// line).
+    pub(crate) fn take_hpd_events(&self) -> u32 {
+        self.hpd_events.swap(0, Ordering::AcqRel)
+    }
+
+    /// Whether hot-plug events are waiting.
+    pub(crate) fn hpd_pending(&self) -> bool {
+        self.hpd_events.load(Ordering::Acquire) != 0
+    }
+
+    /// Arms the hot-plug interrupt of line `n`: enabled, for the change from
+    /// what the line senses now.
+    pub(crate) fn hpd_arm(&self, n: usize) {
+        use amdgpu::hpd;
+        let Some(gpu) = self.gpu.upgrade() else {
+            return;
+        };
+        if n >= HPD_LINES {
+            return;
+        }
+        let w = Bar5(&gpu);
+        let status = w.read32(hpd::int_status(n));
+        let control = w.read32(hpd::int_control(n));
+        w.write32(hpd::int_control(n), hpd::control_for(control, status, true));
+        self.hpd_armed.store(true, Ordering::Release);
     }
 
     /// Sets what each frame-start event does (once): `f` gets the time in
@@ -140,7 +188,7 @@ impl Irq {
         let other = self.last_other.load(Ordering::Relaxed);
         let _ = write!(
             s,
-            "{}: {} interrupts, {} entries, {} frame starts, {} fence interrupts, {} others (last client {} source {}), {} overflows",
+            "{}: {} interrupts, {} entries, {} frame starts, {} fence interrupts, {} others (last client {} source {}), {} hot-plug, {} overflows",
             if self.active() { "on" } else { "off" },
             self.interrupts.load(Ordering::Relaxed),
             self.entries.load(Ordering::Relaxed),
@@ -149,6 +197,7 @@ impl Irq {
             self.other.load(Ordering::Relaxed),
             other >> 8,
             other & 0xff,
+            self.hpd_interrupts.load(Ordering::Relaxed),
             self.overflows.load(Ordering::Relaxed),
         );
         s
@@ -249,6 +298,10 @@ impl Irq {
         if self.doorbell.swap(false, Ordering::AcqRel) {
             let _ = self.use_doorbell();
         }
+        // The hot-plug interrupt is armed again if it was on.
+        if self.hpd_armed.load(Ordering::Acquire) {
+            self.hpd_arm(0);
+        }
         Ok(())
     }
 
@@ -332,6 +385,7 @@ impl Irq {
         let rptr = self.rptr.load(Ordering::Acquire);
         let mut frame = false;
         let mut eop = false;
+        let mut hpd = 0u32;
         let d = ih::drain(
             RING_BYTES,
             rptr,
@@ -339,6 +393,15 @@ impl Irq {
             &|o| gpu.vram_read32(RING_AT + o as usize).unwrap_or(0),
             &mut |e| {
                 self.entries.fetch_add(1, Ordering::Relaxed);
+                if e.client == CLIENT_DISPLAY && e.source == amdgpu::hpd::IH_SOURCE {
+                    // The line is the first data word; context 0 is the
+                    // first connector.
+                    let line = e.data[0] as usize;
+                    if line < HPD_LINES {
+                        hpd |= 1 << line;
+                    }
+                    return;
+                }
                 match classify(e.client, e.source) {
                     Event::FrameStart => frame = true,
                     Event::Fence => {
@@ -370,6 +433,23 @@ impl Irq {
         }
         if eop && let Some(f) = self.on_eop.get() {
             f();
+        }
+        if hpd != 0 {
+            // Acknowledge each line and arm it for the opposite change; the
+            // watcher reads the sense and decides.
+            for n in 0..HPD_LINES {
+                if hpd & (1 << n) != 0 {
+                    self.hpd_interrupts.fetch_add(1, Ordering::Relaxed);
+                    let status = w.read32(amdgpu::hpd::int_status(n));
+                    let control = w.read32(amdgpu::hpd::int_control(n));
+                    w.write32(
+                        amdgpu::hpd::int_control(n),
+                        amdgpu::hpd::control_for(control, status, true),
+                    );
+                }
+            }
+            self.hpd_events.fetch_or(hpd, Ordering::AcqRel);
+            self.hpd_queue.wake_all();
         }
         if frame {
             // Acknowledge the event, keeping the interrupt enabled.
