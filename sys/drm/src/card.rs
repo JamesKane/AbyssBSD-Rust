@@ -314,6 +314,7 @@ impl Drop for Open {
         if let Some(k) = self.card.driver().kms() {
             k.release_file(self.id);
         }
+        self.card.driver().file_closed(self.id);
     }
 }
 
@@ -453,6 +454,12 @@ impl Open {
     #[must_use]
     pub fn is_master(&self) -> bool {
         self.card.is_master(self.id)
+    }
+
+    /// The file's identity.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// The buffer `handle` names in this file.

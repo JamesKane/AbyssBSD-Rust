@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! What a Direct Rendering Manager driver provides to the core.
 
-use abi::errno::Errno;
+use alloc::sync::Arc;
 
+use abi::errno::Errno;
+use sched::Sleepable;
+
+use crate::card::Open;
 use crate::gem::{Gem, Placement};
 
 /// What `DRM_IOCTL_VERSION` reports. Mesa's loader picks its driver by
@@ -40,6 +44,80 @@ impl Default for DumbLimits {
             preferred_depth: 24,
             prefer_shadow: false,
         }
+    }
+}
+
+/// What a driver's own request may use of the file that made it (the
+/// render interface of a GPU driver: its buffers, its user pointers, its
+/// waits).
+pub struct IoctlCx<'a> {
+    pub(crate) file: &'a Open,
+    pub(crate) s: &'a Sleepable,
+}
+
+impl core::fmt::Debug for IoctlCx<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "IoctlCx(file {})", self.file.id())
+    }
+}
+
+impl IoctlCx<'_> {
+    /// The file's identity (the same until it closes: what a driver keys its
+    /// per-file state by).
+    #[must_use]
+    pub fn file_id(&self) -> u64 {
+        self.file.id()
+    }
+
+    /// The requesting thread, which may sleep on a fence.
+    #[must_use]
+    pub fn sleepable(&self) -> &Sleepable {
+        self.s
+    }
+
+    /// Reads the caller's memory at `src` into `dst`.
+    ///
+    /// # Errors
+    ///
+    /// `ENXIO` before the kernel's environment is set, `EFAULT` for a bad
+    /// address.
+    pub fn copy_in(&self, dst: &mut [u8], src: u64) -> Result<(), Errno> {
+        crate::env().ok_or(Errno::ENXIO)?.user.copy_in(dst, src)
+    }
+
+    /// Writes `src` to the caller's memory at `dst`.
+    ///
+    /// # Errors
+    ///
+    /// As [`IoctlCx::copy_in`].
+    pub fn copy_out(&self, dst: u64, src: &[u8]) -> Result<(), Errno> {
+        crate::env().ok_or(Errno::ENXIO)?.user.copy_out(dst, src)
+    }
+
+    /// The buffer `handle` names in this file.
+    #[must_use]
+    pub fn gem(&self, handle: u32) -> Option<Arc<Gem>> {
+        self.file.gem(handle)
+    }
+
+    /// Makes a buffer of at least `size` bytes of system memory with the
+    /// placement `placement`, names it in this file, and returns the handle.
+    ///
+    /// # Errors
+    ///
+    /// `EINVAL` for size 0, `ENOMEM`, `ENOSPC` for too many handles.
+    pub fn new_gem(&self, size: u64, placement: Placement) -> Result<(u32, Arc<Gem>), Errno> {
+        let env = crate::env().ok_or(Errno::ENXIO)?;
+        let pages = size.div_ceil(addr::PAGE_SIZE);
+        let offset = self.file.card.alloc_offset(pages)?;
+        let gem = Gem::new(env.pages, size, offset, placement)?;
+        let handle = self.file.handles.lock().insert(Arc::clone(&gem))?;
+        Ok((handle, gem))
+    }
+
+    /// Drops `handle` from this file.
+    pub fn close_handle(&self, handle: u32) -> Option<Arc<Gem>> {
+        self.file.handles.lock().remove(handle)
     }
 }
 
@@ -118,5 +196,23 @@ pub trait DrmDriver: Send + Sync {
     fn ioctl(&self, nr: u8, arg: &mut [u8]) -> Result<usize, Errno> {
         let _ = (nr, arg);
         Err(Errno::ENOTTY)
+    }
+
+    /// Its own request `nr` with the file that made it: the one a driver with
+    /// per-file state (an address space, contexts) overrides. By default it is
+    /// [`DrmDriver::ioctl`].
+    ///
+    /// # Errors
+    ///
+    /// `ENOTTY` for a request it lacks.
+    fn ioctl_cx(&self, cx: &IoctlCx<'_>, nr: u8, arg: &mut [u8]) -> Result<usize, Errno> {
+        let _ = cx;
+        self.ioctl(nr, arg)
+    }
+
+    /// A file of this card closed (its last reference went): the driver
+    /// frees what it kept for `file`.
+    fn file_closed(&self, file: u64) {
+        let _ = file;
     }
 }

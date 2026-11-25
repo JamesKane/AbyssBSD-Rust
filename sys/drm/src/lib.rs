@@ -36,7 +36,7 @@ mod vblank;
 pub use build::{KmsBuilder, in_formats_blob};
 pub use card::{Card, Open, panic_restore, register, retire_firmware_cards};
 pub use dmabuf::DmaBuf;
-pub use driver::{DriverInfo, DrmDriver, DumbLimits};
+pub use driver::{DriverInfo, DrmDriver, DumbLimits, IoctlCx};
 
 use abi::errno::Errno;
 use sync::Once;

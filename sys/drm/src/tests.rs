@@ -2417,3 +2417,103 @@ fn a_panic_tells_every_card_to_show_the_console() {
     assert_eq!(b.0.load(core::sync::atomic::Ordering::Relaxed), 1);
     ca.unregister(&s());
 }
+
+/// A driver with a request of its own that uses the file's context: it makes
+/// a buffer, copies a word to the caller, and notes when a file closes.
+struct Render {
+    closed: Arc<Mutex<Vec<u64>>>,
+    seen_files: Arc<Mutex<Vec<u64>>>,
+}
+
+impl DrmDriver for Render {
+    fn info(&self) -> DriverInfo {
+        DriverInfo {
+            name: "render",
+            desc: "A render mock",
+            date: "20261124",
+            major: 3,
+            minor: 64,
+            patch: 0,
+        }
+    }
+    fn ioctl_cx(&self, cx: &crate::IoctlCx<'_>, nr: u8, arg: &mut [u8]) -> Result<usize, Errno> {
+        self.seen_files.lock().unwrap().push(cx.file_id());
+        // The request number counts from the first driver request.
+        match nr - abi::drm::DRM_COMMAND_BASE {
+            // Make a buffer of the size in the first eight bytes.
+            0 => {
+                let size = u64::from_le_bytes(arg[..8].try_into().unwrap());
+                let (h, g) = cx.new_gem(size, crate::gem::Placement::SYSTEM_COHERENT)?;
+                arg[8..12].copy_from_slice(&h.to_le_bytes());
+                arg[16..24].copy_from_slice(&g.size().to_le_bytes());
+                Ok(0)
+            }
+            // Close the handle in the first four bytes.
+            1 => {
+                let h = u32::from_le_bytes(arg[..4].try_into().unwrap());
+                cx.close_handle(h).ok_or(Errno::ENOENT).map(|_| 0)
+            }
+            // Report whether the handle in the first four bytes is the file's.
+            2 => {
+                let h = u32::from_le_bytes(arg[..4].try_into().unwrap());
+                arg[4] = u8::from(cx.gem(h).is_some());
+                Ok(0)
+            }
+            _ => Err(Errno::ENOTTY),
+        }
+    }
+    fn file_closed(&self, file: u64) {
+        self.closed.lock().unwrap().push(file);
+    }
+}
+
+fn render_req(nr: u8, len: u32) -> u32 {
+    0xc000_0000 | (len << 16) | 0x6400 | u32::from(abi::drm::DRM_COMMAND_BASE + nr)
+}
+
+#[test]
+fn a_drivers_own_request_gets_the_file_and_its_handles_and_hears_when_the_file_closes() {
+    setup();
+    let closed = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let c = crate::register(Arc::new(Render {
+        closed: Arc::clone(&closed),
+        seen_files: Arc::clone(&seen),
+    }))
+    .unwrap();
+    let a = open(&c);
+    let b = open(&c);
+    // Make a buffer in file a: the handle is a's.
+    let mut arg = [0u8; 24];
+    arg[..8].copy_from_slice(&5000u64.to_le_bytes());
+    call(&a, render_req(0, 24), &mut arg).unwrap();
+    let h = u32::from_le_bytes(arg[8..12].try_into().unwrap());
+    assert!(h >= 1);
+    // The size is rounded up to whole pages.
+    assert_eq!(u64::from_le_bytes(arg[16..24].try_into().unwrap()), 8192);
+    let mut q = [0u8; 8];
+    q[..4].copy_from_slice(&h.to_le_bytes());
+    call(&a, render_req(2, 8), &mut q).unwrap();
+    assert_eq!(q[4], 1);
+    // File b does not have it.
+    let mut q = [0u8; 8];
+    q[..4].copy_from_slice(&h.to_le_bytes());
+    call(&b, render_req(2, 8), &mut q).unwrap();
+    assert_eq!(q[4], 0);
+    // The requests saw two different file ids.
+    let ids = seen.lock().unwrap().clone();
+    assert!(ids.contains(&a.id()) && ids.contains(&b.id()) && a.id() != b.id());
+    // Close the handle, then the file: the driver is told.
+    let mut x = [0u8; 8];
+    x[..4].copy_from_slice(&h.to_le_bytes());
+    call(&a, render_req(1, 8), &mut x).unwrap();
+    assert_eq!(call(&a, render_req(1, 8), &mut x), Err(Errno::ENOENT));
+    let a_id = a.id();
+    drop(a);
+    assert_eq!(*closed.lock().unwrap(), std::vec![a_id]);
+    // A request the driver lacks is "no such ioctl".
+    assert_eq!(
+        call(&b, render_req(9, 8), &mut [0u8; 8]),
+        Err(Errno::ENOTTY)
+    );
+}

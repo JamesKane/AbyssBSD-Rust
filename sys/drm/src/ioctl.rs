@@ -315,7 +315,10 @@ pub(crate) fn dispatch(
     }
     let n = ioctl_nr(req);
     if (DRM_COMMAND_BASE..DRM_COMMAND_END).contains(&n) {
-        return file.card.driver().ioctl(n, arg);
+        return file
+            .card
+            .driver()
+            .ioctl_cx(&crate::driver::IoctlCx { file, s }, n, arg);
     }
     let Some(def) = TABLE.iter().find(|d| d.nr == n) else {
         if let Some(env) = crate::env() {
