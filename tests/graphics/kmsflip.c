@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /* Sets the mode, flips between two buffers a few times, optionally holds the picture
- * (second argument: seconds), turns the controller off. Usage: kmsflip [node [hold]] */
+ * (second argument: seconds), turns the controller off. The third argument picks the
+ * mode among the connector's: by its width, or by `#index` (the first by default).
+ * Usage: kmsflip [node [hold [width|#index]]] */
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <fcntl.h>
@@ -71,7 +73,15 @@ int main(int argc, char **argv) {
 	c.modes = (uintptr_t)modes; c.props = (uintptr_t)props; c.vals = (uintptr_t)vals; c.enc = (uintptr_t)cenc;
 	if (c.nmodes > 8) c.nmodes = 8;
 	if (ioctl(fd, GETCONN, &c) || c.nmodes == 0) { perror("getconn"); return 1; }
+	for (uint32_t i = 0; i < c.nmodes; i++)
+		printf("  mode %u: %ux%u, clock %u kHz, refresh %u%s\n", i, modes[i].hd, modes[i].vd,
+		    modes[i].clock, modes[i].vrefresh, (modes[i].type & 8) ? " (preferred)" : "");
 	struct mode m = modes[0];
+	if (argc > 3 && argv[3][0] == '#' && (uint32_t)atoi(argv[3] + 1) < c.nmodes)
+		m = modes[atoi(argv[3] + 1)];
+	else if (argc > 3)
+		for (uint32_t i = 0; i < c.nmodes; i++)
+			if (modes[i].hd == (uint16_t)atoi(argv[3])) { m = modes[i]; break; }
 	printf("mode %ux%u, clock %u kHz, refresh %u\n", m.hd, m.vd, m.clock, m.vrefresh);
 	uint32_t a = make(fd, m.hd, m.vd, 0), b = make(fd, m.hd, m.vd, 1);
 	struct crtc s = { .conns = (uintptr_t)conns, .nconns = 1, .id = crtcs[0], .fb = a, .valid = 1, .mode = m };

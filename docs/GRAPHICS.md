@@ -1236,3 +1236,23 @@ and from 720p60, with a normal picture each time. The audio was not part of this
   a smaller mode (the plane scans the top-left part of the 1080p surface, which is what the user saw); SCDC (the monitor is
   HDMI 1.4); modes above 148.5 MHz and interlaced modes; and the in-driver recovery of a lost signal (a reboot still is it).
 
+### 16.20 R3.4 modes, step 5: the modes on the graphics card (2026-11-24)
+
+- **What the card does now.** `drivers/amd-kms`: the connector offers seven modes (the firmware's 1080p60 first and preferred, then
+  1080p50, 720p60, 720p50, 480p, 576p50 and 640x480); the display controller accepts only those (and the right clock);
+  the plane takes a size equal to one of the modes' at the corner and copies exactly that size into the back surface, whose line
+  pitch stays the firmware's 1920 pixels, so a smaller mode scans the top-left part of the same surfaces; a mode-set commit calls
+  `Display::set_mode` after the planes' commit, and turning the controller off (or removing the card with the console to be seen)
+  sets the firmware's mode again, so the console is never shown at a smaller mode. `drivers/drmn` implements it with
+  `Amd::set_mode_for`: the code of the mode, the display firmware loaded from the requesting thread on the first change of pixel clock
+  (the ioctl sleeps for it), one mode set at a time, then the sequence of section 16.18. 11 host tests in the card (modes offered,
+  modes accepted and refused, the controller's commit setting a mode or going back, the plane's sizes).
+- **On the X870E, through `/dev/dri/card1`** (`tests/graphics/kmsflip.c`, which now picks a mode by width or `#index`): the mode set at
+  1280x720 loaded the display firmware inside the `SETCRTC` call (the call took 200 ms), set 720p60, flipped between the gradient and
+  the bars, and turning the controller off returned to 1080p60; then 1080p50, 720p50, 480p, 576p and 640x480 each in turn, every one
+  returning to 1080p60 by itself. **The user saw each mode's picture and the picture back every time.** No driver error and no
+  interrupt overflow (13,922 frame starts after the whole series).
+- **Not done:** the compositor on a non-firmware mode (Sway with `output ... mode`), the panic path in a smaller mode (the console
+  surface is shown at the mode then running, not the firmware's), a mode change on a hot-plug, the monitor's own mode list (the
+  card offers its fixed seven, not the EDID's), the audio.
+
