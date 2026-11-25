@@ -24,6 +24,8 @@
 #![forbid(unsafe_code)]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 mod amd;
 mod control;
@@ -160,10 +162,24 @@ pub(crate) fn firmware() -> Option<&'static dyn Firmware> {
 /// card off.
 static KMS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
+/// Whether the bring-up and probe triggers are published (`hw.drmn.debug`,
+/// on unless set to 0).
+static DEBUG: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// Whether the debug triggers are published.
+pub(crate) fn debug_enabled() -> bool {
+    // Relaxed: a tunable, read at attach.
+    DEBUG.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Takes the boot-time tunables (`TUNABLE_INT_FETCH`): `get` gives a
 /// name's integer value, if set. The kernel calls it before drivers
 /// attach.
 pub fn set_tunables(get: &dyn Fn(&str) -> Option<i32>) {
+    if let Some(v) = get("hw.drmn.debug") {
+        // Relaxed: a tunable, read at attach.
+        DEBUG.store(v != 0, core::sync::atomic::Ordering::Relaxed);
+    }
     if let Some(v) = get("hw.drmn.kms") {
         // Relaxed: a tunable, read at start.
         KMS.store(v != 0, core::sync::atomic::Ordering::Relaxed);

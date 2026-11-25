@@ -28,8 +28,10 @@ use crate::gcring::VramTables;
 
 /// The first video memory offset of the page-table pools: one pool of 1 MiB
 /// (256 tables) a VMID, VMIDs 1 to 7 (06 section 5).
-const POOLS_AT: u64 = 176 << 20;
+pub(crate) const POOLS_AT: u64 = 176 << 20;
 const POOL_TABLES: usize = 256;
+/// A file's pool of tables, in bytes.
+pub(crate) const POOL_BYTES: u64 = 1 << 20;
 /// The VMIDs a graphics job may use.
 const VMIDS: usize = 7;
 /// The largest buffer: 1 GiB.
@@ -60,8 +62,18 @@ const FENCE_IB_VA: u64 = VA_MAX - (1 << 20);
 const FENCE_IB_PAGES: u64 = 96;
 const FENCE_IB_SLOTS: u64 = 16;
 const FENCE_IB_SLOTS_U32: u32 = 16;
+// The fence words' buffers come first, then the fence packet pages, inside
+// the top 4 MiB the device information leaves to the kernel; a file's fence
+// pages fit in its share of video memory and in the mapped range.
+const _: () = assert!(KERNEL_VA < FENCE_IB_VA);
+const _: () = assert!(FENCE_IB_VA + (1 << 20) == VA_MAX);
+const _: () = assert!(KERNEL_VA + (4 << 20) == VA_MAX);
+const _: () = assert!(FENCE_IB_PAGES * 4096 <= FENCE_IB_FILE_BYTES);
+const _: () = assert!(FENCE_IB_PAGES * 4096 <= 1 << 20);
 /// Where they are in video memory: 512 KiB for each file, from here.
-const FENCE_IB_AT: u64 = 192 << 20;
+pub(crate) const FENCE_IB_AT: u64 = 192 << 20;
+/// What each file takes of it.
+pub(crate) const FENCE_IB_FILE_BYTES: u64 = 1 << 19;
 
 /// The engines a job runs on, each with its own ring and sequence numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +106,19 @@ impl Engine {
             Self::Dma => 1,
             Self::Compute(r) => 2 + u64::from(r),
         }
+    }
+}
+
+/// The page-table flags of a mapping request's `AMDGPU_VM_PAGE_*` bits: every
+/// buffer is system memory, snooped.
+fn gpu_flags(request: u32) -> Flags {
+    Flags {
+        readable: request & VM_READABLE != 0,
+        writeable: request & VM_WRITEABLE != 0,
+        executable: request & VM_EXECUTABLE != 0,
+        system: true,
+        snooped: true,
+        memory_type: MemoryType::Nc,
     }
 }
 
@@ -238,7 +263,7 @@ impl Render {
             let tables = VramTables::new(
                 Arc::clone(&gpu),
                 phys,
-                POOLS_AT + ((slot as u64) << 20),
+                POOLS_AT + slot as u64 * POOL_BYTES,
                 POOL_TABLES,
             );
             let space = Space::new(tables).map_err(|_| Errno::ENOMEM)?;
@@ -328,14 +353,7 @@ impl Render {
                 // The pages, populated now (before any lock is held).
                 let frames = gem.frames()?;
                 let first = usize::try_from(r.offset_in_bo / page).map_err(|_| Errno::EINVAL)?;
-                let flags = Flags {
-                    readable: r.flags & VM_READABLE != 0,
-                    writeable: r.flags & VM_WRITEABLE != 0,
-                    executable: r.flags & VM_EXECUTABLE != 0,
-                    system: true,
-                    snooped: true,
-                    memory_type: MemoryType::Nc,
-                };
+                let flags = gpu_flags(r.flags);
                 self.with_file(&amd, cx.file_id(), |fs, _| {
                     fs.space
                         .map(r.va_address, pages, flags, |n| {
@@ -495,7 +513,7 @@ impl Render {
             let vmid = u32::try_from(fs.slot).unwrap_or(0) + 1;
             let root = fs.space.tables().address(fs.space.root()).0;
             if !fs.fence_pages {
-                let at = phys + FENCE_IB_AT + ((fs.slot as u64) << 19);
+                let at = phys + FENCE_IB_AT + (fs.slot as u64 * FENCE_IB_FILE_BYTES);
                 fs.space
                     .map(
                         FENCE_IB_VA,
@@ -584,7 +602,7 @@ impl Render {
                 if let Some(va) = user_fence {
                     let mut f = Packets::new();
                     f.fence(extended(va), u64::from(seq), true, false);
-                    let off = FENCE_IB_AT + ((slot as u64) << 19) + page * 4096;
+                    let off = FENCE_IB_AT + (slot as u64 * FENCE_IB_FILE_BYTES) + page * 4096;
                     for (i, d) in f.0.iter().enumerate() {
                         gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
                     }
@@ -649,7 +667,7 @@ impl Render {
                     let mut f = amdgpu::sdma::Packets::new();
                     f.fence64(extended(va), u64::from(seq));
                     f.pad8();
-                    let off = FENCE_IB_AT + ((slot as u64) << 19) + page * 4096;
+                    let off = FENCE_IB_AT + (slot as u64 * FENCE_IB_FILE_BYTES) + page * 4096;
                     for (i, d) in f.0.iter().enumerate() {
                         gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
                     }
@@ -699,7 +717,7 @@ impl Render {
                     let mut f = Packets::new();
                     f.fence(extended(va), u64::from(seq), true, false);
                     f.mark_compute();
-                    let off = FENCE_IB_AT + ((slot as u64) << 19) + page * 4096;
+                    let off = FENCE_IB_AT + (slot as u64 * FENCE_IB_FILE_BYTES) + page * 4096;
                     for (i, d) in f.0.iter().enumerate() {
                         gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
                     }
@@ -1008,5 +1026,84 @@ impl Live for LiveState {
     fn read_register(&self, index: u32) -> Option<u32> {
         use amdgpu::regs::Window;
         Some(crate::amd::Bar5(&self.gpu).read32(usize::try_from(index).ok()? * 4))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_address_means_its_low_48_bits_when_the_top_16_repeat_bit_47() {
+        // The low half is itself.
+        assert_eq!(canonical(0x1000), Some(0x1000));
+        assert_eq!(canonical(0x7fff_ffff_ffff), Some(0x7fff_ffff_ffff));
+        // The high half, written with the top bits set, is the same address
+        // without them; the packets carry the extended form.
+        assert_eq!(canonical(0xffff_8001_0001_0000), Some(0x8001_0001_0000));
+        assert_eq!(extended(0x8001_0001_0000), 0xffff_8001_0001_0000);
+        assert_eq!(extended(0x1000), 0x1000);
+        // The two forms round-trip.
+        for va in [
+            0x10000u64,
+            0x7fff_ffff_f000,
+            0x8000_0000_0000,
+            0xffff_ffc0_0000,
+        ] {
+            assert_eq!(canonical(extended(va)), Some(va));
+        }
+        // An address whose top bits do not repeat bit 47 means nothing.
+        assert_eq!(canonical(0x0001_0000_0000_0000), None);
+        assert_eq!(canonical(0x8000_0000_0000_0000), None);
+        assert_eq!(canonical(0xffff_0000_0000_0000), None);
+    }
+
+    #[test]
+    fn the_kernels_reserved_top_of_the_address_space_is_ordered() {
+        // The reservations are checked where the constants are; what is left
+        // to see at run time is that the extended form of the reserved
+        // addresses is one the hardware accepts.
+        assert!(canonical(extended(KERNEL_VA)).is_some());
+        assert!(canonical(extended(FENCE_IB_VA)).is_some());
+        assert_eq!(FENCE_IB_PAGES, 6 * FENCE_IB_SLOTS);
+    }
+
+    #[test]
+    fn a_submission_names_its_engine_by_ip_type_and_ring() {
+        assert_eq!(Engine::new(uapi::ip::GFX, 0), Some(Engine::Gfx));
+        assert_eq!(Engine::new(uapi::ip::DMA, 0), Some(Engine::Dma));
+        assert_eq!(Engine::new(uapi::ip::COMPUTE, 3), Some(Engine::Compute(3)));
+        // Rings that are not offered, and engines that do not exist.
+        assert_eq!(Engine::new(uapi::ip::GFX, 1), None);
+        assert_eq!(Engine::new(uapi::ip::DMA, 1), None);
+        assert_eq!(Engine::new(uapi::ip::COMPUTE, 4), None);
+        assert_eq!(Engine::new(7, 0), None);
+    }
+
+    #[test]
+    fn each_engine_has_its_own_set_of_fence_pages() {
+        let sets: Vec<u64> = [
+            Engine::Gfx,
+            Engine::Dma,
+            Engine::Compute(0),
+            Engine::Compute(1),
+            Engine::Compute(2),
+            Engine::Compute(3),
+        ]
+        .iter()
+        .map(|e| e.page_set())
+        .collect();
+        assert_eq!(sets, [0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn mapping_bits_become_page_table_flags() {
+        let f = gpu_flags(VM_READABLE | VM_EXECUTABLE);
+        assert!(f.readable && !f.writeable && f.executable);
+        // Always system memory, snooped.
+        assert!(f.system && f.snooped);
+        let none = gpu_flags(0);
+        assert!(!none.readable && !none.writeable && !none.executable);
+        assert!(gpu_flags(VM_WRITEABLE).writeable);
     }
 }

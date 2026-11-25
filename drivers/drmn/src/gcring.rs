@@ -99,6 +99,10 @@ const COMPUTE_TEST: u64 = 0x1_0300;
 const COMPUTE_MQD: u64 = 0x1_1000;
 const COMPUTE_EOP: u64 = 0x1_2000;
 const COMPUTE_QUEUES: u32 = 8;
+// Each queue's block holds its descriptor and end-of-pipe buffer, after its
+// test word.
+const _: () = assert!(COMPUTE_EOP + 2048 <= COMPUTE_STRIDE);
+const _: () = assert!(COMPUTE_TEST + 4 <= COMPUTE_MQD);
 
 /// Why it stopped.
 #[derive(Debug)]
@@ -117,6 +121,15 @@ fn put(gpu: &Arc<Aperture>, at: u64, data: &[u32]) {
     for (i, d) in data.iter().enumerate() {
         gpu.vram_write32(usize::try_from(at).unwrap_or(0) + 4 * i, *d);
     }
+}
+
+/// Whether a ring of `size` dwords, its write pointer at position `at` and
+/// its read pointer at `rptr` (both below `size`), has room for `need` more
+/// dwords and `slack` spare ones: the pointers must never meet, or a full
+/// ring would look empty.
+fn has_room(at: u32, rptr: u32, size: u32, need: u32, slack: u32) -> bool {
+    let used = (at + size - rptr) % size;
+    size - used > need + slack
 }
 
 impl Ring {
@@ -162,8 +175,7 @@ impl Ring {
             mem.invalidate();
             let rptr = mem.read32(base + self.report) % size;
             let at = u32::try_from(self.wptr % u64::from(size)).unwrap_or(0);
-            let used = (at + size - rptr) % size;
-            if size - used > need + 1 {
+            if has_room(at, rptr, size, need, 1) {
                 self.submit(gpu, &mem, packets);
                 return Ok(());
             }
@@ -830,8 +842,8 @@ impl Sdma {
             mem.invalidate();
             // The engine reports its read pointer in bytes.
             let rptr = (mem.read32(self.base + SDMA_REPORT_AT) / 4) % size;
-            let used = (u32::try_from(self.position()).unwrap_or(0) + size - rptr) % size;
-            if size - used > need + 8 {
+            let at = u32::try_from(self.position()).unwrap_or(0);
+            if has_room(at, rptr, size, need, 8) {
                 self.submit(gpu, &mem, packets);
                 return Ok(());
             }
@@ -940,4 +952,80 @@ pub(crate) fn start_sdma(
     gpu.vram_write32(usize::try_from(SDMA_SEQ_AT).unwrap_or(0), 0);
     let _ = gpu.vram_read32(0);
     Ok(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_ring_has_room_until_the_pointers_would_meet() {
+        // Empty: everything but the slack is free.
+        assert!(has_room(0, 0, 1024, 1000, 1));
+        assert!(!has_room(0, 0, 1024, 1023, 1));
+        // The writer ahead of the reader.
+        assert!(has_room(100, 50, 1024, 500, 1));
+        assert!(!has_room(100, 50, 1024, 973, 1));
+        // The writer wrapped behind the reader: the room is the gap.
+        assert!(has_room(10, 500, 1024, 400, 1));
+        assert!(!has_room(10, 500, 1024, 489, 1));
+        // Room never counts what the engine has not read yet.
+        assert!(!has_room(499, 500, 1024, 1, 1));
+        // The DMA engine's slack of 8.
+        assert!(has_room(0, 0, 1024, 1015, 8));
+        assert!(!has_room(0, 0, 1024, 1016, 8));
+    }
+
+    #[test]
+    fn the_cards_video_memory_has_no_overlapping_uses() {
+        // Every region the driver puts in video memory, as (name, start,
+        // length), must be disjoint from the others and inside the 512 MiB.
+        let mib = 1u64 << 20;
+        let regions: [(&str, u64, u64); 8] = [
+            ("graphics ring block", GFX_AT, 0x1_3000),
+            ("kernel interface queue", KIQ_AT, 0x4000),
+            (
+                "compute queues",
+                COMPUTE_AT,
+                COMPUTE_STRIDE * u64::from(COMPUTE_QUEUES),
+            ),
+            ("system DMA engine", SDMA_AT, 0x1_1000),
+            (
+                "address-space tables",
+                crate::render::POOLS_AT,
+                7 * crate::render::POOL_BYTES,
+            ),
+            (
+                "fence packet pages",
+                crate::render::FENCE_IB_AT,
+                7 * crate::render::FENCE_IB_FILE_BYTES,
+            ),
+            // The address-space test's tables, and its buffer and data page.
+            (
+                "address-space test tables",
+                VM_TABLES_AT,
+                VM_TABLES as u64 * 4096,
+            ),
+            ("address-space test buffers", VM_IB_AT, 0x2000),
+        ];
+        for (i, a) in regions.iter().enumerate() {
+            assert!(a.1 + a.2 <= 512 * mib, "{} leaves video memory", a.0);
+            for b in &regions[i + 1..] {
+                if a.2 == 0 || b.2 == 0 {
+                    continue;
+                }
+                let apart = a.1 + a.2 <= b.1 || b.1 + b.2 <= a.1;
+                assert!(apart, "{} overlaps {}", a.0, b.0);
+            }
+        }
+    }
+
+    #[test]
+    fn the_compute_queues_memory_has_the_documented_alignment() {
+        // The queue descriptor and the end-of-pipe buffer are 256-byte
+        // aligned (06 section 8), and each queue's block holds them.
+        assert_eq!(COMPUTE_MQD % 256, 0);
+        assert_eq!(COMPUTE_EOP % 256, 0);
+        assert_eq!(COMPUTE_AT % 256, 0);
+    }
 }

@@ -45,6 +45,27 @@ const SOURCE_EOP: u8 = 181;
 const CLIENT_SDMA0: u8 = amdgpu::sdma::IH_CLIENT;
 const SOURCE_SDMA_TRAP: u8 = amdgpu::sdma::IH_SOURCE_TRAP;
 
+/// What an interrupt entry announces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Event {
+    /// The first timing generator began a frame.
+    FrameStart,
+    /// A job's fence: the graphics command processor's end-of-pipe event or
+    /// the system DMA engine's trap.
+    Fence,
+    /// Anything else.
+    Other,
+}
+
+/// Which event the entry from `client` with `source` is.
+fn classify(client: u8, source: u8) -> Event {
+    match (client, source) {
+        (CLIENT_DISPLAY, SOURCE_FRAME_START_0) => Event::FrameStart,
+        (CLIENT_GRBM_CP, SOURCE_EOP) | (CLIENT_SDMA0, SOURCE_SDMA_TRAP) => Event::Fence,
+        _ => Event::Other,
+    }
+}
+
 /// The interrupts of one GPU, and what they were.
 pub(crate) struct Irq {
     gpu: Weak<Aperture>,
@@ -275,19 +296,19 @@ impl Irq {
             &|o| gpu.vram_read32(RING_AT + o as usize).unwrap_or(0),
             &mut |e| {
                 self.entries.fetch_add(1, Ordering::Relaxed);
-                if e.client == CLIENT_DISPLAY && e.source == SOURCE_FRAME_START_0 {
-                    frame = true;
-                } else if (e.client == CLIENT_GRBM_CP && e.source == SOURCE_EOP)
-                    || (e.client == CLIENT_SDMA0 && e.source == SOURCE_SDMA_TRAP)
-                {
-                    eop = true;
-                    self.eops.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    self.other.fetch_add(1, Ordering::Relaxed);
-                    self.last_other.store(
-                        u32::from(e.client) << 8 | u32::from(e.source),
-                        Ordering::Relaxed,
-                    );
+                match classify(e.client, e.source) {
+                    Event::FrameStart => frame = true,
+                    Event::Fence => {
+                        eop = true;
+                        self.eops.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Event::Other => {
+                        self.other.fetch_add(1, Ordering::Relaxed);
+                        self.last_other.store(
+                            u32::from(e.client) << 8 | u32::from(e.source),
+                            Ordering::Relaxed,
+                        );
+                    }
                 }
             },
         );
@@ -328,5 +349,25 @@ struct Sink(Arc<Irq>);
 impl InterruptSink for Sink {
     fn interrupt(&self, _: &IrqCx) -> Filter {
         self.0.handle()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entries_are_told_apart_by_client_and_source() {
+        assert_eq!(classify(4, 0x3c), Event::FrameStart);
+        // The graphics command processor's end-of-pipe event and the DMA
+        // engine's trap are both a finished job.
+        assert_eq!(classify(0x14, 181), Event::Fence);
+        assert_eq!(classify(0x08, 224), Event::Fence);
+        // The same source from another client, or another source from a
+        // known client, is neither.
+        assert_eq!(classify(0x14, 224), Event::Other);
+        assert_eq!(classify(0x08, 181), Event::Other);
+        assert_eq!(classify(4, 0x3d), Event::Other);
+        assert_eq!(classify(0, 0), Event::Other);
     }
 }
