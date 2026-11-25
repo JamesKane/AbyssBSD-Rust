@@ -27,7 +27,7 @@ extern crate alloc;
 
 pub mod driver;
 pub mod generated;
-pub mod health;
+pub use nicwatch as health;
 pub mod hw;
 pub mod program;
 pub mod regs;

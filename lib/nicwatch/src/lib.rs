@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause
-//! What the once-a-second tick (`rge_tick`) decides: the transmit
+//! What a network driver's once-a-second tick decides (`rge_tick`, `igc_if_timer`): the transmit
 //! watchdog's countdown (`sc_watchdog`), a receive ring that has frames
 //! waiting with nothing taking them, and a controller that no longer
 //! answers.
@@ -17,7 +17,10 @@
 //!   link down, a surprise removal): the registers never read so.
 //!
 //! Behavior reference: sys/dev/rge/if_rge.c (`rge_tick`, `rge_txeof`,
-//! `rge_tx_task`).
+//! `rge_tx_task`). Shared by `rge` and `igc`.
+
+#![no_std]
+#![forbid(unsafe_code)]
 
 /// Ticks (seconds) without a transmit completion before the watchdog
 /// fires: `rge_txeof`'s and `rge_tx_task`'s `sc_watchdog = 5`.

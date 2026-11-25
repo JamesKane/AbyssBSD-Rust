@@ -13,6 +13,7 @@ hal = { path = "../../arch/hal" }
 irq = { path = "../../sys/irq" }
 mbuf = { path = "../../sys/mbuf" }
 net = { path = "../../sys/net" }
+nicwatch = { path = "../../lib/nicwatch" }
 pci = { path = "../../sys/pci" }
 regs = { path = "../../lib/regs" }
 sched = { path = "../../sys/sched" }

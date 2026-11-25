@@ -1,0 +1,23 @@
+[package]
+name = "igc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+bus = { path = "../../sys/bus" }
+devtree = { path = "../../lib/devtree" }
+irq = { path = "../../sys/irq" }
+mbuf = { path = "../../sys/mbuf" }
+net = { path = "../../sys/net" }
+nicwatch = { path = "../../lib/nicwatch" }
+pci = { path = "../../sys/pci" }
+regs = { path = "../../lib/regs" }
+sched = { path = "../../sys/sched" }
+sync = { path = "../../sys/sync" }
+vm = { path = "../../sys/vm" }
+
+[lints]
+workspace = true

@@ -46,6 +46,7 @@ macro_rules! drivers {
             virtio_net::DRIVER,
             nvme::DRIVER,
             rge::DRIVER,
+            igc::DRIVER,
             ahci::AHCI,
             ahci::AHCICH,
             vgapci::DRIVER,

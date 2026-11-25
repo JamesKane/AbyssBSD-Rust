@@ -346,6 +346,7 @@ dependencies = [
  "hms",
  "hsctrl",
  "ichwd",
+ "igc",
  "iicbus",
  "isa",
  "linlondp",
@@ -635,6 +636,24 @@ name = "idregs"
 version = "0.0.0"
 
 [[package]]
+name = "igc"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "bus",
+ "devtree",
+ "irq",
+ "mbuf",
+ "net",
+ "nicwatch",
+ "pci",
+ "regs",
+ "sched",
+ "sync",
+ "vm",
+]
+
+[[package]]
 name = "iicbus"
 version = "0.0.0"
 dependencies = [
@@ -906,6 +925,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nicwatch"
+version = "0.0.0"
+
+[[package]]
 name = "nvgpu"
 version = "0.0.0"
 dependencies = [
@@ -977,6 +1000,7 @@ dependencies = [
  "irq",
  "mbuf",
  "net",
+ "nicwatch",
  "pci",
  "regs",
  "sched",
