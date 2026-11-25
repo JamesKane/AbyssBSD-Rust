@@ -1,0 +1,4 @@
+PC [('ffffffff9eef8198', 35), ('ffffffff9eef8278', 8), ('ffffffff9eef6a18', 4), ('ffffffff9eef6a40', 4), ('ffffffff9eef819c', 4), ('ffffffff9eef62dc', 3), ('ffffffff9e801828', 2)]
+LR [('ffffffff9eee8168', 39), ('ffffffff9ebdb3d4', 5), ('ffffffff9ea5d3c8', 4), ('ffffffff9ea5d468', 4), ('ffffffff9eb33cb0', 3), ('ffffffff9ea5d378', 3), ('ffffffff9eee7664', 2)]
+PSTATE [('0000000040402305', 37), ('00000000804023c5', 15), ('00000000604023c5', 4), ('00000000404023c5', 2), ('00000000004023c5', 2)]
+SP [('ffffc00011001f70', 39), ('ffffc00011001c40', 11), ('ffffc00011001bb0', 8), ('ffffc00011001be0', 2)]

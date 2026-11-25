@@ -1,0 +1,751 @@
+UEFI firmware (version edk2-20260812-10.fc44 built at 00:00:00 on Oct 26 2026)
+PeiDelayedDispatchOnEndOfPei Count of dispatch cycles is 0
+ArmTrngLib could not be correctly initialized.
+Error: Image at 00045D4B000 start failed: Aborted
+Tpm2SubmitCommand - Tcg2 - Not Found
+Tpm2GetCapabilityPcrs fail!
+Tpm2SubmitCommand - Tcg2 - Not Found
+Image type X64 can't be loaded on AARCH64 UEFI system.
+UsbCreateDesc: descriptor cannot be found, Header(T/L) = 36/4!
+UsbParseInterfaceDesc: failed to create interface descriptor
+UsbParseConfigDesc: warning: failed to get interface setting, stop parsing now.
+BdsDxe: loading Boot0002 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x1,0x0)
+ConvertPages: failed to find range 140000000 - 140033FFF
+BdsDxe: starting Boot0002 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x1,0x0)
+
+AbyssBSD loader 0.0.0 (arm64), UEFI 2.7 firmware: EDK II rev 0x10000
+ABYSS-TEST-BEGIN (4 tests)
+ktest: loader_efi::tests::crc32_matches_host ... ok
+ktest: loader_efi::tests::heap_allocates ... ok
+ktest: loader_efi::tests::fstab_names_the_root ... ok
+ktest: loader_efi::tests::firmware_publishes_acpi ... ok
+ktest: 4 passed
+loader: loaded from partition CF6AB311-595A-8466-A30B-BDFF753BBA88
+loader: memory disk 55200 KiB at 0x40a18000
+loader: log ring at 0x5d400000, boot 1: no previous log
+loader: kernel 14404 KiB at phys 0x44600000 virt 0xffffffff9e800000 (slide 0x1e800000, entropy UefiRng)
+loader: serial Some(Pl011 { phys: 150994944 })
+loader: framebuffer 800x600 at 0x46200000
+loader: SMBIOS 3.0, 24 variables
+loader: exiting boot services
+
+AbyssBSD 0.0.0 (arm64) kernel at 0xffffffff9e800000, slide 0x1e800000
+entered at EL2; EL2 stub installed, running at EL1
+command line: "abyss.shell=1 abyss.verifier=1 abyss.qemu_exit=1 abyss.test.power_button=1 abyss.bus.serial=1 hw.pci.enable_msix=0 abyss.test.poweroff=1"
+md: 55200 KiB, 213 files
+memory: 1021 MiB RAM, 730 MiB free, 28 regions
+page tables: 112 KiB in 28 frames
+phys: 726 MiB in 2 segments, 726 MiB free, page array 4084 KiB
+kernel page tables live (W^X, DMAP, no identity map)
+time: counter at 1000.000 MHz
+irq: GICv3 distributor (IIDR 0x0000043b), 288 interrupt lines, timer PPI 27
+fpu: SVE, 2048-bit vectors, 8768 byte save areas
+sched: boot CPU running threads
+time: timehands count at 1000 MHz (shift 0), wound up every 1000 ms
+cpu: cpu0: QEMU emulated core (implementer 0x00, part 0x051, r0p0)
+random: unblocking device.
+smp: 4 CPUs online
+topology: 4 CPUs: 1 package(s), 1 cluster(s), 4 core(s), 0 SMT sibling(s)
+topology:   4 x QEMU emulated core (capacity 1024)
+pci: segment 0 buses 0-255 ECAM at 0x4010000000
+pci: message-signalled interrupts off (hw.pci.enable_msi[x]=0)
+VT(efifb): resolution 800x600
+efifb: framebuffer at 0x46200000, 0x1d4c00 bytes
+kbd0 at kbdmux0
+efirtc0: <EFI Realtime Clock> on nexus0
+efirtc0: registered as a time-of-day clock, resolution 1.000000s
+acpi: 1 definition block(s), 275 namespace nodes
+acpi0: <BOCHS BXPC> on nexus0
+cpu0: <ACPI CPU> on acpi0
+uart0: <PrimeCell UART (PL011)> on acpi0
+pcib0: <Generic PCI host controller> on acpi0
+pci0: <ACPI PCI bus> on pcib0
+virtio_pci0: <VirtIO PCI (modern) Block adapter> on pci0
+vtblk0: <VirtIO Block Adapter> on virtio_pci0
+vtbd0: 384MB (786432 512 byte sectors)
+virtio_pci1: <VirtIO PCI (modern) Block adapter> on pci0
+vtblk1: <VirtIO Block Adapter> on virtio_pci1
+vtbd1: 16MB (32768 512 byte sectors)
+pcib1: <PCI-PCI bridge> on pci0
+pci1: <PCI bus> on pcib1
+virtio_pci2: <VirtIO PCI (modern) Entropy adapter> on pci1
+vtrnd0: <VirtIO Entropy Adapter> on virtio_pci2
+nvme0: <Generic NVMe Device> on pci0
+nvme0: QEMU NVMe Ctrl (serial abyss0, firmware 10.2.2, NVMe 1.4), 1 I/O queue(s) on INTx
+ahci0: <Intel ICH9 AHCI SATA controller> on pci0
+ahcich0: <AHCI channel> on ahci0
+ada0: <QEMU HARDDISK> NCQ, depth 32
+ada0: 16MB (32768 512 byte sectors)
+ahcich1: <AHCI channel> on ahci0
+ada1: <QEMU HARDDISK> NCQ, depth 32
+ada1: 86MB (177088 512 byte sectors)
+ahcich2: <AHCI channel> on ahci0
+ahcich3: <AHCI channel> on ahci0
+ahcich4: <AHCI channel> on ahci0
+ahcich5: <AHCI channel> on ahci0
+virtio_pci3: <VirtIO PCI (modern) Block adapter> on pci0
+vtblk2: <VirtIO Block Adapter> on virtio_pci3
+vtbd2: 86MB (177088 512 byte sectors)
+nvme1: <Generic NVMe Device> on pci0
+nvme1: QEMU NVMe Ctrl (serial abyss1, firmware 10.2.2, NVMe 1.4), 1 I/O queue(s) on INTx
+virtio_pci4: <VirtIO PCI (modern) Block adapter> on pci0
+vtblk3: <VirtIO Block Adapter> on virtio_pci4
+vtbd3: 32MB (65536 512 byte sectors)
+virtio_pci5: <VirtIO PCI (modern) Block adapter> on pci0
+vtblk4: <VirtIO Block Adapter> on virtio_pci5
+vtbd4: 40MB (81920 512 byte sectors)
+xhci0: <XHCI (generic) USB 3.0 controller> on pci0
+xhci0: 32 bytes context size, 64-bit DMA
+xhci0: xECP capabilities <PROTO,PROTO>
+usbus0 on xhci0
+usbus0: 5.0Gbps Super Speed USB v3.0
+virtio_pci6: <VirtIO PCI (modern) Input adapter> on pci0
+vtinput0: <VirtIO Input Adapter> on virtio_pci6
+kbd1 at vtinput0
+virtio_pci7: <VirtIO PCI (modern) Input adapter> on pci0
+vtinput1: <VirtIO Input Adapter> on virtio_pci7
+virtio_pci8: <VirtIO PCI (modern) Network adapter> on pci0
+vtnet0: <VirtIO Networking Adapter> on virtio_pci8
+vtnet0: Ethernet address: 52:54:00:12:34:56
+acpi_ged0: <Generic Event Device> on acpi0
+acpi_button0: <Power Button> on acpi0
+nda0 at nvme0 bus 0 scbus6 target 0 lun 1
+nda0: <QEMU NVMe Ctrl 10.2.2 abyss0>
+nda0: Serial Number abyss0
+nda0: nvme version 1.4
+nda0: 16MB (32768 512 byte sectors)
+ugen0.1: <(0x1b36) XHCI root HUB> at usbus0
+uhub0 on usbus0
+uhub0: <(0x1b36) XHCI root HUB, class 9/0, rev 3.00/1.00, addr 1> on usbus0
+uhub0: 17 ports with 17 removable, self powered
+nda1 at nvme1 bus 0 scbus7 target 0 lun 1
+nda1: <QEMU NVMe Ctrl 10.2.2 abyss1>
+nda1: Serial Number abyss1
+nda1: nvme version 1.4
+nda1: 86MB (177088 512 byte sectors)
+clock: 2026-11-25 21:55:34 UTC from efirtc0
+bus: device manager up, 91 driver(s), 1 attach worker(s), attached in 5536.566 ms, verifier on
+ugen0.2: <QEMU QEMU USB HARDDRIVE> at usbus0
+Dual Console: Serial Primary, Video Secondary
+umass0 on uhub0
+umass0: <QEMU QEMU USB HARDDRIVE, class 0/0, rev 3.00/0.00, addr 1> on usbus0
+umass0:  SCSI over Bulk-Only; quirks = 0x0
+umass0:8:0: Attached to scbus8
+da0 at umass-sim0 bus 0 scbus8 target 0 lun 0
+da0: <QEMU QEMU HARDDISK 2.5+> Fixed Direct Access SPC-3 SCSI device
+da0: Serial Number abyssbbb
+da0: 400.000MB/s transfers
+da0: 64MB (131072 512 byte sectors)
+da0: quirks=0x2<NO_6_BYTE>
+ugen0.3: <QEMU USB Attached SCSI HBA> at usbus0
+fs: /dev/vtbd0p1 on /boot/efi
+umass1 on uhub0
+umass1: <QEMU USB Attached SCSI HBA, class 0/0, rev 3.00/0.00, addr 2> on usbus0
+umass1:  SCSI over UAS; quirks = 0x0
+umass1:9:1: Attached to scbus9
+da1 at umass-sim1 bus 1 scbus9 target 0 lun 0
+da1: <QEMU QEMU HARDDISK 2.5+> Fixed Direct Access SPC-3 SCSI device
+da1: Serial Number abyssuas
+da1: 400.000MB/s transfers
+da1: 32MB (65536 512 byte sectors)
+da1: quirks=0x2<NO_6_BYTE>
+da2 at umass-sim1 bus 1 scbus9 target 0 lun 1
+da2: <QEMU QEMU HARDDISK 2.5+> Fixed Direct Access SPC-3 SCSI device
+da2: Serial Number abyssuaslun1
+da2: 400.000MB/s transfers
+da2: 32MB (65536 512 byte sectors)
+da2: quirks=0x2<NO_6_BYTE>
+ugen0.4: <QEMU QEMU USB Keyboard> at usbus0
+usbhid0 on uhub0
+usbhid0: <QEMU QEMU USB Keyboard, class 0/0, rev 2.00/0.00, addr 3> on usbus0
+hidbus0: <HID bus> on usbhid0
+hkbd0: <QEMU QEMU USB Keyboard> on hidbus0
+kbd2 at hkbd0
+ugen0.5: <QEMU QEMU USB Tablet> at usbus0
+usbhid1 on uhub0
+usbhid1: <QEMU QEMU USB Tablet, class 0/0, rev 2.00/0.00, addr 4> on usbus0
+hidbus1: <HID bus> on usbhid1
+hms0: <QEMU QEMU USB Tablet> on hidbus1
+hms0: 5 buttons and [XYW] coordinates ID=0
+ugen0.6: <QEMU QEMU USB Hub> at usbus0
+uhub1 on uhub0
+uhub1: <QEMU QEMU USB Hub, class 9/0, rev 1.10/1.01, addr 5> on usbus0
+uhub1: 8 ports with 8 removable, self powered
+ugen0.7: <QEMU QEMU USB Mouse> at usbus0
+usbhid2 on uhub1
+usbhid2: <QEMU QEMU USB Mouse, class 0/0, rev 2.00/0.00, addr 6> on usbus0
+hidbus2: <HID bus> on usbhid2
+hms1: <QEMU QEMU USB Mouse> on hidbus2
+hms1: 5 buttons and [XYW] coordinates ID=0
+ugen0.8: <QEMU USB Attached SCSI HBA> at usbus0
+umass2 on uhub0
+umass2: <QEMU USB Attached SCSI HBA, class 0/0, rev 2.00/0.00, addr 7> on usbus0
+umass2:  SCSI over UAS; quirks = 0x0
+umass2:10:2: Attached to scbus10
+da3 at umass-sim2 bus 2 scbus10 target 0 lun 0
+da3: <QEMU QEMU HARDDISK 2.5+> Fixed Direct Access SPC-3 SCSI device
+da3: Serial Number abyssuas2
+da3: 40.000MB/s transfers
+da3: 32MB (65536 512 byte sectors)
+da3: quirks=0x2<NO_6_BYTE>
+uhub_explore: illegal enable change, port 1
+ABYSS-TEST-BEGIN (130 tests)
+ktest: kernel::klog::ktests::klog_reads_the_kernel_messages ... klog test: a printf line
+ok (207 ms)
+ktest: kernel::fs::devfs::ktests::devfs_rules_hide_and_show_nodes_per_mount ... ok (38 ms)
+ktest: kernel::fs::devfs::ktests::devfs_ruleset_includes_are_checked_and_bounded ... ok (22 ms)
+ktest: kernel::fs::devfs::ktests::devfs_attributes_are_each_mounts_own ... ok (23 ms)
+ktest: kernel::kenv::ktests::kenv_has_the_loaders_smbios_variables ... ok (1 ms)
+ktest: kernel::memdev::ktests::dev_mem_reaches_only_memory ... ok (0 ms)
+ktest: kernel::pciio::ktests::dev_pci_lists_and_reads_functions ... ok (2 ms)
+ktest: kernel::devctl::ktests::devctl_queues_events_for_one_reader ... ok (22 ms)
+ktest: kernel::devctl::ktests::devctl2_detaches_and_attaches_a_device ... virtio_pci2: <VirtIO PCI (modern) Entropy adapter> on pci1
+vtrnd0: <VirtIO Entropy Adapter> on virtio_pci2
+virtio_pci2: <VirtIO PCI (modern) Entropy adapter> on pci1
+vtrnd0: <VirtIO Entropy Adapter> on virtio_pci2
+ok (11 ms)
+ktest: kernel::tests::memory_map_is_sane ... ok (0 ms)
+ktest: kernel::tests::recoverable_page_fault_is_reported ... ok (0 ms)
+ktest: kernel::tests::nvme_timeout_polls_a_missed_interrupt ... nvme0: System interrupt issues?
+nvme0: missed interrupts made up by the watchdog in 3002 ms
+ok (3004 ms)
+ktest: kernel::tests::nvme_timeout_resets_and_resends ... nvme0: Resetting controller due to a timeout.
+nvme0: event="start"
+nvme0: event="success"
+nvme0: aborting outstanding i/o
+nvme0: done aborting outstanding i/o
+nvme0: reset after a lost completion, I/O done in 1506 ms
+ok (1523 ms)
+ktest: kernel::tests::ahci_writes_and_reads_back ... ada0: written and read back in 19 ms (ahci0 <Intel ICH9 AHCI SATA controller>, 6 channel(s), 6 attached)
+ok (20 ms)
+ktest: kernel::tests::hda_controller_codec_and_function_group ... ok (0 ms)
+ktest: kernel::tests::random_is_seeded_and_fed ... random: generation 9 (from 8)
+ok (465 ms)
+ktest: kernel::tests::real_time_clocks_agree ... efirtc0: Ok(DateTime { year: 2026, month: 11, day: 25, hour: 21, minute: 55, second: 40, nanosecond: 0 })
+ok (2 ms)
+ktest: kernel::tests::detach_stress_vtblk ... virtio_pci1: <VirtIO PCI (modern) Block adapter> on pci0
+vtblk1: <VirtIO Block Adapter> on virtio_pci1
+vtbd1: 16MB (32768 512 byte sectors)
+virtio_pci1: <VirtIO PCI (modern) Block adapter> on pci0
+vtblk1: <VirtIO Block Adapter> on virtio_pci1
+vtbd1: 16MB (32768 512 byte sectors)
+virtio_pci1: <VirtIO PCI (modern) Block adapter> on pci0
+vtblk1: <VirtIO Block Adapter> on virtio_pci1
+vtbd1: 16MB (32768 512 byte sectors)
+virtio_pci1: <VirtIO PCI (modern) Block adapter> on pci0
+vtblk1: <VirtIO Block Adapter> on virtio_pci1
+vtbd1: 16MB (32768 512 byte sectors)
+virtio_pci1: <VirtIO PCI (modern) Block adapter> on pci0
+vtblk1: <VirtIO Block Adapter> on virtio_pci1
+vtbd1: 16MB (32768 512 byte sectors)
+virtio_pci1: <VirtIO PCI (modern) Block adapter> on pci0
+vtblk1: <VirtIO Block Adapter> on virtio_pci1
+vtbd1: 16MB (32768 512 byte sectors)
+virtio_pci1: <VirtIO PCI (modern) Block adapter> on pci0
+vtblk1: <VirtIO Block Adapter> on virtio_pci1
+vtbd1: 16MB (32768 512 byte sectors)
+virtio_pci1: <VirtIO PCI (modern) Block adapter> on pci0
+vtblk1: <VirtIO Block Adapter> on virtio_pci1
+vtbd1: 16MB (32768 512 byte sectors)
+virtio_pci1: 8 detach cycles in 268 ms under I/O (6257 ops, 1 refused while gone)
+ok (269 ms)
+ktest: kernel::tests::detach_stress_nvme ... nvme0: <Generic NVMe Device> on pci0
+nvme0: QEMU NVMe Ctrl (serial abyss0, firmware 10.2.2, NVMe 1.4), 1 I/O queue(s) on INTx
+nda0 at nvme0 bus 0 scbus6 target 0 lun 1
+nda0: <QEMU NVMe Ctrl 10.2.2 abyss0>
+nda0: Serial Number abyss0
+nda0: nvme version 1.4
+nda0: 16MB (32768 512 byte sectors)
+nvme0: <Generic NVMe Device> on pci0
+nvme0: QEMU NVMe Ctrl (serial abyss0, firmware 10.2.2, NVMe 1.4), 1 I/O queue(s) on INTx
+nda0 at nvme0 bus 0 scbus6 target 0 lun 1
+nda0: <QEMU NVMe Ctrl 10.2.2 abyss0>
+nda0: Serial Number abyss0
+nda0: nvme version 1.4
+nda0: 16MB (32768 512 byte sectors)
+nvme0: <Generic NVMe Device> on pci0
+nvme0: QEMU NVMe Ctrl (serial abyss0, firmware 10.2.2, NVMe 1.4), 1 I/O queue(s) on INTx
+nda0 at nvme0 bus 0 scbus6 target 0 lun 1
+nda0: <QEMU NVMe Ctrl 10.2.2 abyss0>
+nda0: Serial Number abyss0
+nda0: nvme version 1.4
+nda0: 16MB (32768 512 byte sectors)
+nvme0: <Generic NVMe Device> on pci0
+nvme0: QEMU NVMe Ctrl (serial abyss0, firmware 10.2.2, NVMe 1.4), 1 I/O queue(s) on INTx
+nda0 at nvme0 bus 0 scbus6 target 0 lun 1
+nda0: <QEMU NVMe Ctrl 10.2.2 abyss0>
+nda0: Serial Number abyss0
+nda0: nvme version 1.4
+nda0: 16MB (32768 512 byte sectors)
+nvme0: <Generic NVMe Device> on pci0
+nvme0: QEMU NVMe Ctrl (serial abyss0, firmware 10.2.2, NVMe 1.4), 1 I/O queue(s) on INTx
+nda0 at nvme0 bus 0 scbus6 target 0 lun 1
+nda0: <QEMU NVMe Ctrl 10.2.2 abyss0>
+nda0: Serial Number abyss0
+nda0: nvme version 1.4
+nda0: 16MB (32768 512 byte sectors)
+nvme0: <Generic NVMe Device> on pci0
+nvme0: QEMU NVMe Ctrl (serial abyss0, firmware 10.2.2, NVMe 1.4), 1 I/O queue(s) on INTx
+nda0 at nvme0 bus 0 scbus6 target 0 lun 1
+nda0: <QEMU NVMe Ctrl 10.2.2 abyss0>
+nda0: Serial Number abyss0
+nda0: nvme version 1.4
+nda0: 16MB (32768 512 byte sectors)
+nvme0: <Generic NVMe Device> on pci0
+nvme0: QEMU NVMe Ctrl (serial abyss0, firmware 10.2.2, NVMe 1.4), 1 I/O queue(s) on INTx
+nda0 at nvme0 bus 0 scbus6 target 0 lun 1
+nda0: <QEMU NVMe Ctrl 10.2.2 abyss0>
+nda0: Serial Number abyss0
+nda0: nvme version 1.4
+nda0: 16MB (32768 512 byte sectors)
+nvme0: <Generic NVMe Device> on pci0
+nvme0: QEMU NVMe Ctrl (serial abyss0, firmware 10.2.2, NVMe 1.4), 1 I/O queue(s) on INTx
+nda0 at nvme0 bus 0 scbus6 target 0 lun 1
+nda0: <QEMU NVMe Ctrl 10.2.2 abyss0>
+nda0: Serial Number abyss0
+nda0: nvme version 1.4
+nda0: 16MB (32768 512 byte sectors)
+nvme0: 8 detach cycles in 382 ms under I/O (7053 ops, 5 refused while gone)
+ok (383 ms)
+ktest: kernel::tests::set_id_calls_follow_freebsd ... ok (2 ms)
+ktest: kernel::tests::geom_shows_disks_and_retastes_written_tables ... ok (21 ms)
+ktest: kernel::tests::kernel_is_mapped_w_xor_x ... ok (0 ms)
+ktest: kernel::tests::inet_loopback_udp_tcp_sysctl_netlink ... ok (31 ms)
+ktest: kernel::tests::rescue_ifconfig_and_route_on_lo0 ... ok (143 ms)
+ktest: kernel::tests::crypto_matches_the_published_vectors ... ok (2 ms)
+ktest: kernel::tests::crypto_instructions_agree_with_software ... ok (4 ms)
+ktest: kernel::tests::crypto_keeps_a_threads_vector_registers ... ok (1 ms)
+ktest: kernel::tests::hcons_and_hsctrl_on_a_media_key_interface ... hidbus3: <HID bus> on root0
+hcons0: <vendor 0x0c45 product 0x0133 Consumer Control> on hidbus3
+hsctrl0: <vendor 0x0c45 product 0x0133 System Control> on hidbus3
+ok (32 ms)
+ktest: kernel::tests::kernel_image_is_mapped_with_2m_leaves ... ok (0 ms)
+ktest: kernel::tests::kernel_half_is_closed_to_el0_with_e0pd ... ok (0 ms)
+ktest: kernel::tests::identity_map_is_gone ... ok (1 ms)
+ktest: kernel::tests::dmap_maps_ram ... ok (0 ms)
+ktest: kernel::tests::symbols_resolve ... ok (6 ms)
+ktest: kernel::tests::log_ring_is_live ... ok (0 ms)
+ktest: kernel::tests::consoles_present ... ok (0 ms)
+ktest: kernel::tests::buddy_allocator_round_trips ... ok (0 ms)
+ktest: kernel::tests::dma_direct_coherent_and_bounced ... ktest: no RAM below 0x40000000; bounce path not exercised
+ok (1 ms)
+ktest: kernel::tests::iicbus_and_iic_on_a_controller ... iictestbus0: <I2C test firmware bus> on root0
+iictestctl0: <Test I2C controller> on iictestbus0
+iicbus0: <Philips I2C bus> on iictestctl0
+iic0: <I2C generic I/O> on iicbus0
+iictaker0: <I2C takeover test bus> on iictestctl0
+iictestdev0: <Test I2C device> at addr 0x50 on iictaker0
+iicstays0: <Test device attached on the firmware bus> on iictestbus0
+iic: /dev/iic0, and i2c(8) on it, as expected
+ok (43 ms)
+ktest: kernel::tests::gpio_and_i2c_consumers_reach_their_controller ... pinbus0: <GPIO and I2C test bus> on root0
+pinctl0: <Test GPIO and I2C controller> on pinbus0
+pinuser0: <GPIO and I2C test device> on pinbus0
+ok (6 ms)
+ktest: kernel::tests::companion_dependencies_hold_the_node ... compbus0: <Companion test bus> on root0
+compdev0: <Companion supplier> on compbus0
+compfn0: <Companion PCI function> on compbus0
+compfn1: <Companion PCI function> on compbus0
+ok (25 ms)
+ktest: kernel::tests::shared_ranges_are_granted_knowingly ... sharebus0: <Shared-range test bus> on root0
+sharedev0: <Shared-range test device> on sharebus0
+sharedev1: <Shared-range test device> on sharebus0
+sharedev2: <Shared-range test device> on sharebus0
+sharedev3: attach failed: Resource(Claimed)
+ok (5 ms)
+ktest: kernel::tests::providers_serve_lines_by_name ... linebus0: <Provider test bus> on root0
+lineprov0: <Test clock and reset provider> on linebus0
+lineuser0: <Test clock and reset consumer> on linebus0
+ok (5 ms)
+ktest: kernel::tests::forward_dependencies_and_cycles ... depbus0: <Dependency test bus> on root0
+bus: dependency cycle: ordered2 no longer waits for ordered3
+broken0: attach failed: Device("broken on purpose")
+ordered1: <Ordered test device> on depbus0
+ordered0: <Ordered test device> on depbus0
+ordered2: <Ordered test device> on depbus0
+ordered3: <Ordered test device> on depbus0
+ordered4: <Ordered test device> on depbus0
+ordered5: <Ordered test device> on depbus0
+slow0: <Slow> on depbus0
+ordered6: <Ordered test device> on depbus0
+ok (27 ms)
+ktest: kernel::tests::device_manager_lifecycle ... testbus0: <Test bus> on root0
+broken0: attach failed: Device("broken on purpose")
+testdev0: <Test device> on testbus0
+testdev1: <Test device> on testbus0
+fallback0: <Fallback> on testbus0
+slow0: <Slow> on testbus0
+needy0: <Needy> on testbus0
+testbus0: <Test bus> on root0
+broken0: attach failed: Device("broken on purpose")
+testdev0: <Test device> on testbus0
+testdev1: <Test device> on testbus0
+fallback0: <Fallback> on testbus0
+slow0: <Slow> on testbus0
+needy0: <Needy> on testbus0
+ok (51 ms)
+ktest: kernel::tests::rman_as_devinfo_reads_it ... devinfo -u: I/O memory addresses:
+devinfo -u:     0x0-0x8ffffff ----
+devinfo -u:     0x9000000-0x9000fff (uart0)
+devinfo -u:     0x9001000-0x901ffff ----
+devinfo -u:     0x9020000-0x9020017 (unknown)
+devinfo -u:     0x9020018-0x9ffffff ----
+devinfo -u:     0xa000000-0xa0001ff (unknown)
+devinfo -u:     0xa000200-0xa0003ff (unknown)
+devinfo -u:     0xa000400-0xa0005ff (unknown)
+devinfo -u:     0xa000600-0xa0007ff (unknown)
+devinfo -u:     0xa000800-0xa0009ff (unknown)
+devinfo -u:     0xa000a00-0xa000bff (unknown)
+devinfo -u:     0xa000c00-0xa000dff (unknown)
+devinfo -u:     0xa000e00-0xa000fff (unknown)
+devinfo -u:     0xa001000-0xa0011ff (unknown)
+devinfo -u:     0xa001200-0xa0013ff (unknown)
+devinfo -u:     0xa001400-0xa0015ff (unknown)
+devinfo -u:     0xa001600-0xa0017ff (unknown)
+devinfo -u:     0xa001800-0xa0019ff (unknown)
+devinfo -u:     0xa001a00-0xa001bff (unknown)
+devinfo -u:     0xa001c00-0xa001dff (unknown)
+devinfo -u:     0xa001e00-0xa001fff (unknown)
+devinfo -u:     0xa002000-0xa0021ff (unknown)
+devinfo -u:     0xa002200-0xa0023ff (unknown)
+devinfo -u:     0xa002400-0xa0025ff (unknown)
+devinfo -u:     0xa002600-0xa0027ff (unknown)
+devinfo -u:     0xa002800-0xa0029ff (unknown)
+devinfo -u:     0xa002a00-0xa002bff (unknown)
+devinfo -u:     0xa002c00-0xa002dff (unknown)
+devinfo -u:     0xa002e00-0xa002fff (unknown)
+devinfo -u:     0xa003000-0xa0031ff (unknown)
+devinfo -u:     0xa003200-0xa0033ff (unknown)
+devinfo -u:     0xa003400-0xa0035ff (unknown)
+devinfo -u:     0xa003600-0xa0037ff (unknown)
+devinfo -u:     0xa003800-0xa0039ff (unknown)
+devinfo -u:     0xa003a00-0xa003bff (unknown)
+devinfo -u:     0xa003c00-0xa003dff (unknown)
+devinfo -u:     0xa003e00-0xa003fff (unknown)
+devinfo -u:     0xa004000-0xfffffff ----
+devinfo -u:     0x10000000-0x3efeffff (pcib0)
+devinfo -u:     0x3eff0000-0x3effffff (pcib0)
+devinfo -u:     0x3f000000-0x400fffffff ----
+devinfo -u:     0x4010000000-0x401fffffff (pcib0)
+devinfo -u:     0x4020000000-0x7fffffffff ----
+devinfo -u:     0x8000000000-0xffffffffff (pcib0)
+devinfo -u:     0x10000000000-0xffffffffffffffff ----
+devinfo -u: Interrupts:
+devinfo -u:     0x0-0x20 ----
+devinfo -u:     0x21 (uart0)
+devinfo -u:     0x22 ----
+devinfo -u:     0x23 (nvme0)
+devinfo -u:     0x23 (virtio_pci7)
+devinfo -u:     0x23 (virtio_pci4)
+devinfo -u:     0x24 (virtio_pci8)
+devinfo -u:     0x24 (virtio_pci5)
+devinfo -u:     0x24 (ahci0)
+devinfo -u:     0x24 (virtio_pci0)
+devinfo -u:     0x25 (virtio_pci1)
+devinfo -u:     0x25 (xhci0)
+devinfo -u:     0x25 (virtio_pci3)
+devinfo -u:     0x26 (virtio_pci2)
+devinfo -u:     0x26 (virtio_pci6)
+devinfo -u:     0x26 (nvme1)
+devinfo -u:     0x27-0x28 ----
+devinfo -u:     0x29 (acpi_ged0)
+devinfo -u:     0x2a-0xffffffffffffffff ----
+devinfo -u: ACPI I/O ports:
+devinfo -u: ACPI I/O memory addresses:
+devinfo -u: pcib0 prefetch window:
+devinfo -u: pcib0 memory window:
+devinfo -u:     0x10000000-0x101fffff (pcib1)
+devinfo -u:     0x10200000-0x1023ffff ----
+devinfo -u:     0x10240000-0x10240fff (virtio_pci8)
+devinfo -u:     0x10241000-0x10241fff (virtio_pci7)
+devinfo -u:     0x10242000-0x10242fff (virtio_pci6)
+devinfo -u:     0x10243000-0x10243fff (virtio_pci5)
+devinfo -u:     0x10244000-0x10244fff (virtio_pci4)
+devinfo -u:     0x10245000-0x10245fff (virtio_pci3)
+devinfo -u:     0x10246000-0x10246fff (ahci0)
+devinfo -u:     0x10247000-0x10247fff (pcib1)
+devinfo -u:     0x10248000-0x10248fff (virtio_pci1)
+devinfo -u:     0x10249000-0x10249fff (virtio_pci0)
+devinfo -u:     0x1024a000-0x3efeffff ----
+devinfo -u:     0x8000000000-0x80000fffff (pcib1)
+devinfo -u:     0x8000100000-0x8000103fff (virtio_pci0)
+devinfo -u:     0x8000104000-0x8000107fff (virtio_pci1)
+devinfo -u:     0x8000108000-0x800010bfff (virtio_pci3)
+devinfo -u:     0x800010c000-0x800010ffff (virtio_pci4)
+devinfo -u:     0x8000110000-0x8000113fff (virtio_pci5)
+devinfo -u:     0x8000114000-0x8000117fff (virtio_pci6)
+devinfo -u:     0x8000118000-0x800011bfff (virtio_pci7)
+devinfo -u:     0x800011c000-0x800011ffff (virtio_pci8)
+devinfo -u:     0x8000120000-0x8000123fff (xhci0)
+devinfo -u:     0x8000124000-0x8000127fff (nvme1)
+devinfo -u:     0x8000128000-0x800012bfff (nvme0)
+devinfo -u:     0x800012c000-0xffffffffff ----
+devinfo -u: pcib0 I/O port window:
+devinfo -u:     0x0-0xffff ----
+devinfo -u: PCI domain 0 bus numbers:
+devinfo -u:     0 (pci0)
+devinfo -u:     1 (pcib1)
+devinfo -u:     2-255 ----
+devinfo -u: pcib1 bus numbers:
+devinfo -u:     1 (pci1)
+devinfo -u: pcib1 I/O port window:
+devinfo -u: pcib1 memory window:
+devinfo -u:     0x10000000-0x10000fff (virtio_pci2)
+devinfo -u:     0x10001000-0x101fffff ----
+devinfo -u: pcib1 prefetch window:
+devinfo -u:     0x8000000000-0x8000003fff (virtio_pci2)
+devinfo -u:     0x8000004000-0x80000fffff ----
+devinfo -u: I/O memory addresses:
+devinfo -u:     0x10246000-0x102460ff ----
+devinfo -u:     0x10246100-0x1024617f (ahcich0)
+devinfo -u:     0x10246180-0x102461ff (ahcich1)
+devinfo -u:     0x10246200-0x1024627f (ahcich2)
+devinfo -u:     0x10246280-0x102462ff (ahcich3)
+devinfo -u:     0x10246300-0x1024637f (ahcich4)
+devinfo -u:     0x10246380-0x102463ff (ahcich5)
+devinfo -u:     0x10246400-0x10246fff ----
+ok (28 ms)
+ktest: kernel::tests::iommu_rid_strings ... ok (2 ms)
+ktest: kernel::tests::smmu_units_under_acpi0 ... ok (2 ms)
+ktest: kernel::tests::device_shutdown_order ... testbus0: <Test bus> on root0
+broken0: attach failed: Device("broken on purpose")
+testdev0: <Test device> on testbus0
+testdev1: <Test device> on testbus0
+fallback0: <Fallback> on testbus0
+slow0: <Slow> on testbus0
+needy0: <Needy> on testbus0
+ok (23 ms)
+ktest: kernel::tests::device_attach_fault_injection ... testbus0: <Test bus> on root0
+broken0: attach failed: Device("broken on purpose")
+testdev0: <Test device> on testbus0
+testdev1: <Test device> on testbus0
+fallback0: <Fallback> on testbus0
+slow0: <Slow> on testbus0
+needy0: <Needy> on testbus0
+testbus0: <Test bus> on root0
+broken0: attach failed: Device("broken on purpose")
+testdev0: attach failed: Resource(MapFailed)
+testdev1: <Test device> on testbus0
+fallback0: <Fallback> on testbus0
+slow0: <Slow> on testbus0
+needy0: <Needy> on testbus0
+testbus0: <Test bus> on root0
+testdev1: attach failed: Resource(MapFailed)
+broken0: attach failed: Device("broken on purpose")
+testdev0: <Test device> on testbus0
+fallback0: <Fallback> on testbus0
+slow0: <Slow> on testbus0
+needy0: <Needy> on testbus0
+testbus0: <Test bus> on root0
+broken0: attach failed: Device("broken on purpose")
+testdev0: <Test device> on testbus0
+testdev1: <Test device> on testbus0
+fallback0: <Fallback> on testbus0
+slow0: <Slow> on testbus0
+needy0: <Needy> on testbus0
+testbus0: <Test bus> on root0
+broken0: attach failed: Device("broken on purpose")
+testdev0: <Test device> on testbus0
+testdev1: <Test device> on testbus0
+fallback0: <Fallback> on testbus0
+slow0: <Slow> on testbus0
+needy0: <Needy> on testbus0
+testbus0: <Test bus> on root0
+broken0: attach failed: Device("broken on purpose")
+testdev0: attach failed: Resource(MapFailed)
+testdev1: <Test device> on testbus0
+fallback0: <Fallback> on testbus0
+slow0: <Slow> on testbus0
+needy0: <Needy> on testbus0
+testbus0: <Test bus> on root0
+testdev1: attach failed: Resource(MapFailed)
+broken0: attach failed: Device("broken on purpose")
+testdev0: <Test device> on testbus0
+fallback0: <Fallback> on testbus0
+slow0: <Slow> on testbus0
+needy0: <Needy> on testbus0
+testbus0: <Test bus> on root0
+broken0: attach failed: Device("broken on purpose")
+testdev0: <Test device> on testbus0
+testdev1: <Test device> on testbus0
+fallback0: <Fallback> on testbus0
+slow0: <Slow> on testbus0
+needy0: <Needy> on testbus0
+testbus0: <Test bus> on root0
+broken0: attach failed: Device("broken on purpose")
+testdev0: <Test device> on testbus0
+testdev1: <Test device> on testbus0
+fallback0: <Fallback> on testbus0
+slow0: <Slow> on testbus0
+needy0: <Needy> on testbus0
+ok (198 ms)
+ktest: kernel::tests::gates_drain_and_refuse ... ok (8 ms)
+ktest: kernel::tests::pci_enumeration_through_ecam ... pci: enumeration took 10044 us for 672 accesses (reads 296 us, command writes 8691 us, BAR writes 90 us, other 0 us)
+pci: 00:00.0 1b36:0008 class 060000 bars 0 caps 0
+pci: 00:01.0 1af4:1001 class 010000 bars 3 caps 6
+pci: 00:02.0 1af4:1001 class 010000 bars 3 caps 6
+pci: 00:03.0 1b36:000c class 060400 bars 1 caps 3
+pci: 01:00.0 1af4:1044 class 00ff00 bars 2 caps 8
+pci: 00:04.0 1b36:0010 class 010802 bars 1 caps 3
+pci: 00:05.0 8086:2922 class 010601 bars 2 caps 2
+pci: 00:06.0 1af4:1001 class 010000 bars 3 caps 6
+pci: 00:07.0 1b36:0010 class 010802 bars 1 caps 3
+pci: 00:08.0 1af4:1001 class 010000 bars 3 caps 6
+pci: 00:09.0 1af4:1001 class 010000 bars 2 caps 6
+pci: 00:0a.0 1b36:000d class 0c0330 bars 1 caps 2
+pci: 00:0b.0 1af4:1052 class 090000 bars 2 caps 6
+pci: 00:0c.0 1af4:1052 class 098000 bars 2 caps 6
+pci: 00:0d.0 1af4:1000 class 020000 bars 3 caps 6
+ok (13 ms)
+ktest: kernel::tests::processors_are_cpu_devices_numbered_as_their_cpus ... acpi: cpu0 at \_SB_.C000
+acpi: cpu1 at \_SB_.C001
+acpi: cpu2 at \_SB_.C002
+acpi: cpu3 at \_SB_.C003
+ok (1 ms)
+ktest: kernel::tests::acpi_bus_children ... acpi: acpi0 <BOCHS BXPC>
+acpi:   ACPI0007 at \_SB_.C000
+acpi:   ACPI0007 at \_SB_.C001
+acpi:   ACPI0007 at \_SB_.C002
+acpi:   ACPI0007 at \_SB_.C003
+acpi:   ARMH0011 at \_SB_.COM0
+acpi:   QEMU0002 at \_SB_.FWCF
+acpi:   LNRO0005 at \_SB_.VR00
+acpi:   LNRO0005 at \_SB_.VR01
+acpi:   LNRO0005 at \_SB_.VR02
+acpi:   LNRO0005 at \_SB_.VR03
+acpi:   LNRO0005 at \_SB_.VR04
+acpi:   LNRO0005 at \_SB_.VR05
+acpi:   LNRO0005 at \_SB_.VR06
+acpi:   LNRO0005 at \_SB_.VR07
+acpi:   LNRO0005 at \_SB_.VR08
+acpi:   LNRO0005 at \_SB_.VR09
+acpi:   LNRO0005 at \_SB_.VR10
+acpi:   LNRO0005 at \_SB_.VR11
+acpi:   LNRO0005 at \_SB_.VR12
+acpi:   LNRO0005 at \_SB_.VR13
+acpi:   LNRO0005 at \_SB_.VR14
+acpi:   LNRO0005 at \_SB_.VR15
+acpi:   LNRO0005 at \_SB_.VR16
+acpi:   LNRO0005 at \_SB_.VR17
+acpi:   LNRO0005 at \_SB_.VR18
+acpi:   LNRO0005 at \_SB_.VR19
+acpi:   LNRO0005 at \_SB_.VR20
+acpi:   LNRO0005 at \_SB_.VR21
+acpi:   LNRO0005 at \_SB_.VR22
+acpi:   LNRO0005 at \_SB_.VR23
+acpi:   LNRO0005 at \_SB_.VR24
+acpi:   LNRO0005 at \_SB_.VR25
+acpi:   LNRO0005 at \_SB_.VR26
+acpi:   LNRO0005 at \_SB_.VR27
+acpi:   LNRO0005 at \_SB_.VR28
+acpi:   LNRO0005 at \_SB_.VR29
+acpi:   LNRO0005 at \_SB_.VR30
+acpi:   LNRO0005 at \_SB_.VR31
+acpi:   PNP0C0F at \_SB_.L000
+acpi:   PNP0C0F at \_SB_.L001
+acpi:   PNP0C0F at \_SB_.L002
+acpi:   PNP0C0F at \_SB_.L003
+acpi:   PNP0A08 at \_SB_.PCI0
+acpi:   PNP0C02 at \_SB_.PCI0.RES0
+acpi:   ACPI0013 at \_SB_.GED_
+acpi:   PNP0C0C at \_SB_.PWRB
+acpi:   PNP0C33 at \_SB_.GEDD
+ok (2 ms)
+ktest: kernel::tests::pci_bus_children ... pci0: vendor=0x1b36 device=0x0008 subvendor=0x1af4 subdevice=0x1100 class=0x060000 at slot=0 function=0 dbsf=pci0:0:0:0 handle=\_SB_.PCI0.S00_
+pci0: vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002 class=0x010000 at slot=1 function=0 dbsf=pci0:0:1:0 handle=\_SB_.PCI0.S08_
+pci0: vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002 class=0x010000 at slot=2 function=0 dbsf=pci0:0:2:0 handle=\_SB_.PCI0.S10_
+pci0: vendor=0x1b36 device=0x000c subvendor=0x1b36 subdevice=0x0000 class=0x060400 at slot=3 function=0 dbsf=pci0:0:3:0 handle=\_SB_.PCI0.S18_
+pci0: vendor=0x1b36 device=0x0010 subvendor=0x1af4 subdevice=0x1100 class=0x010802 at slot=4 function=0 dbsf=pci0:0:4:0 handle=\_SB_.PCI0.S20_
+pci0: vendor=0x8086 device=0x2922 subvendor=0x1af4 subdevice=0x1100 class=0x010601 at slot=5 function=0 dbsf=pci0:0:5:0 handle=\_SB_.PCI0.S28_
+pci0: vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002 class=0x010000 at slot=6 function=0 dbsf=pci0:0:6:0 handle=\_SB_.PCI0.S30_
+pci0: vendor=0x1b36 device=0x0010 subvendor=0x1af4 subdevice=0x1100 class=0x010802 at slot=7 function=0 dbsf=pci0:0:7:0 handle=\_SB_.PCI0.S38_
+pci0: vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002 class=0x010000 at slot=8 function=0 dbsf=pci0:0:8:0 handle=\_SB_.PCI0.S40_
+pci0: vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002 class=0x010000 at slot=9 function=0 dbsf=pci0:0:9:0 handle=\_SB_.PCI0.S48_
+pci0: vendor=0x1b36 device=0x000d subvendor=0x1af4 subdevice=0x1100 class=0x0c0330 at slot=10 function=0 dbsf=pci0:0:10:0 handle=\_SB_.PCI0.S50_
+pci0: vendor=0x1af4 device=0x1052 subvendor=0x1af4 subdevice=0x1100 class=0x090000 at slot=11 function=0 dbsf=pci0:0:11:0 handle=\_SB_.PCI0.S58_
+pci0: vendor=0x1af4 device=0x1052 subvendor=0x1af4 subdevice=0x1100 class=0x098000 at slot=12 function=0 dbsf=pci0:0:12:0 handle=\_SB_.PCI0.S60_
+pci0: vendor=0x1af4 device=0x1000 subvendor=0x1af4 subdevice=0x0001 class=0x020000 at slot=13 function=0 dbsf=pci0:0:13:0 handle=\_SB_.PCI0.S68_
+ok (2 ms)
+ktest: kernel::tests::vtrnd_reads_entropy_by_interrupt ... vtrnd: 32 reads of 64 bytes, 34 us each, 32 interrupt(s) by INTx, on virtio_pci2 <VirtIO PCI (modern) Entropy adapter>
+ok (2 ms)
+ktest: kernel::tests::pci_bridge_and_the_bus_behind_it ... pcib1 <PCI-PCI bridge> -> pci1 <PCI bus> (bus 1) -> virtio_pci2 -> vtrnd0
+ok (0 ms)
+ktest: kernel::tests::acpi_power_button ... ABYSS-TEST-PRESS-POWER-BUTTON
+power button press arrived after 2 ms
+ok (2 ms)
+ktest: kernel::tests::virtio_transport_detach_and_reattach ... virtio_pci2: <VirtIO PCI (modern) Entropy adapter> on pci1
+vtrnd0: <VirtIO Entropy Adapter> on virtio_pci2
+detach freed 16 KiB of device mappings; re-attached and read
+ok (2 ms)
+ktest: kernel::tests::vtblk_reads_the_boot_disk_and_its_gpt ... disks: vtbd0 vtbd0p1 ada0 ada1 vtbd2 vtbd3 vtbd4 nda1 da0 da1 da2 da3 vtbd1 nda0
+=>        34    786365  vtbd0  GPT  (384M)
+        2048    655360   1  efi  (320M) efiboot0
+ok (2 ms)
+ktest: kernel::tests::vtblk_writes_and_reads_back ... vtbd1: written and read back
+ok (21 ms)
+ktest: kernel::tests::buffer_cache_over_a_disk ... ok (4 ms)
+ktest: kernel::tests::nvme_writes_and_reads_back ... nda0: written and read back in 11 ms
+ok (12 ms)
+ktest: kernel::tests::kaslr_slide_is_aligned ... ok (0 ms)
+ktest: kernel::tests::heap_serves_collections ... ok (3 ms)
+ktest: kernel::tests::kernel_stacks_have_guard_pages ... ok (0 ms)
+ktest: kernel::tests::freed_thread_stacks_are_reused_mapped ... ok (0 ms)
+ktest: kernel::tests::threads_run_and_join ... ok (1 ms)
+ktest: kernel::tests::wait_queues_ping_pong ... ok (5 ms)
+ktest: kernel::tests::wake_all_wakes_only_the_sleepers_it_finds ... ok (9 ms)
+ktest: kernel::tests::exited_threads_are_reaped ... ok (0 ms)
+ktest: kernel::tests::clock_advances_and_sleeps_last ... ok (20 ms)
+ktest: kernel::tests::statclock_ticks_stay_on_their_grid ... ok (61 ms)
+ktest: kernel::tests::timers_fire_in_order_and_stop ... ok (31 ms)
+ktest: kernel::tests::timed_waits_time_out ... ok (15 ms)
+ktest: kernel::tests::shared_page_clock_is_monotonic_and_agrees ... ok (4 ms)
+ktest: kernel::tests::busy_threads_are_preempted ... ok (100 ms)
+ktest: kernel::tests::mutexes_serialize_threads ... ok (5 ms)
+ktest: kernel::tests::mutex_owner_inherits_priority ... ok (3 ms)
+ktest: kernel::tests::rw_locks_share_and_exclude ... ok (1 ms)
+ktest: kernel::tests::rw_locks_with_sleeping_holders ... ok (9 ms)
+ktest: kernel::tests::rw_waiting_writer_goes_before_late_readers ... ok (801 ms)
+ktest: kernel::tests::epochs_wait_for_readers ... ok (51 ms)
+ktest: kernel::tests::witness_catches_order_reversal ... witness: acquiring test outer (level 20) while holding test inner (level 21)
+backtrace:
+  #0  0xffffffff9eeecdf0 sched::lock::witness::acquire+0xfc
+  #1  0xffffffff9e9a1468 kernel::tests::witness_catches_order_reversal+0x150
+  #2  0xffffffff9e9ce27c ktest::run_selected::<kernel::console::Writer>+0x220
+  #3  0xffffffff9e9a8950 kernel::tests::run+0x138
+  #4  0xffffffff9e86615c kernel::kmain+0x234
+  #5  0xffffffff9e866940 abyss_kernel_main+0xc
+  #6  0xffffffff9eef595c arch_aarch64::entry::start+0x4c
+  #7  0xffffffff9e800188 _start+0x188
+ok (665 ms)
+ktest: kernel::tests::fpu_state_survives_switches ... ok (10 ms)
+ktest: kernel::tests::sysctl_boot_nodes ... ok (1 ms)
+ktest: kernel::tests::console_input_through_the_uart_interrupt ... Z
+ok (1 ms)
+ktest: kernel::tests::irq_remove_keeps_a_held_level_line_masked ... ok (2 ms)
+ktest: kernel::tests::irq_install_leaves_a_held_shared_line_masked ... ok (0 ms)
+ktest: kernel::tests::irq_cascaded_inputs_dispatch_from_their_parent ... ok (1 ms)
+ktest: kernel::devstat::ktests::devstat_lists_the_disks ... ok (1 ms)
+ktest: kernel::net::ktests::vtnet_carries_dhcp_and_arp ... ok (17 ms)
+ktest: kernel::net::ktests::vtnet_carries_udp_and_icmp_sockets ... ok (22 ms)
+ktest: kernel::tests::sky_i2c::rx8900_and_rts5453_on_an_i2c_bus ... skyi2cbus0: <Sky1 I2C test firmware bus> on root0
+skyi2cctl0: <Sky1 I2C test controller> on skyi2cbus0
+rx88030: <Epson RX8900 Real Time Clock> at addr 0x32 on skyi2cctl0
+rx88030: registered as a time-of-day clock, resolution 1.000000s
+rts54530: <Realtek RTS5453 USB Type-C PD controller> at addr 0x30 on skyi2cctl0
+rts54530: USB, reverse, data host, power sink
+clocks: [("efirtc0", 1000000), ("rx88030", 1000000)]
+rts54530: none, none, data none, power none
+ok (1016 ms)
+ktest: kernel::tests::smmu_running::smmu_streams_bypass_and_abort ... ok (0 ms)
+ktest: kernel::tests::smmu_running::smmu_translates_dma ... smmu: not translating (hw.iommu.dma=0); stage 3's checks skipped
+ok (1 ms)
+ktest: kernel::tests::drm_card::a_card_over_a_framebuffer_shows_buffers_and_flips ... ok (51 ms)
+ktest: kernel::tests::drm_card::the_radeon_card_copies_into_the_back_surface_and_flips ... ok (56 ms)
+ktest: kernel::tests::user_memory::user_memory_faults_in_through_copies ... ok (27 ms)
+ktest: kernel::tests::user_memory::shared_page_is_mapped_read_only ... ok (1 ms)
+ktest: kernel::tests::user_memory::vt_bells_are_reported_to_devctl ... ok (1 ms)
+ktest: kernel::tests::user_memory::a_second_uart_is_a_terminal ... ok (0 ms)
+ktest: kernel::tests::user_memory::user_test_programs_pass ... pid 14 (aio) is attempting to use unsafe AIO requests - not logging anymore
+aslr: ok (stack base 0x80a3ebd0, timekeep 0x80bc0800)
+auxv: ok (30 entries)
+bpfwriter: ok
