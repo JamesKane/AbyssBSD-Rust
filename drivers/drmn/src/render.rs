@@ -57,10 +57,10 @@ const KERNEL_VA: u64 = VA_MAX - (4 << 20);
 const FENCE_IB_VA: u64 = VA_MAX - (1 << 20);
 /// Pages of those a file has: a set for each engine (a job's page in its set
 /// is its number modulo `FENCE_IB_SLOTS`).
-const FENCE_IB_PAGES: u64 = 32;
+const FENCE_IB_PAGES: u64 = 96;
 const FENCE_IB_SLOTS: u64 = 16;
 const FENCE_IB_SLOTS_U32: u32 = 16;
-/// Where they are in video memory: 128 KiB for each file, from here.
+/// Where they are in video memory: 512 KiB for each file, from here.
 const FENCE_IB_AT: u64 = 192 << 20;
 
 /// The engines a job runs on, each with its own ring and sequence numbers.
@@ -68,14 +68,31 @@ const FENCE_IB_AT: u64 = 192 << 20;
 enum Engine {
     Gfx,
     Dma,
+    /// Kernel compute ring `n` (0 to 3).
+    Compute(u8),
 }
 
+/// How many compute rings are offered (09 section 3.2).
+const COMPUTE_RINGS: u32 = 4;
+
 impl Engine {
-    fn from_ip(ip: u32) -> Option<Self> {
-        match ip {
-            uapi::ip::GFX => Some(Self::Gfx),
-            uapi::ip::DMA => Some(Self::Dma),
+    /// The engine an indirect buffer or a wait names: the hardware IP type
+    /// and ring.
+    fn new(ip: u32, ring: u32) -> Option<Self> {
+        match (ip, ring) {
+            (uapi::ip::GFX, 0) => Some(Self::Gfx),
+            (uapi::ip::DMA, 0) => Some(Self::Dma),
+            (uapi::ip::COMPUTE, r) if r < COMPUTE_RINGS => u8::try_from(r).ok().map(Self::Compute),
             _ => None,
+        }
+    }
+
+    /// Which set of fence-packet pages the engine's jobs use.
+    fn page_set(self) -> u64 {
+        match self {
+            Self::Gfx => 0,
+            Self::Dma => 1,
+            Self::Compute(r) => 2 + u64::from(r),
         }
     }
 }
@@ -147,6 +164,8 @@ pub(crate) struct Render {
     seq: AtomicU32,
     /// The same for the DMA engine's jobs.
     dma_seq: AtomicU32,
+    /// And the compute rings'.
+    comp_seq: [AtomicU32; 4],
     /// The context of the last job (a job from another one loads the
     /// context's state).
     last_ctx: AtomicU32,
@@ -167,6 +186,7 @@ impl Render {
             amd,
             seq: AtomicU32::new(0),
             dma_seq: AtomicU32::new(0),
+            comp_seq: [const { AtomicU32::new(0) }; 4],
             last_ctx: AtomicU32::new(0),
             queue: Arc::new(sched::WaitQueue::new()),
             state: PreemptLock::new(State {
@@ -250,10 +270,11 @@ impl Render {
         // The graphics ring always; the DMA engine when it started; compute
         // is not driven yet.
         let device = Device::raphael(self.vram_bytes, GTT_BYTES);
-        let device = if amd.sdma_ready() {
-            device.without_compute()
-        } else {
-            device.graphics_only()
+        let device = match (amd.sdma_ready(), amd.compute_rings() > 0) {
+            (true, true) => device,
+            (true, false) => device.without_compute(),
+            (false, true) => device.without_dma(),
+            (false, false) => device.graphics_only(),
         };
         let answer = info::answer(&device, &live, &req).map_err(|_| Errno::EINVAL)?;
         let out = uapi::truncated(&answer, req.return_size);
@@ -421,8 +442,8 @@ impl Render {
                     let mut ib = uapi::IbChunk::decode(&data).map_err(|_| Errno::EINVAL)?;
                     ib.va_start = canonical(ib.va_start).ok_or(Errno::EINVAL)?;
                     // One engine a submission.
-                    let this = Engine::from_ip(ib.ip_type).ok_or(Errno::EINVAL)?;
-                    if ib.ip_instance != 0 || ib.ring != 0 || engine.is_some_and(|e| e != this) {
+                    let this = Engine::new(ib.ip_type, ib.ring).ok_or(Errno::EINVAL)?;
+                    if ib.ip_instance != 0 || engine.is_some_and(|e| e != this) {
                         return Err(Errno::EINVAL);
                     }
                     engine = Some(this);
@@ -455,8 +476,12 @@ impl Render {
         }
         let user_fence_gem = fence.and_then(|(h, o)| cx.gem(h).map(|g| (g, u64::from(o))));
         let amd = self.amd()?;
-        if engine == Engine::Dma && !amd.sdma_ready() {
-            return Err(Errno::ENODEV);
+        match engine {
+            Engine::Dma if !amd.sdma_ready() => return Err(Errno::ENODEV),
+            Engine::Compute(r) if usize::from(r) >= amd.compute_rings() => {
+                return Err(Errno::ENODEV);
+            }
+            _ => {}
         }
         let gpu = amd.gpu_arc()?;
         // The address space's root and the user fence's address, under the
@@ -470,7 +495,7 @@ impl Render {
             let vmid = u32::try_from(fs.slot).unwrap_or(0) + 1;
             let root = fs.space.tables().address(fs.space.root()).0;
             if !fs.fence_pages {
-                let at = phys + FENCE_IB_AT + ((fs.slot as u64) << 17);
+                let at = phys + FENCE_IB_AT + ((fs.slot as u64) << 19);
                 fs.space
                     .map(
                         FENCE_IB_VA,
@@ -526,7 +551,7 @@ impl Render {
                 let seq = self.seq.load(Ordering::Acquire).wrapping_add(1).max(1);
                 // The page for this job's fence packet is free once the job that
                 // used it before has finished.
-                let page = u64::from(seq) % FENCE_IB_SLOTS;
+                let page = engine.page_set() * FENCE_IB_SLOTS + u64::from(seq) % FENCE_IB_SLOTS;
                 let before = seq.wrapping_sub(FENCE_IB_SLOTS_U32);
                 if user_fence.is_some() && gfx.finished(&gpu).wrapping_sub(before) >= 0x8000_0000 {
                     drop(g);
@@ -559,7 +584,7 @@ impl Render {
                 if let Some(va) = user_fence {
                     let mut f = Packets::new();
                     f.fence(extended(va), u64::from(seq), true, false);
-                    let off = FENCE_IB_AT + ((slot as u64) << 17) + page * 4096;
+                    let off = FENCE_IB_AT + ((slot as u64) << 19) + page * 4096;
                     for (i, d) in f.0.iter().enumerate() {
                         gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
                     }
@@ -584,7 +609,7 @@ impl Render {
                 let sdma = g.as_mut().ok_or(Errno::ENXIO)?;
                 let seq = self.dma_seq.load(Ordering::Acquire).wrapping_add(1).max(1);
                 // The page for this job's fence packets, in the DMA set.
-                let page = FENCE_IB_SLOTS + u64::from(seq) % FENCE_IB_SLOTS;
+                let page = engine.page_set() * FENCE_IB_SLOTS + u64::from(seq) % FENCE_IB_SLOTS;
                 let before = seq.wrapping_sub(FENCE_IB_SLOTS_U32);
                 if user_fence.is_some() && sdma.finished(&gpu).wrapping_sub(before) >= 0x8000_0000 {
                     drop(g);
@@ -624,7 +649,7 @@ impl Render {
                     let mut f = amdgpu::sdma::Packets::new();
                     f.fence64(extended(va), u64::from(seq));
                     f.pad8();
-                    let off = FENCE_IB_AT + ((slot as u64) << 17) + page * 4096;
+                    let off = FENCE_IB_AT + ((slot as u64) << 19) + page * 4096;
                     for (i, d) in f.0.iter().enumerate() {
                         gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
                     }
@@ -640,6 +665,55 @@ impl Render {
                 p.trap(0);
                 sdma.run(&gpu, &p.0, RING_WAIT_MS)?;
                 self.dma_seq.store(seq, Ordering::Release);
+                break seq;
+            },
+            Engine::Compute(ring) => loop {
+                let r = usize::from(ring);
+                let mut g = amd.gfx_lock();
+                let gfx = g.as_mut().ok_or(Errno::ENXIO)?;
+                let last = self.comp_seq[r].load(Ordering::Acquire);
+                let seq = last.wrapping_add(1).max(1);
+                let page = engine.page_set() * FENCE_IB_SLOTS + u64::from(seq) % FENCE_IB_SLOTS;
+                let before = seq.wrapping_sub(FENCE_IB_SLOTS_U32);
+                if user_fence.is_some()
+                    && gfx.compute_finished(&gpu, r).wrapping_sub(before) >= 0x8000_0000
+                {
+                    drop(g);
+                    if sched::current().is_interrupted() {
+                        return Err(Errno::EINTR);
+                    }
+                    bus::manager().sleep_ms(cx.sleepable(), 1);
+                    continue;
+                }
+                // The graphics frame without its parser-only items (06
+                // section 10.4): the previous fence, the address space (on
+                // the ring's own invalidation engine), the buffers (with the
+                // valid bit), the fences.
+                let mut p = Packets::new();
+                p.wait_mem(3, gfx.compute_seq_address(r), last, 0xffff_ffff, 4, false);
+                p.0.extend(amdgpu::gmc::ring_vm_flush_on(vmid, root, false, 4 + r, false).0);
+                for ib in &ibs {
+                    p.indirect_buffer(extended(ib.va_start), ib.ib_bytes / 4, vmid, true);
+                }
+                if let Some(va) = user_fence {
+                    let mut f = Packets::new();
+                    f.fence(extended(va), u64::from(seq), true, false);
+                    f.mark_compute();
+                    let off = FENCE_IB_AT + ((slot as u64) << 19) + page * 4096;
+                    for (i, d) in f.0.iter().enumerate() {
+                        gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
+                    }
+                    let _ = gpu.vram_read32(usize::try_from(off).unwrap_or(0));
+                    p.indirect_buffer(
+                        extended(FENCE_IB_VA + page * 4096),
+                        u32::try_from(f.0.len()).unwrap_or(0),
+                        vmid,
+                        true,
+                    );
+                }
+                p.fence(gfx.compute_seq_address(r), u64::from(seq), false, true);
+                gfx.compute_run(&gpu, r, &p.0, RING_WAIT_MS)?;
+                self.comp_seq[r].store(seq, Ordering::Release);
                 break seq;
             },
         };
@@ -661,6 +735,7 @@ impl Render {
         match engine {
             Engine::Gfx => self.seq.load(Ordering::Acquire),
             Engine::Dma => self.dma_seq.load(Ordering::Acquire),
+            Engine::Compute(r) => self.comp_seq[usize::from(r)].load(Ordering::Acquire),
         }
     }
 
@@ -675,7 +750,7 @@ impl Render {
         let r = uapi::WaitCs::decode(arg).map_err(|_| Errno::EINVAL)?;
         let amd = self.amd()?;
         let seq = u32::try_from(r.handle & 0xffff_ffff).map_err(|_| Errno::EINVAL)?;
-        let engine = Engine::from_ip(r.ip_type).ok_or(Errno::EINVAL)?;
+        let engine = Engine::new(r.ip_type, r.ring).ok_or(Errno::EINVAL)?;
         let start = sched::now_ns();
         let mut timed_out = false;
         loop {
@@ -801,7 +876,14 @@ impl RenderApi for Render {
                 let start = sched::now_ns();
                 let mut busy = false;
                 // Every job on every engine.
-                for engine in [Engine::Gfx, Engine::Dma] {
+                for engine in [
+                    Engine::Gfx,
+                    Engine::Dma,
+                    Engine::Compute(0),
+                    Engine::Compute(1),
+                    Engine::Compute(2),
+                    Engine::Compute(3),
+                ] {
                     let seq = self.last_seq(engine);
                     while seq != 0 && !self.done(&amd, engine, seq)? {
                         if sched::now_ns().saturating_sub(start) >= timeout {
@@ -897,6 +979,9 @@ fn finished_at(amd: &Amd, gpu: &Arc<Aperture>, engine: Engine, seq: u32) -> bool
             .sdma_lock()
             .as_ref()
             .is_none_or(|d| d.finished(gpu).wrapping_sub(seq) < 0x8000_0000),
+        Engine::Compute(r) => amd.gfx_lock().as_ref().is_none_or(|g| {
+            g.compute_finished(gpu, usize::from(r)).wrapping_sub(seq) < 0x8000_0000
+        }),
     }
 }
 

@@ -107,5 +107,24 @@ int main(int argc, char **argv)
 	printf("dma job %llu: wait status %llu, written %#x, copied %#x (want 0xd00dfeed twice)\n",
 	       (unsigned long long)*(uint64_t *)&dcs, (unsigned long long)dw.handle, dp[2], dp[4]);
 	bad |= dp[2] != 0xd00dfeed || dp[4] != 0xd00dfeed;
+
+	/* A compute ring (ip type 1, ring 0 and 3): a WRITE_DATA with the compute shader-type bit. */
+	for (uint32_t ring = 0; ring < 4; ring += 3) {
+		uint32_t *c = (uint32_t *)((char *)map[0] + 0x200 + 0x40 * ring);
+		uint64_t at = va_data + 24 + 4 * ring;
+		c[0] = 0xc0033702; c[1] = (5 << 8) | (1 << 20);
+		c[2] = (uint32_t)at; c[3] = (uint32_t)(at >> 32); c[4] = 0xc0ffee00 + ring;
+		struct ib cib = { .va = va_ib + 0x200 + 0x40 * ring, .bytes = 5 * 4, .ip = 1, .ring = ring };
+		struct chunk cck = { .id = 1, .len = sizeof cib / 4, .data = (uintptr_t)&cib };
+		uint64_t cchunks[1] = { (uintptr_t)&cck };
+		struct cs ccs = { .ctx = ctx, .nchunks = 1, .chunks = (uintptr_t)cchunks };
+		if (ioctl(fd, CMD(0x04, struct cs), &ccs) < 0) { perror("CS (compute)"); return 1; }
+		struct wait cw = { .handle = *(uint64_t *)&ccs, .timeout = 2000000000ull, .ip = 1, .ring = ring, .ctx = ctx };
+		if (ioctl(fd, CMD(0x09, struct wait), &cw) < 0) { perror("WAIT_CS (compute)"); return 1; }
+		uint32_t got = ((volatile uint32_t *)map[1])[(24 + 4 * ring) / 4];
+		printf("compute ring %u job %llu: wait status %llu, written %#x (want %#x)\n", ring,
+		       (unsigned long long)*(uint64_t *)&ccs, (unsigned long long)cw.handle, got, 0xc0ffee00 + ring);
+		bad |= got != 0xc0ffee00 + ring;
+	}
 	return bad ? 2 : 0;
 }

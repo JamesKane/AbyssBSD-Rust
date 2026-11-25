@@ -444,6 +444,20 @@ pub const fn invalidate_request(vmid: u32) -> u32 {
 /// VMID's bit, then `PFP_SYNC_ME`. The graphics hub only.
 #[must_use]
 pub fn ring_vm_flush(vmid: u32, root: u64, system: bool, engine: usize) -> crate::pm4::Packets {
+    ring_vm_flush_on(vmid, root, system, engine, true)
+}
+
+/// [`ring_vm_flush`] for either kind of ring: a compute ring has no prefetch
+/// parser, so its wait runs on the micro engine and there is no
+/// `PFP_SYNC_ME` (06 section 10.4).
+#[must_use]
+pub fn ring_vm_flush_on(
+    vmid: u32,
+    root: u64,
+    system: bool,
+    engine: usize,
+    pfp: bool,
+) -> crate::pm4::Packets {
     let hub = Hub::Gfx;
     let (base_lo, base_hi) = hub.context_table(vmid as usize)[0];
     let (_, req, ack, _, _) = hub.engine(engine);
@@ -453,8 +467,10 @@ pub fn ring_vm_flush(vmid: u32, root: u64, system: bool, engine: usize) -> crate
     p.write_data_reg(dword(base_lo), (entry & 0xffff_ffff) as u32);
     p.write_data_reg(dword(base_hi), (entry >> 32) as u32);
     p.write_data_reg(dword(req), invalidate_request(vmid));
-    p.wait_reg(3, dword(ack), 1 << vmid, 1 << vmid, 0x20, true);
-    p.pfp_sync_me();
+    p.wait_reg(3, dword(ack), 1 << vmid, 1 << vmid, 0x20, pfp);
+    if pfp {
+        p.pfp_sync_me();
+    }
     p
 }
 

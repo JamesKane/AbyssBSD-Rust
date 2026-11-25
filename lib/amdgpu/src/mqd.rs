@@ -149,6 +149,34 @@ pub fn compute_mqd(q: &Queue) -> Vec<u32> {
     m
 }
 
+/// The MQD of kernel compute queue `n` (06 section 8.1): the KIQ's, with the
+/// queue inactive (`MAP_QUEUES` activates it), and queue 0 the high-priority
+/// one (pipe priority 2, queue priority 15, tunnel dispatch). `q` has this
+/// queue's own memory.
+#[must_use]
+pub fn kernel_compute_mqd(q: &Queue, n: u32) -> Vec<u32> {
+    let mut m = compute_mqd(q);
+    m[field::ACTIVE / 4] = 0;
+    if n == 0 {
+        m[field::PIPE_PRIORITY / 4] = 2;
+        m[field::QUEUE_PRIORITY / 4] = 15;
+        m[field::QUEUE_CONTROL / 4] |= 1 << 29;
+    }
+    m
+}
+
+/// Where kernel compute queue `n` is (06 section 8.1): its pipe and queue on
+/// the first micro engine, its doorbell as a dword index, and the
+/// invalidation engine of its address-space switches.
+#[must_use]
+pub const fn kernel_compute_place(n: u32) -> (u32, u32, u32, usize) {
+    (n % 4, n / 4, 6 + 2 * n, 4 + n as usize)
+}
+
+/// The `SET_RESOURCES` queue mask of the eight kernel compute queues: bit
+/// `pipe * 8 + queue` (the first micro engine counts as 0), 06 section 9.3.
+pub const KERNEL_COMPUTE_MASK: u64 = 0x0303_0303;
+
 /// A graphics queue's MQD (06 section 7.2).
 #[must_use]
 pub fn gfx_mqd(q: &Queue) -> Vec<u32> {
@@ -239,6 +267,31 @@ pub fn map_gfx_queue(pipe: u32, doorbell_dword: u32, mqd: u64, wptr_poll: u64) -
     let mut p = Packets::new();
     p.0.push(header(0xa2, 6, true));
     let d1 = ((pipe & 3) << 16) | (1 << 18) | (4 << 26) | (1 << 29);
+    p.0.extend([
+        d1,
+        ((doorbell_dword & 0x03ff_ffff) << 2) | 2,
+        lo(mqd),
+        hi(mqd),
+        lo(wptr_poll),
+        hi(wptr_poll),
+    ]);
+    p
+}
+
+/// `MAP_QUEUES` for one compute queue on the first micro engine (opcode
+/// `0xa2`): `pipe`, `queue`, engine select 0, one queue; the doorbell, the
+/// MQD's address and the write-pointer poll address.
+#[must_use]
+pub fn map_compute_queue(
+    pipe: u32,
+    queue: u32,
+    doorbell_dword: u32,
+    mqd: u64,
+    wptr_poll: u64,
+) -> Packets {
+    let mut p = Packets::new();
+    p.0.push(header(0xa2, 6, true));
+    let d1 = ((queue & 7) << 13) | ((pipe & 3) << 16) | (1 << 29);
     p.0.extend([
         d1,
         ((doorbell_dword & 0x03ff_ffff) << 2) | 2,
@@ -347,6 +400,47 @@ mod tests {
         assert_eq!(w.start[0].1, doorbell_control(0x116));
         // Active is in neither part (the caller sets it last).
         assert!(!q_regs.contains(&0xc82c) && !s_regs.contains(&0xc82c));
+    }
+
+    #[test]
+    fn the_kernel_compute_queues_are_spread_over_the_pipes() {
+        // 06 section 8.1: queue n on pipe n mod 4, queue n div 4, doorbell
+        // dword 6 + 2n, invalidation engine 4 + n.
+        assert_eq!(kernel_compute_place(0), (0, 0, 0x06, 4));
+        assert_eq!(kernel_compute_place(1), (1, 0, 0x08, 5));
+        assert_eq!(kernel_compute_place(4), (0, 1, 0x0e, 8));
+        assert_eq!(kernel_compute_place(7), (3, 1, 0x14, 11));
+        // The mask: queues 0 and 1 of the four pipes.
+        let mut mask = 0u64;
+        for n in 0..8 {
+            let (pipe, queue, _, _) = kernel_compute_place(n);
+            mask |= 1 << (pipe * 8 + queue);
+        }
+        assert_eq!(mask, KERNEL_COMPUTE_MASK);
+        assert_eq!(set_resources(KERNEL_COMPUTE_MASK).0[2], 0x0303_0303);
+    }
+
+    #[test]
+    fn a_kernel_compute_mqd_is_inactive_and_queue_0_has_priority() {
+        let first = kernel_compute_mqd(&q(), 0);
+        let other = kernel_compute_mqd(&q(), 3);
+        assert_eq!((first[0x208 / 4], other[0x208 / 4]), (0, 0));
+        assert_eq!((first[0x214 / 4], first[0x218 / 4]), (2, 15));
+        assert_eq!((other[0x214 / 4], other[0x218 / 4]), (0, 0));
+        assert_eq!(first[0x244 / 4] >> 29 & 1, 1);
+        assert_eq!(other[0x244 / 4] >> 29 & 1, 0);
+        // Otherwise the KIQ's.
+        assert_eq!(other[0x23c / 4], compute_mqd(&q())[0x23c / 4]);
+    }
+
+    #[test]
+    fn the_compute_map_packet_names_the_pipe_and_queue() {
+        let p = map_compute_queue(2, 1, 0x0a, 0xf4_0ab0_4000, 0xf4_0ab0_3100);
+        assert_eq!(p.0.len(), 7);
+        assert_eq!(p.0[0], 0xc005_a202);
+        // Queue 1, pipe 2, first micro engine, compute, one queue.
+        assert_eq!(p.0[1], (1 << 13) | (2 << 16) | (1 << 29));
+        assert_eq!(p.0[2], (0x0a << 2) | 2);
     }
 
     #[test]

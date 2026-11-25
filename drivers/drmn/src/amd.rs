@@ -913,6 +913,14 @@ impl Amd {
         }
     }
 
+    /// How many kernel compute rings answered their start-up test.
+    pub(crate) fn compute_rings(&self) -> usize {
+        self.gfx
+            .lock()
+            .as_ref()
+            .map_or(0, crate::gcring::Gfx::compute_rings)
+    }
+
     /// Whether system DMA engine 0 has been started.
     pub(crate) fn sdma_ready(&self) -> bool {
         self.sdma.lock().is_some()

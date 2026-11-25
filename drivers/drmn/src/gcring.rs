@@ -7,6 +7,7 @@
 //! test, every ring written through its doorbell.
 
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use amdgpu::gc;
 use amdgpu::gmc::{Hub, Reg};
@@ -81,7 +82,23 @@ pub(crate) struct Gfx {
     #[allow(dead_code, reason = "the interface queue maps the queues after it")]
     kiq: Ring,
     gfx: Ring,
+    /// The kernel compute queues that answered their test.
+    compute: Vec<Ring>,
 }
+
+// The eight kernel compute queues' memory (06 section 8.1): 128 KiB each from
+// `COMPUTE_AT` (video memory offsets): the ring, the words it reports through
+// and the fence word, then the queue descriptor and the end-of-pipe buffer.
+const COMPUTE_AT: u64 = 175 << 20;
+const COMPUTE_STRIDE: u64 = 0x2_0000;
+const COMPUTE_RING_BYTES: u32 = 64 * 1024;
+const COMPUTE_REPORT: u64 = 0x1_0000;
+const COMPUTE_POLL: u64 = 0x1_0100;
+const COMPUTE_SEQ: u64 = 0x1_0200;
+const COMPUTE_TEST: u64 = 0x1_0300;
+const COMPUTE_MQD: u64 = 0x1_1000;
+const COMPUTE_EOP: u64 = 0x1_2000;
+const COMPUTE_QUEUES: u32 = 8;
 
 /// Why it stopped.
 #[derive(Debug)]
@@ -124,6 +141,35 @@ impl Ring {
         gpu.vram_write32(poll + 4, (self.wptr >> 32) as u32);
         mem.flush();
         gpu.doorbell_write64(self.doorbell, self.wptr);
+    }
+
+    /// Waits for room for `packets` (at most `ms`), then writes them and
+    /// rings the doorbell. `base` is the video memory's GPU address.
+    fn run(
+        &mut self,
+        gpu: &Arc<Aperture>,
+        base: u64,
+        packets: &[u32],
+        ms: u32,
+    ) -> Result<(), abi::errno::Errno> {
+        let mem = crate::psp::vram_memory(gpu, base);
+        let size = self.bytes / 4;
+        let need = u32::try_from(packets.len()).map_err(|_| abi::errno::Errno::E2BIG)?;
+        if need + 1 >= size {
+            return Err(abi::errno::Errno::E2BIG);
+        }
+        for _ in 0..=ms {
+            mem.invalidate();
+            let rptr = mem.read32(base + self.report) % size;
+            let at = u32::try_from(self.wptr % u64::from(size)).unwrap_or(0);
+            let used = (at + size - rptr) % size;
+            if size - used > need + 1 {
+                self.submit(gpu, &mem, packets);
+                return Ok(());
+            }
+            bus::manager().delay_us(1000);
+        }
+        Err(abi::errno::Errno::EAGAIN)
     }
 
     /// Waits until the ring has reported reading everything written.
@@ -337,11 +383,99 @@ pub(crate) fn start(
         gc::CP_INT_CNTL_RING0,
         w.read32(gc::CP_INT_CNTL_RING0) | gc::TIME_STAMP_INT_ENABLE,
     );
+    // The compute queues, mapped through the KIQ in one submission; a
+    // failure leaves the graphics ring as it is.
+    let compute = start_compute(gpu, base, &mut kiq_ring, &mem, log);
     Ok(Gfx {
         base,
         kiq: kiq_ring,
         gfx,
+        compute,
     })
+}
+
+/// Maps the eight kernel compute queues (06 section 8.1) and tests each with
+/// a word written through it; returns the rings that answered.
+fn start_compute(
+    gpu: &Arc<Aperture>,
+    base: u64,
+    kiq: &mut Ring,
+    mem: &dyn Memory,
+    log: &dyn Fn(core::fmt::Arguments<'_>),
+) -> Vec<Ring> {
+    let w = Bar5(gpu);
+    let mut map = mqd::set_resources(mqd::KERNEL_COMPUTE_MASK);
+    let mut rings = Vec::new();
+    for n in 0..COMPUTE_QUEUES {
+        let at = COMPUTE_AT + u64::from(n) * COMPUTE_STRIDE;
+        let (pipe, queue, doorbell, _) = mqd::kernel_compute_place(n);
+        for off in (0..0x1_1000u64).step_by(4) {
+            gpu.vram_write32(usize::try_from(at + off).unwrap_or(0), 0);
+        }
+        let q = Queue {
+            mqd: base + at + COMPUTE_MQD,
+            ring: base + at,
+            ring_bytes: COMPUTE_RING_BYTES,
+            rptr_report: base + at + COMPUTE_REPORT,
+            wptr_poll: base + at + COMPUTE_POLL,
+            doorbell_dword: doorbell,
+            eop: base + at + COMPUTE_EOP,
+        };
+        put(gpu, at + COMPUTE_MQD, &mqd::kernel_compute_mqd(&q, n));
+        map.0
+            .extend(mqd::map_compute_queue(pipe, queue, doorbell, q.mqd, q.wptr_poll).0);
+        rings.push(Ring {
+            at,
+            bytes: COMPUTE_RING_BYTES,
+            doorbell: 4 * doorbell as usize,
+            wptr: 0,
+            compute: true,
+            report: at + COMPUTE_REPORT,
+            poll: at + COMPUTE_POLL,
+        });
+    }
+    let _ = gpu.vram_read32(0);
+    amdgpu::flip::hdp_flush(&w);
+    kiq.submit(gpu, mem, &map.0);
+    let mapped = kiq.drain("KIQ map compute", base, mem, 200);
+    log(format_args!(
+        "GC: compute queues mapping ({mapped:?}): {COMPUTE_QUEUES} queues"
+    ));
+    if mapped.is_err() {
+        return Vec::new();
+    }
+    // Each queue writes a word of its own.
+    for (n, r) in rings.iter_mut().enumerate() {
+        let word = 0xc0de_0000 | u32::try_from(n).unwrap_or(0);
+        let mut p = Packets::new();
+        p.write_data_mem(base + r.at + COMPUTE_TEST, &[word]);
+        r.submit(gpu, mem, &p.0);
+    }
+    let mut ok = Vec::new();
+    for (n, r) in rings.into_iter().enumerate() {
+        let want = 0xc0de_0000 | u32::try_from(n).unwrap_or(0);
+        let mut seen = 0;
+        for _ in 0..200 {
+            mem.invalidate();
+            seen = mem.read32(base + r.at + COMPUTE_TEST);
+            if seen == want {
+                break;
+            }
+            bus::manager().delay_us(1000);
+        }
+        if seen == want {
+            ok.push(r);
+        } else {
+            log(format_args!(
+                "GC: compute queue {n}: word {seen:#010x}, wanted {want:#010x}"
+            ));
+        }
+    }
+    log(format_args!(
+        "GC: compute queues: {} of {COMPUTE_QUEUES} answered their test",
+        ok.len()
+    ));
+    ok
 }
 
 /// The word the kernel's fences are written to (a video memory offset): the
@@ -372,6 +506,38 @@ impl Gfx {
         }
     }
 
+    /// How many compute rings answered.
+    pub(crate) fn compute_rings(&self) -> usize {
+        self.compute.len()
+    }
+
+    /// The GPU address of compute ring `i`'s fence word.
+    pub(crate) fn compute_seq_address(&self, i: usize) -> u64 {
+        self.base + self.compute.get(i).map_or(0, |r| r.at) + COMPUTE_SEQ
+    }
+
+    /// The number of the last job compute ring `i` finished.
+    pub(crate) fn compute_finished(&self, gpu: &Arc<Aperture>, i: usize) -> u32 {
+        let mem = crate::psp::vram_memory(gpu, self.base);
+        mem.invalidate();
+        mem.read32(self.compute_seq_address(i))
+    }
+
+    /// Runs `packets` on compute ring `i`.
+    pub(crate) fn compute_run(
+        &mut self,
+        gpu: &Arc<Aperture>,
+        i: usize,
+        packets: &[u32],
+        ms: u32,
+    ) -> Result<(), abi::errno::Errno> {
+        let base = self.base;
+        self.compute
+            .get_mut(i)
+            .ok_or(abi::errno::Errno::ENODEV)?
+            .run(gpu, base, packets, ms)
+    }
+
     /// The GPU address of the fence word.
     pub(crate) fn seq_address(&self) -> u64 {
         self.base + SEQ_AT
@@ -392,24 +558,7 @@ impl Gfx {
         packets: &[u32],
         ms: u32,
     ) -> Result<(), abi::errno::Errno> {
-        let mem = crate::psp::vram_memory(gpu, self.base);
-        let size = self.gfx.bytes / 4;
-        let need = u32::try_from(packets.len()).map_err(|_| abi::errno::Errno::E2BIG)?;
-        if need + 1 >= size {
-            return Err(abi::errno::Errno::E2BIG);
-        }
-        for _ in 0..=ms {
-            mem.invalidate();
-            let rptr = mem.read32(self.base + self.gfx.report) % size;
-            let at = u32::try_from(self.gfx.wptr % u64::from(size)).unwrap_or(0);
-            let used = (at + size - rptr) % size;
-            if size - used > need + 1 {
-                self.gfx.submit(gpu, &mem, packets);
-                return Ok(());
-            }
-            bus::manager().delay_us(1000);
-        }
-        Err(abi::errno::Errno::EAGAIN)
+        self.gfx.run(gpu, self.base, packets, ms)
     }
 }
 

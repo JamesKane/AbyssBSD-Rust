@@ -156,6 +156,13 @@ impl Device {
         self
     }
 
+    /// The device without the DMA engine (compute kept).
+    #[must_use]
+    pub fn without_dma(mut self) -> Self {
+        self.ips.retain(|i| i.kind != ip::DMA);
+        self
+    }
+
     /// The device as a driver that runs only the graphics ring reports it:
     /// the compute and DMA engines answer as absent (no rings, count 0), so
     /// clients keep all their work on the graphics ring.
