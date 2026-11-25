@@ -32,12 +32,17 @@ desktop that runs as FreeBSD userland ([ADR-0026](docs/adr/0026-desktop-scoria.m
 | [docs/IOMMU.md](docs/IOMMU.md) | The IOMMU framework and the SMMUv3 driver |
 | [docs/GRAPHICS.md](docs/GRAPHICS.md) | Graphics design (DRM interface, `gop-kms`, Sky1 display stack) and board findings |
 | [docs/MODULES.md](docs/MODULES.md) | Driver selection and modules |
+| [docs/DRIVER-MODEL-SURVEY.md](docs/DRIVER-MODEL-SURVEY.md) | How current operating systems structure drivers: the evidence behind the driver model |
+| [docs/DESKTOP.md](docs/DESKTOP.md), [docs/INSTALLER.md](docs/INSTALLER.md) | Draft designs: Scoria, the desktop, and the graphical loader, live medium, and installer |
+| [docs/AUDIO.md](docs/AUDIO.md), [docs/BOOTSPLASH.md](docs/BOOTSPLASH.md), [docs/MANUALS.md](docs/MANUALS.md) | Draft designs: sound, the boot splash and boot time, and the system's own manuals |
+| [docs/BHYVE.md](docs/BHYVE.md), [docs/LINUXULATOR.md](docs/LINUXULATOR.md), [docs/WINDOWS-GAMES.md](docs/WINDOWS-GAMES.md), [docs/macos-personality-design.md](docs/macos-personality-design.md) | Forward designs: the `vmm` hypervisor, and the Linux, Windows, and (exploratory) macOS personalities |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | The 2% performance parity gate, methodology, fairness rules, and benchmark suites |
 | [docs/ENGINEERING.md](docs/ENGINEERING.md) | Rust conventions: algebraic types, `unsafe` policy, errors, style |
 | [docs/BUILD-AND-TEST.md](docs/BUILD-AND-TEST.md) | Toolchain, `xtask`, QEMU/bhyve, the build server, the test pyramid |
 | [docs/HARDWARE.md](docs/HARDWARE.md) | Platform requirements, supported hardware, and the driver matrix |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phased roadmap with deliverables and exit criteria |
 | [docs/adr/](docs/adr/) | Architecture Decision Records |
+| [MANIFESTO.md](MANIFESTO.md) | What AbyssBSD is for and what it will not trade away |
 
 ## Status
 
@@ -122,10 +127,21 @@ way, and the Ryzen 9 7900X / X870E (AMD64) has had its first AbyssBSD boots (Pha
     hangs seen once.
 - **X870E (Phase 10, begun 2026-11-23):** the first boots on the AMD64 reference machine. The
   loader now allocates only `EfiLoaderData`, because its AMI firmware never returns from
-  `ExitBootServices` otherwise. The `rge` driver programs the RTL8125D (the board's NIC), and
-  the console no longer assumes a COM1 the machine lacks. It boots unattended from its media NVMe
-  by `BootNext`; the rest of Phase 10 (the framebuffer and USB keyboard `multiuser` scenario,
-  fsx, the `devinfo` comparison, and the performance gate) is ahead.
+  `ExitBootServices` otherwise, and the console no longer assumes a COM1 the machine lacks. It boots
+  unattended from its media NVMe by `BootNext`. Idle CPUs wait in `MWAIT` and are woken by a write,
+  cross-CPU calls answer on their own cache lines, and `hwpstate_amd` controls CPU frequency through
+  CPPC; with those, every component of `p2` passes on the machine (geometric mean 0.621 of FreeBSD
+  15.1's time). Drivers: `rge` for both revisions of the RTL8125D (the board's NIC), the HD Audio
+  controller with its codec and function group, and `vgapci`, FreeBSD's generic attachment for a
+  display function. Ahead: the framebuffer and USB keyboard `multiuser` scenario, fsx, the `devinfo`
+  comparison, and the rest of the performance gate.
+- **Graphics on the X870E (M-G, under way):** the Radeon 610M scans out as a graphics card
+  (`amd-kms`): it flips between buffers, measures its refresh rate from the timing generator,
+  runs stock Sway on its display, keeps the last frame (and shows the console on a panic) through
+  shutdown and reset, and sets the modes its monitor's EDID lists at the firmware's pixel clock.
+  The display firmware is loaded through the platform security processor, and HDMI audio's
+  endpoint is programmed from the EDID. Modes at other pixel clocks are in progress. The RTX 4070
+  is identified, its Video BIOS and firmware read, and the first firmware step (FRTS) has run.
 
 Next: finish Phase 9's open items and Phase 10, then self-hosting and hardening (Phase 11, v1.0),
 then RV64, the Rust userland, and the desktop.
