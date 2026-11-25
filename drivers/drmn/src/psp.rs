@@ -185,3 +185,36 @@ pub(crate) fn bring_up(
         tmr_size: r.tmr_size,
     })
 }
+
+/// Gives the trusted memory zone and the ring back (03 section 9): the zone
+/// destroyed through the ring, then the ring destroyed. The security
+/// processor keeps both across a chip reset that does not reset it, so the
+/// next bring-up would find the ring made already.
+pub(crate) fn tear_down(
+    gpu: &Arc<Aperture>,
+    mut brought: Brought,
+    log: &dyn Fn(core::fmt::Arguments<'_>),
+) {
+    use flip::FB_LOCATION_BASE;
+    let w = Bar5(gpu);
+    let base = u64::from(w.read32(FB_LOCATION_BASE) & 0xffff) << 24;
+    let mem = VramMemory {
+        gpu: Arc::clone(gpu),
+        base,
+    };
+    let pause = |us: u32| bus::manager().delay_us(u64::from(us));
+    match brought
+        .psp
+        .submit(&w, &mem, &Command::destroy_tmr(), psp::COMMAND_WAIT, &pause)
+    {
+        Ok(r) => log(format_args!(
+            "PSP: trusted memory zone destroyed: status {:#x}",
+            r.status
+        )),
+        Err(e) => log(format_args!("PSP: destroying the zone: {e:?}")),
+    }
+    match brought.psp.destroy(&w, psp::COMMAND_WAIT, &pause) {
+        Ok(()) => log(format_args!("PSP: ring destroyed")),
+        Err(e) => log(format_args!("PSP: destroying the ring: {e:?}")),
+    }
+}

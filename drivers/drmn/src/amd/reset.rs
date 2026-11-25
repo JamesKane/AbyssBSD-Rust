@@ -146,6 +146,11 @@ impl Amd {
         //    not mapped).
         *self.gfx.lock() = None;
         *self.sdma.lock() = None;
+        // The security processor's ring and zone given back first, so it can
+        // be built again afterwards (03 section 9).
+        if let Some(b) = self.psp.lock().take() {
+            crate::psp::tear_down(&gpu, b, &|a| self.log(a));
+        }
         // 2. The flag, the configuration space saved, bus mastering off.
         w.write32(SCRATCH_3, w.read32(SCRATCH_3) | GUI_HUNG);
         let saved = gpu.pci().save_state();
