@@ -59,7 +59,7 @@ const KERNEL_VA: u64 = VA_MAX - (4 << 20);
 const FENCE_IB_VA: u64 = VA_MAX - (1 << 20);
 /// Pages of those a file has: a set for each engine (a job's page in its set
 /// is its number modulo `FENCE_IB_SLOTS`).
-const FENCE_IB_PAGES: u64 = 96;
+const FENCE_IB_PAGES: u64 = 160;
 const FENCE_IB_SLOTS: u64 = 16;
 const FENCE_IB_SLOTS_U32: u32 = 16;
 // The fence words' buffers come first, then the fence packet pages, inside
@@ -70,22 +70,46 @@ const _: () = assert!(FENCE_IB_VA + (1 << 20) == VA_MAX);
 const _: () = assert!(KERNEL_VA + (4 << 20) == VA_MAX);
 const _: () = assert!(FENCE_IB_PAGES * 4096 <= FENCE_IB_FILE_BYTES);
 const _: () = assert!(FENCE_IB_PAGES * 4096 <= 1 << 20);
-/// Where they are in video memory: 512 KiB for each file, from here.
+/// Where they are in video memory: 1 MiB for each file, from here.
 pub(crate) const FENCE_IB_AT: u64 = 192 << 20;
 /// What each file takes of it.
-pub(crate) const FENCE_IB_FILE_BYTES: u64 = 1 << 19;
+pub(crate) const FENCE_IB_FILE_BYTES: u64 = 1 << 20;
 
 /// The engines a job runs on, each with its own ring and sequence numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Engine {
     Gfx,
     Dma,
-    /// Kernel compute ring `n` (0 to 3).
+    /// Kernel compute queue `n` (0 to 7: the hardware queues). A submission
+    /// names one of four slots; each context's slot is bound to one of the
+    /// two queues behind it (slot `s`: queue `s` or `s + 4`).
     Compute(u8),
 }
 
-/// How many compute rings are offered (09 section 3.2).
+/// How many compute slots are offered (09 section 3.2: the limit is four).
 const COMPUTE_RINGS: u32 = 4;
+/// The hardware queues behind them.
+const COMPUTE_QUEUES: usize = 8;
+
+/// The queue a context's slot is bound to when it first submits: of the two
+/// behind the slot (`slot` and `slot + 4`) the one with fewer contexts bound,
+/// the first on a tie. A context keeps its queue, so its fences stay in the
+/// order of one ring. `queues` is how many answered their start-up test.
+fn choose_queue(slot: u8, bound: &[u32; COMPUTE_QUEUES], queues: usize) -> u8 {
+    let (a, b) = (slot, slot + 4);
+    if usize::from(b) < queues && bound[usize::from(b)] < bound[usize::from(a)] {
+        b
+    } else {
+        a
+    }
+}
+
+/// A compute job's handle: the queue in the high half, the job's number on
+/// that queue in the low half. A context's jobs are all on one queue, so
+/// the handles a client compares (its fence word) only grow.
+fn compute_handle(queue: u8, seq: u32) -> u64 {
+    (u64::from(queue) << 32) | u64::from(seq)
+}
 
 impl Engine {
     /// The engine an indirect buffer or a wait names: the hardware IP type
@@ -157,6 +181,8 @@ struct FileState {
     space: Space<VramTables>,
     maps: Vec<Mapping>,
     contexts: Vec<u32>,
+    /// The compute queue each (context, slot) is bound to.
+    queues: BTreeMap<(u32, u8), u8>,
     lists: Vec<u32>,
     /// The metadata a client keeps with a buffer, by handle.
     metadata: BTreeMap<u32, Vec<u8>>,
@@ -173,6 +199,8 @@ struct Counters {
     next_id: u32,
     /// Bytes of buffers made and not freed.
     bytes: u64,
+    /// How many contexts are bound to each compute queue.
+    bound: [u32; COMPUTE_QUEUES],
 }
 
 struct State {
@@ -190,7 +218,7 @@ pub(crate) struct Render {
     /// The same for the DMA engine's jobs.
     dma_seq: AtomicU32,
     /// And the compute rings'.
-    comp_seq: [AtomicU32; 4],
+    comp_seq: [AtomicU32; COMPUTE_QUEUES],
     /// The context of the last job (a job from another one loads the
     /// context's state).
     last_ctx: AtomicU32,
@@ -211,7 +239,7 @@ impl Render {
             amd,
             seq: AtomicU32::new(0),
             dma_seq: AtomicU32::new(0),
-            comp_seq: [const { AtomicU32::new(0) }; 4],
+            comp_seq: [const { AtomicU32::new(0) }; COMPUTE_QUEUES],
             last_ctx: AtomicU32::new(0),
             queue: Arc::new(sched::WaitQueue::new()),
             state: PreemptLock::new(State {
@@ -220,6 +248,7 @@ impl Render {
                 count: Counters {
                     next_id: 1,
                     bytes: 0,
+                    bound: [0; COMPUTE_QUEUES],
                 },
             }),
             vram_bytes,
@@ -275,6 +304,7 @@ impl Render {
                     space,
                     maps: Vec::new(),
                     contexts: Vec::new(),
+                    queues: BTreeMap::new(),
                     lists: Vec::new(),
                     metadata: BTreeMap::new(),
                     kernel_next: KERNEL_VA,
@@ -488,7 +518,7 @@ impl Render {
                 _ => {}
             }
         }
-        let engine = engine.ok_or(Errno::EINVAL)?;
+        let mut engine = engine.ok_or(Errno::EINVAL)?;
         if ibs.is_empty() {
             return Err(Errno::EINVAL);
         }
@@ -500,6 +530,20 @@ impl Render {
                 return Err(Errno::ENODEV);
             }
             _ => {}
+        }
+        // A compute slot: the queue this context uses for it.
+        if let Engine::Compute(slot) = engine {
+            let queues = amd.compute_rings();
+            let hw = self.with_file(&amd, cx.file_id(), |fs, c| {
+                if let Some(q) = fs.queues.get(&(ctx_id, slot)) {
+                    return Ok(*q);
+                }
+                let q = choose_queue(slot, &c.bound, queues);
+                c.bound[usize::from(q)] += 1;
+                fs.queues.insert((ctx_id, slot), q);
+                Ok(q)
+            })?;
+            engine = Engine::Compute(hw);
         }
         let gpu = amd.gpu_arc()?;
         // The address space's root and the user fence's address, under the
@@ -715,7 +759,7 @@ impl Render {
                 }
                 if let Some(va) = user_fence {
                     let mut f = Packets::new();
-                    f.fence(extended(va), u64::from(seq), true, false);
+                    f.fence(extended(va), compute_handle(ring, seq), true, false);
                     f.mark_compute();
                     let off = FENCE_IB_AT + (slot as u64 * FENCE_IB_FILE_BYTES) + page * 4096;
                     for (i, d) in f.0.iter().enumerate() {
@@ -744,7 +788,11 @@ impl Render {
                 seq,
             }));
         }
-        uapi::CsRequest::answer(arg, u64::from(seq));
+        let handle = match engine {
+            Engine::Compute(q) => compute_handle(q, seq),
+            _ => u64::from(seq),
+        };
+        uapi::CsRequest::answer(arg, handle);
         Ok(0)
     }
 
@@ -768,7 +816,17 @@ impl Render {
         let r = uapi::WaitCs::decode(arg).map_err(|_| Errno::EINVAL)?;
         let amd = self.amd()?;
         let seq = u32::try_from(r.handle & 0xffff_ffff).map_err(|_| Errno::EINVAL)?;
-        let engine = Engine::new(r.ip_type, r.ring).ok_or(Errno::EINVAL)?;
+        let engine = match Engine::new(r.ip_type, r.ring).ok_or(Errno::EINVAL)? {
+            // A compute handle names its queue in the high half.
+            Engine::Compute(_) => {
+                let q = u8::try_from(r.handle >> 32).map_err(|_| Errno::EINVAL)?;
+                if usize::from(q) >= COMPUTE_QUEUES {
+                    return Err(Errno::EINVAL);
+                }
+                Engine::Compute(q)
+            }
+            e => e,
+        };
         let start = sched::now_ns();
         let mut timed_out = false;
         loop {
@@ -846,8 +904,9 @@ impl RenderApi for Render {
                         uapi::Ctx::answer(arg, id, 0);
                     }
                     uapi::ctx_op::FREE => {
-                        self.with_file(&amd, cx.file_id(), |fs, _| {
-                            fs.contexts.retain(|c| *c != r.id);
+                        self.with_file(&amd, cx.file_id(), |fs, c| {
+                            fs.contexts.retain(|id| *id != r.id);
+                            unbind(fs, c, Some(r.id));
                             Ok(())
                         })?;
                         uapi::Ctx::answer(arg, 0, 0);
@@ -901,6 +960,10 @@ impl RenderApi for Render {
                     Engine::Compute(1),
                     Engine::Compute(2),
                     Engine::Compute(3),
+                    Engine::Compute(4),
+                    Engine::Compute(5),
+                    Engine::Compute(6),
+                    Engine::Compute(7),
                 ] {
                     let seq = self.last_seq(engine);
                     while seq != 0 && !self.done(&amd, engine, seq)? {
@@ -956,8 +1019,9 @@ impl RenderApi for Render {
 
     fn file_closed(&self, file: u64) {
         let mut st = self.state.lock();
-        if let Some(fs) = st.files.remove(&file) {
+        if let Some(mut fs) = st.files.remove(&file) {
             st.slots[fs.slot] = false;
+            unbind(&mut fs, &mut st.count, None);
         }
     }
 }
@@ -1000,6 +1064,23 @@ fn finished_at(amd: &Amd, gpu: &Arc<Aperture>, engine: Engine, seq: u32) -> bool
         Engine::Compute(r) => amd.gfx_lock().as_ref().is_none_or(|g| {
             g.compute_finished(gpu, usize::from(r)).wrapping_sub(seq) < 0x8000_0000
         }),
+    }
+}
+
+/// Gives up the compute queues a file's contexts were bound to: those of
+/// context `ctx`, or all of them.
+fn unbind(fs: &mut FileState, c: &mut Counters, ctx: Option<u32>) {
+    let gone: Vec<(u32, u8)> = fs
+        .queues
+        .keys()
+        .filter(|(id, _)| ctx.is_none_or(|x| x == *id))
+        .copied()
+        .collect();
+    for k in gone {
+        if let Some(q) = fs.queues.remove(&k) {
+            let n = &mut c.bound[usize::from(q)];
+            *n = n.saturating_sub(1);
+        }
     }
 }
 
@@ -1065,7 +1146,7 @@ mod tests {
         // addresses is one the hardware accepts.
         assert!(canonical(extended(KERNEL_VA)).is_some());
         assert!(canonical(extended(FENCE_IB_VA)).is_some());
-        assert_eq!(FENCE_IB_PAGES, 6 * FENCE_IB_SLOTS);
+        assert_eq!(FENCE_IB_PAGES, 10 * FENCE_IB_SLOTS);
     }
 
     #[test]
@@ -1089,11 +1170,15 @@ mod tests {
             Engine::Compute(1),
             Engine::Compute(2),
             Engine::Compute(3),
+            Engine::Compute(4),
+            Engine::Compute(5),
+            Engine::Compute(6),
+            Engine::Compute(7),
         ]
         .iter()
         .map(|e| e.page_set())
         .collect();
-        assert_eq!(sets, [0, 1, 2, 3, 4, 5]);
+        assert_eq!(sets, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
 
     #[test]
@@ -1105,5 +1190,34 @@ mod tests {
         let none = gpu_flags(0);
         assert!(!none.readable && !none.writeable && !none.executable);
         assert!(gpu_flags(VM_WRITEABLE).writeable);
+    }
+
+    #[test]
+    fn a_contexts_slot_goes_to_the_less_loaded_of_its_two_queues() {
+        let mut bound = [0u32; COMPUTE_QUEUES];
+        // Nothing bound: the first of the pair.
+        assert_eq!(choose_queue(1, &bound, 8), 1);
+        bound[1] = 1;
+        // The first is loaded: the second, four above.
+        assert_eq!(choose_queue(1, &bound, 8), 5);
+        bound[5] = 1;
+        assert_eq!(choose_queue(1, &bound, 8), 1);
+        // Other slots are not affected by it.
+        assert_eq!(choose_queue(2, &bound, 8), 2);
+        // Only the queues that answered their test are used.
+        assert_eq!(choose_queue(1, &bound, 4), 1);
+        bound[1] = 5;
+        assert_eq!(choose_queue(1, &bound, 4), 1);
+    }
+
+    #[test]
+    fn a_compute_handle_keeps_its_queue_and_orders_by_number() {
+        assert_eq!(compute_handle(0, 7), 7);
+        assert_eq!(compute_handle(5, 7), (5 << 32) | 7);
+        // One queue's handles only grow, which is what a client's fence word
+        // needs.
+        assert!(compute_handle(5, 8) > compute_handle(5, 7));
+        assert_eq!(compute_handle(5, 7) >> 32, 5);
+        assert_eq!(compute_handle(5, 7) & 0xffff_ffff, 7);
     }
 }

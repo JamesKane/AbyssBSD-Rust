@@ -126,5 +126,26 @@ int main(int argc, char **argv)
 		       (unsigned long long)*(uint64_t *)&ccs, (unsigned long long)cw.handle, got, 0xc0ffee00 + ring);
 		bad |= got != 0xc0ffee00 + ring;
 	}
+	/* A second context's compute slot 0 is bound to the other queue behind it (queue 4). */
+	struct ctx c2 = { .op = 1 };
+	if (ioctl(fd, CMD(0x02, struct ctx), &c2) < 0) { perror("CTX alloc 2"); return 1; }
+	{
+		uint32_t *c = (uint32_t *)((char *)map[0] + 0x400);
+		uint64_t at = va_data + 64;
+		c[0] = 0xc0033702; c[1] = (5 << 8) | (1 << 20);
+		c[2] = (uint32_t)at; c[3] = (uint32_t)(at >> 32); c[4] = 0xfeed0004;
+		struct ib cib = { .va = va_ib + 0x400, .bytes = 5 * 4, .ip = 1, .ring = 0 };
+		struct chunk cck = { .id = 1, .len = sizeof cib / 4, .data = (uintptr_t)&cib };
+		uint64_t cchunks[1] = { (uintptr_t)&cck };
+		struct cs ccs = { .ctx = c2.id, .nchunks = 1, .chunks = (uintptr_t)cchunks };
+		if (ioctl(fd, CMD(0x04, struct cs), &ccs) < 0) { perror("CS (compute, context 2)"); return 1; }
+		uint64_t handle = *(uint64_t *)&ccs;
+		struct wait cw = { .handle = handle, .timeout = 2000000000ull, .ip = 1, .ring = 0, .ctx = c2.id };
+		if (ioctl(fd, CMD(0x09, struct wait), &cw) < 0) { perror("WAIT_CS (compute, context 2)"); return 1; }
+		uint32_t got = ((volatile uint32_t *)map[1])[64 / 4];
+		printf("compute slot 0, second context: queue %llu (want 4), written %#x\n",
+		       (unsigned long long)(handle >> 32), got);
+		bad |= (handle >> 32) != 4 || got != 0xfeed0004;
+	}
 	return bad ? 2 : 0;
 }
