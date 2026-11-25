@@ -81,18 +81,43 @@ if [ "$dry" = 1 ]; then
 	exit 0
 fi
 
-# 2. The share. `gio mount` asks for the credentials on this terminal.
-gvfs=/run/user/$(id -u)/gvfs
+# 2. The share. First `gio mount` (no root; it asks for the credentials
+# itself), and where gvfs has no SMB backend, `mount.cifs` through sudo: the
+# script asks for the user name and password here, puts them in a file of
+# yours in RAM (mode 600) only for the mount, and removes it at once.
 host=${share#smb://}
 host=${host%%/*}
 name=${share#smb://*/}
-name=${name%/}
-path=$gvfs/smb-share:server=$host,share=$name
+name=${name%%/*}
+path=/run/user/$(id -u)/gvfs/smb-share:server=$host,share=$name
+mounted_here=
 if [ ! -d "$path" ]; then
 	say "mounting $share (enter the user name and password when asked)"
-	gio mount "$share"
+	if ! gio mount "$share" || [ ! -d "$path" ]; then
+		say "gio cannot mount it here: mounting with mount.cifs (sudo asks for your password first)"
+		command -v mount.cifs > /dev/null || die "mount.cifs is not installed"
+		path=${XDG_RUNTIME_DIR:-/tmp}/nas-image-mnt
+		mkdir -p "$path"
+		if ! mountpoint -q "$path"; then
+			read -r -p "NAS user name: " nas_user
+			read -r -s -p "NAS password: " nas_pass
+			echo
+			old_umask=$(umask)
+			umask 077
+			cred=$(mktemp /dev/shm/nas-cred.XXXXXX)
+			umask "$old_umask"
+			trap 'rm -f "$cred"' EXIT
+			printf 'username=%s\npassword=%s\n' "$nas_user" "$nas_pass" > "$cred"
+			unset nas_pass
+			sudo mount -t cifs "//$host/$name" "$path" \
+				-o "credentials=$cred,uid=$(id -u),gid=$(id -g),file_mode=0600,dir_mode=0700,nosuid,nodev"
+			rm -f "$cred"
+			trap - EXIT
+			mounted_here=$path
+		fi
+	fi
 fi
-[ -d "$path" ] || die "$path is not there after the mount (is gvfs-fuse running?)"
+[ -d "$path" ] || die "$path is not there after the mount"
 mkdir -p "$path/$dir"
 avail=$(df -B1 --output=avail "$path" 2> /dev/null | tail -1 | tr -d ' ')
 say "share has ${avail:-unknown} bytes free; the disk is $bytes (the image will be smaller)"
@@ -147,4 +172,9 @@ Check: zstdcat $disk.img.zst | sha256sum   should print the hash in $disk.sha256
 $disk.txt has the partition table; $disk.first-mib.bin the first MiB (the MBR).
 EOF
 say "done: the image has the disk's size and hash ($disk_hash)"
-say "nothing was written to $disk. The share stays mounted: gio mount -u $share"
+say "nothing was written to $disk."
+if [ -n "$mounted_here" ]; then
+	sudo umount "$mounted_here" && say "the share is unmounted"
+else
+	say "the share stays mounted: gio mount -u $share"
+fi
