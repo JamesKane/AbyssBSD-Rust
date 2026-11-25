@@ -1297,3 +1297,23 @@ board before the next is built on it. Anything that can hang the machine is aske
 - **Next (R4.2):** the golden settings, `GRBM_CNTL`, the harvesting read and per-VMID shader memory configuration, the clear-state
   buffer, releasing the command processors, then the rings (06 sections 2 to 9).
 
+### 16.23 R4.2 to R4.4, first attempt: graphics ring 0 programmed directly (2026-11-24)
+
+- **Code.** `lib/amdgpu/src/gc.rs`: the golden settings of GC 10.3.6 (22 entries, generated from the specification's table), the per-VMID shader
+  memory configuration, the clear-state buffer (949 dwords built from the specification's extents and its 85 non-zero values, checked
+  value by value), the ring registers of 06 section 7.1, the release of the command processors; `lib/amdgpu/src/pm4.rs`: the packets of
+  06 section 10 (header, write-data, set-register with range checks, the release-mem fence, wait, indirect buffer, acquire-mem, and
+  the rest); `lib/amdgpu/src/vm.rs`: the four-level GPU page tables. 131 host tests in `amdgpu`. `drivers/drmn/src/gcring.rs` puts the ring
+  (64 KiB), its report words and the clear-state buffer in video memory (BAR0 offset 170 MiB), starts it and runs the ring test
+  (`dev.drmn.1.gc_ring`, after `gc_fw`).
+- **Result on the X870E.** The golden settings, shader memory and clear-state address took; ring 0 was programmed; the processors were released
+  (`CP_ME_CNTL` 0; **`CP_STAT` then reads `0x80808000`: a released processor is busy running its firmware, it is not waited for to go idle**: 06
+  section 7.3's "wait for `CP_STAT` = 0" applies after a halt); the clear state and `SET_BASE` were written (write pointer 953). The
+  **read pointer stayed 0**, and the translation hub reported a fault: `GCVM_L2_PROTECTION_FAULT_STATUS` `0x0d3c` = client 6 (CPG, the graphics
+  command processor's front end), VMID 0, a read, mapping error, **fault address 0**. So the processor reads a pointer that is 0 instead of the
+  ring at `0xf40aa00000` (which the system aperture covers). The display was not disturbed.
+- **Reading.** Direct programming of ring 0 leaves something the firmware dereferences at 0. The reference's default is the graphics queue
+  mapped through the kernel interface queue with a graphics queue descriptor (06 sections 7.2, 9); the question of what the firmware reads, and
+  whether the direct path is valid with this firmware, is asked of the specification's author. The kernel interface queue path (the queue
+  descriptors, the compute queue registers, `SET_RESOURCES` and `MAP_QUEUES`, the doorbells) is the next thing to build if it is required.
+
