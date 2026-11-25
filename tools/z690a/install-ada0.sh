@@ -26,6 +26,10 @@
 #   --update-kernel       the server's newest release kernel (from its last
 #                         build) onto the installed root, the old one kept as
 #                         kernel.prev: no other disk or partition changes.
+#   --board-files         what `image --root board` adds, onto the installed root:
+#                         DHCP on every interface, sshd with root let in by key
+#                         only, and ~/.ssh/id_ed25519.pub (or $SSH_PUB) as root's
+#                         authorized_keys. Safe to run again.
 #   --boot-once           BootNext to the AbyssBSD entry. It does not reboot.
 #   --status              what is there: the partitions, the boot entries.
 # Add --dry-run to --install to see its preflight and plan only.
@@ -42,7 +46,7 @@ wipe=
 dry=0
 while [ $# -gt 0 ]; do
 	case $1 in
-	--prepare | --install | --entry | --update-kernel | --boot-once | --status) mode=${1#--} ;;
+	--prepare | --install | --entry | --update-kernel | --board-files | --boot-once | --status) mode=${1#--} ;;
 	--wipe) wipe=$2; shift ;;
 	--dry-run) dry=1 ;;
 	-h | --help) sed -n '2,/^set -eu/p' "$0" | sed 's/^# \{0,1\}//; /^set -eu/d'; exit 0 ;;
@@ -50,7 +54,7 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
-[ -n "$mode" ] || { echo "usage: $0 --prepare | --install --wipe SERIAL [--dry-run] | --entry | --update-kernel | --boot-once | --status" >&2; exit 2; }
+[ -n "$mode" ] || { echo "usage: $0 --prepare | --install --wipe SERIAL [--dry-run] | --entry | --update-kernel | --board-files | --boot-once | --status" >&2; exit 2; }
 
 srv() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 abyss-build "$@"; }
 say() { echo "$(date +%T) $*"; }
@@ -152,7 +156,7 @@ doas -n mkdir -p /mnt/abyssefi-z690a
 doas -n mount -t msdosfs -o ro /dev/${disk}p1 /mnt/abyssefi-z690a
 ls /mnt/abyssefi-z690a/EFI/BOOT/BOOTX64.EFI /mnt/abyssefi-z690a/EFI/ABYSS/CMDLINE
 doas -n umount /mnt/abyssefi-z690a
-if doas -n efibootmgr | grep -q '$label'; then
+if doas -n efibootmgr -v | grep -q '$label'; then
 	echo "the entry '$label' is already there"
 else
 	doas -n mount -t msdosfs /dev/${disk}p1 /mnt/abyssefi-z690a
@@ -186,10 +190,36 @@ EOF
 	say "the kernel is on abyssroot; BootNext is unchanged (--boot-once sets it)"
 	;;
 
+board-files)
+	pub=${SSH_PUB:-$HOME/.ssh/id_ed25519.pub}
+	[ -r "$pub" ] || die "no public key at $pub (SSH_PUB names another)"
+	key=$(head -1 "$pub")
+	case $key in ssh-* | ecdsa-*) ;; *) die "$pub is not an OpenSSH public key" ;; esac
+	srv "sh -s" << EOF
+set -eu
+trap 'doas -n umount /mnt/abyssroot-z690a 2> /dev/null || true; doas -n rmdir /mnt/abyssroot-z690a 2> /dev/null || true' EXIT
+doas -n mkdir -p /mnt/abyssroot-z690a
+doas -n mount /dev/gpt/abyssroot /mnt/abyssroot-z690a
+rc=/mnt/abyssroot-z690a/etc/rc.conf
+if ! grep -q '^sshd_enable=' \$rc; then
+	printf '%s\n' 'ifconfig_DEFAULT="DHCP"' 'sshd_enable="YES"' 'sshd_flags="-o PermitRootLogin=prohibit-password"' | doas -n tee -a \$rc > /dev/null
+fi
+doas -n mkdir -p /mnt/abyssroot-z690a/root/.ssh
+doas -n chmod 700 /mnt/abyssroot-z690a/root/.ssh
+printf '%s\n' '$key' | doas -n tee /mnt/abyssroot-z690a/root/.ssh/authorized_keys > /dev/null
+doas -n chmod 600 /mnt/abyssroot-z690a/root/.ssh/authorized_keys
+doas -n sync
+cat \$rc
+doas -n ls -la /mnt/abyssroot-z690a/root/.ssh
+doas -n umount /mnt/abyssroot-z690a
+EOF
+	say "the root has DHCP, sshd, and your key for root"
+	;;
+
 boot-once)
 	srv "sh -s" << EOF
 set -eu
-num=\$(doas -n efibootmgr | sed -n "s/^[+ ]*Boot\\([0-9A-Fa-f]*\\)[* ] $label.*/\\1/p" | head -1)
+num=\$(doas -n efibootmgr -v | sed -n "s/^[+ ]*Boot\\([0-9A-Fa-f]*\\)[* ] $label.*/\\1/p" | head -1)
 [ -n "\$num" ] || { echo "no boot entry '$label'" >&2; exit 1; }
 doas -n efibootmgr -n -b \$num
 doas -n efibootmgr | head -5
