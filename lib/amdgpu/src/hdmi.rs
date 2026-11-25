@@ -323,8 +323,9 @@ pub fn stream_controls<W: Window + ?Sized>(w: &W) {
 /// The link's read-only diagnostics (08 section 3.7.7): the encoder's FIFO
 /// status, the back and front ends' clock enables, the symbol clock enable,
 /// the HDMI status, and the output CRC and its result. (name, byte).
-pub const LINK_STATE: [(&str, usize); 8] = [
+pub const LINK_STATE: [(&str, usize); 9] = [
     ("DIG_FIFO_STATUS", 0x15544),
+    ("DIG_BE_CNTL", DIG_BE_CNTL),
     ("DIG_BE_EN_CNTL", 0x155c4),
     ("DIG_FE_CNTL", DIG_FE_CNTL),
     ("SYMCLKA_CLOCK_ENABLE", 0x580),

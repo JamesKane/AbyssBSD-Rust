@@ -911,7 +911,12 @@ impl Amd {
         let command = |what: &str, bytes: &[u8]| -> bool {
             match inbox.submit(&w, &mem, bytes, 200, 1000, &pause) {
                 Ok(()) => {
-                    self.log(format_args!("mode: {what}: taken"));
+                    self.log(format_args!(
+                        "mode: {what}: taken (DIG_FE_CNTL {:#010x}, DIG_BE_CNTL {:#010x}, FIFO {:#010x})",
+                        w.read32(hdmi::DIG_FE_CNTL),
+                        w.read32(hdmi::DIG_BE_CNTL),
+                        w.read32(0x15544),
+                    ));
                     true
                 }
                 Err(e) => {
@@ -920,6 +925,9 @@ impl Amd {
                 }
             }
         };
+        // The front end's connection as the firmware left it (reconnected
+        // after the way on, step 12 of the reference).
+        let front_end = w.read32(hdmi::DIG_FE_CNTL);
         if clock_change {
             // The way off (08 section 3.7.7): the packets stopped, the plane
             // blanked, the transmitter off, then the generator stopped.
@@ -967,6 +975,15 @@ impl Amd {
             hdmi::set_dig_mode(&w, 3);
             command("encoder stream setup", &dmcub::encoder_stream_setup(symbol));
             hdmi::stream_controls(&w);
+            // Step 12: the front end connected again, its source the timing
+            // generator, as the firmware had it.
+            if w.read32(hdmi::DIG_FE_CNTL) != front_end {
+                self.log(format_args!(
+                    "mode: DIG_FE_CNTL {:#010x} -> {front_end:#010x} (the front end reconnected)",
+                    w.read32(hdmi::DIG_FE_CNTL)
+                ));
+                w.write32(hdmi::DIG_FE_CNTL, front_end);
+            }
         }
         let avi_code = if apply { code } else { 16 };
         let avi_wide = if apply { wide } else { true };
