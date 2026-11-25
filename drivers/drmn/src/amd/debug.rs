@@ -41,6 +41,60 @@ impl Amd {
         self.asic_init()
     }
 
+    /// Reads the audio path's registers (the encoder's audio formatter, the
+    /// packet and clock-regeneration controls, the audio clock, endpoint 0)
+    /// and logs them: reads only. Run it while a tone plays.
+    pub(crate) fn afmt_probe(&self) -> Result<(), abi::errno::Errno> {
+        use amdgpu::hdmi;
+        use amdgpu::regs::Window as _;
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        for (name, at) in hdmi::WATCH {
+            self.log(format_args!(
+                "AFMT: {name} @{at:#07x} = {:#010x}",
+                w.read32(*at)
+            ));
+        }
+        for (name, at) in [
+            (
+                "AFMT_AUDIO_PACKET_CONTROL2",
+                hdmi::AFMT_AUDIO_PACKET_CONTROL2,
+            ),
+            ("AFMT_60958_0", hdmi::AFMT_60958_0),
+            ("AFMT_60958_1", hdmi::AFMT_60958_1),
+            ("AFMT_AUDIO_INFO0", 0x154d8),
+            ("AFMT_AUDIO_INFO1", 0x154dc),
+            ("AFMT_INFOFRAME_CONTROL0", 0x1550c),
+            ("AFMT_MEM_PWR", hdmi::AFMT_MEM_PWR),
+            ("HDMI_AUDIO_PACKET_CONTROL", hdmi::AUDIO_PACKET_CONTROL),
+            ("HDMI_INFOFRAME_CONTROL0", hdmi::INFOFRAME_CONTROL0),
+            ("HDMI_INFOFRAME_CONTROL1", hdmi::INFOFRAME_CONTROL1),
+            ("HDMI_ACR_32_0", hdmi::ACR_32.0),
+            ("HDMI_ACR_32_1", hdmi::ACR_32.1),
+            ("HDMI_ACR_44_0", hdmi::ACR_44_1.0),
+            ("HDMI_ACR_44_1", hdmi::ACR_44_1.1),
+            ("HDMI_ACR_48_0", hdmi::ACR_48.0),
+            ("HDMI_ACR_48_1", hdmi::ACR_48.1),
+        ] {
+            self.log(format_args!(
+                "AFMT: {name} @{at:#07x} = {:#010x}",
+                w.read32(at)
+            ));
+        }
+        for (name, index) in [
+            ("endpoint channel/speaker", hdmi::EP_CHANNEL_SPEAKER),
+            ("endpoint hot-plug", hdmi::EP_HOTPLUG),
+            ("endpoint multichannel", 0x36),
+            ("endpoint response configuration", 0x56),
+        ] {
+            self.log(format_args!(
+                "AFMT: {name} (index {index:#x}) = {:#010x}",
+                hdmi::endpoint_read(&w, index)
+            ));
+        }
+        Ok(())
+    }
+
     /// Reads the firmware's metrics table (04 section 3.3: clocks, activity,
     /// power, the limits that hold it down) into a page of video memory and
     /// logs it: harmless, the way to see what the chip is running at.
@@ -994,6 +1048,11 @@ pub(super) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             "asic_init",
             "Write 1 to run the video BIOS's initialisation table on the running chip (it writes a few registers)",
             Amd::asic_init_trigger,
+        ),
+        (
+            "afmt_probe",
+            "Write 1 to log the audio path's registers (formatter, packets, clock, endpoint 0): reads only; run it while a tone plays",
+            Amd::afmt_probe,
         ),
         (
             "smu_metrics",

@@ -153,6 +153,36 @@ pub const fn set_pin_control(cad: u8, nid: u8, control: u8) -> u32 {
 /// Pin control: the output is enabled.
 pub const PIN_OUT_ENABLE: u8 = 1 << 6;
 
+/// Get Converter Format (a 4-bit verb).
+#[must_use]
+pub const fn get_converter_format(cad: u8, nid: u8) -> u32 {
+    crate::verb::verb4(cad, nid, 0xa, 0)
+}
+
+/// Get Converter Stream, Channel.
+#[must_use]
+pub const fn get_stream_channel(cad: u8, nid: u8) -> u32 {
+    crate::verb::verb12(cad, nid, 0xf06, 0)
+}
+
+/// Get Digital Converter Control.
+#[must_use]
+pub const fn get_digital_converter(cad: u8, nid: u8) -> u32 {
+    crate::verb::verb12(cad, nid, 0xf0d, 0)
+}
+
+/// Get Pin Widget Control.
+#[must_use]
+pub const fn get_pin_control(cad: u8, nid: u8) -> u32 {
+    crate::verb::verb12(cad, nid, 0xf07, 0)
+}
+
+/// Get Power State.
+#[must_use]
+pub const fn get_power_state(cad: u8, nid: u8) -> u32 {
+    crate::verb::verb12(cad, nid, 0xf05, 0)
+}
+
 /// Get Pin Sense.
 #[must_use]
 pub const fn get_pin_sense(cad: u8, nid: u8) -> u32 {

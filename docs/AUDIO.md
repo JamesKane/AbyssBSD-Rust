@@ -314,7 +314,10 @@ Drivers are `forbid(unsafe)` and use the DMA layer's buffers for hardware rings.
 
 The controller slice of row 2 landed ahead of A0 and A1 (2026-11-24): `drivers/hda` has `hdac`, `hdacc`
 and `hdaa` attach in QEMU (`x86_64-audio`, `aarch64-audio`), with the controller's rings polled, no streams, and the
-widget graph read through `lib/hda`. Streams, the mixer and `pcmN` wait for the engine.
+widget graph read through `lib/hda`. Output streams followed (2026-11-25): a polled, looped test tone
+(`dev.hdaa.N.tone`) plays through a codec's output pin, verified in QEMU on both architectures and through the
+Radeon's HDMI codec on the X870E (row 4's hardware path; GRAPHICS.md §16.11). The mixer, input streams,
+interrupts, and `pcmN` wait for the engine.
 
 High Definition Audio codecs are parsed the way FreeBSD's `hdaa` does it: walk the widget graph,
 group pins into associations, and derive devices and mixer controls from them, with per-board

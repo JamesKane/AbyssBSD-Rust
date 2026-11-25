@@ -845,10 +845,20 @@ Mesa's `radeonsi` on a render node, and runs Sway with hardware rendering. The N
 - **HDMI** (`lib/amdgpu/src/hdmi.rs`): the audio encoder setup, endpoint configuration bracketed by the clock
   gating disable, the audio clock, the encoder's HDMI mode, the AVI info frame (`hdmi::avi_for`, checksums
   checked against the specification), packet controls, enable and unmute. The endpoint is written from the
-  EDID's short audio descriptors, speaker allocation and basic-audio flag. **Sound is not tested:** the HD Audio
-  driver (`drivers/hda`) attaches to the Radeon's controller but has no streams yet; the audio clock is fixed
-  at 148.5 MHz; audio info frame bytes and the choice between the three clock-regeneration pairs are open in
-  the specification.
+  EDID's short audio descriptors, speaker allocation and basic-audio flag. **Sound works on the X870E** (a
+  1 kHz tone through the Dell ST2421L's audio-out, heard clean; the monitor has no speakers of its own, its
+  audio-out is a line-out): `drivers/hda` runs an output stream on the Radeon's controller (`hdac1`, 1002:1640)
+  into its codec (`hdacc1`, ATI `0xaa01`; `hdaa1`: pins 3, 5, 7, 9 and 11, all digital outputs, each
+  converter behind one pin; pin 3 and converter 2 are endpoint 0 and DIG0) as `dev.hdaa.1.tone` (§16.11). The
+  order that works after a boot: `hdmi_audio`, `edid`, `hdmi` (display side), then the tone. Until `hdmi`, the pin
+  senses no display; after it, pin 3 reads presence and a valid ELD. **Measured, closing two open questions of
+  the specification:** the audio infoframe the codec writes through the pin's data island packet verbs lands in
+  `AFMT_AUDIO_INFO0` (`0x170`: checksum `0x70`, channel count minus one in bit 8), so the display driver does
+  not write it; and with the stream running `AFMT_STATUS` reads `0x40000010` (bit 4, audio enabled),
+  `AFMT_AUDIO_PACKET_CONTROL` bit 0 (sample send) set, `HDMI_INFOFRAME_CONTROL0` bit 4 set and
+  `AFMT_INFOFRAME_CONTROL0` 0. Which of the three clock-regeneration pairs the hardware picks for a 48 kHz
+  stream is still not established (all three are programmed; 48 kHz works). The audio clock is fixed at
+  148.5 MHz, so audio is 1080p60 only.
 - **EDID over DDC** (`lib/amdgpu/src/ddc.rs`): the display core's hardware I2C engine (08 section 4.7):
   arbitration, pin hand-over (all restored on every path), up to four transactions per run (segment pointer,
   offset write, read). `MICROSECOND_TIME_BASE_DIV` reads `0x00120218` rather than the `0x00120264` the
@@ -969,7 +979,7 @@ Mesa does not use the compute and DMA rings by default; the interface offers the
 ### 16.9 Debug triggers
 
 One-shot sysctls in `drivers/drmn/src/amd/debug.rs` (`dev.drmn.<unit>.<name>`, written with 1; all left out by
-`hw.drmn.debug=0`, on by default): reads (`discover`, `display`, `memory`, `vram`, `gc_probe`, `smu_probe`, `smu_metrics`, `ddc_probe`,
+`hw.drmn.debug=0`, on by default): reads (`discover`, `display`, `memory`, `vram`, `gc_probe`, `smu_probe`, `smu_metrics`, `afmt_probe`, `ddc_probe`,
 `mode_probe`, `vbios_dump`; and `sink` and `irq`, which are always present); bring-up pieces (`psp`, `gmc`,
 `gmc_mm`, `interrupts`, `doorbells`, `dmcub`, `gc_fw`, `gc_ring`, `gc_vm`, `asic_init`); display (`flip`,
 `mode=<code>`, `hdmi`, `hdmi_off`, `hdmi_audio`, `edid`, `link_reconnect`, `refresh`, `panic_restore`); and tests
@@ -985,4 +995,26 @@ reboot (always set `BootNext` first so the board does not boot Fedora).
   event for the other connector types (only HDMI-A-1 is watched).
 - Compute and graphics preemption verification; the wave-kill soft recovery; the DMA reset's freeze step.
 - Scanning out clients' buffers in place (a GART-mapped scan-out path) instead of copying.
-- Sound over HDMI; the Navi 22 (Z690-A) bring-up; the half-speed-after-reset cause (§16.8).
+- Sound over HDMI through the sound engine (`/dev/dsp`, docs/AUDIO.md); the Navi 22 (Z690-A) bring-up; the half-speed-after-reset cause (§16.8).
+
+### 16.11 HDMI audio: the stream half
+
+`drivers/hda` plays through any HD Audio codec: `lib/hda/src/stream.rs` has the stream descriptor registers, the
+buffer descriptor list entry, the stream format word (`format(48_000, 16, 2)` is `0x0011`), the verbs that point a
+converter at a stream (format, stream and channel, digital converter enable) and set a pin (output enable,
+connection select, amplifiers, EAPD, the HDMI channel slots and the data island packet writes for the audio
+infoframe), the infoframe's bytes and the tone. `drivers/hda/src/controller.rs` runs output stream 0 (descriptor
+index = the input streams + 0, stream number 1) over a two-entry buffer descriptor list, polled with no
+interrupt (`INTCTL` stays 0): `Controller::play` returns a `Playback` whose drop stops the stream.
+`drivers/hda/src/tone.rs` chooses the output pin (a present digital pin first, with its capabilities and sense
+asked again at that moment, since the display driver enables the endpoint after attach), follows the first
+connection of each node to the converter, powers the path and opens its amplifiers, starts the stream, sets
+the converter and (for HDMI) the pin, and logs a ladder: the codec's readbacks, the link position (19,200 bytes
+in 100 ms is right at 48 kHz stereo), the wraps of the 30,720-byte looped buffer, the pin sense. Behavior
+reference: FreeBSD 15.1 `hdac.c` (`hdac_stream_start`) and `hdaa.c` (`hdaa_audio_setup`).
+
+`dev.hdaa.<unit>.tone` (write seconds, 1 to 20) runs it on a kernel thread. The kernel's audio test
+(`hda_controller_codec_and_function_group`) plays it on QEMU's `hda-duplex` on both architectures and asserts
+the position moves and the buffer wraps. `dev.drmn.<unit>.afmt_probe` logs the display's audio registers (reads
+only) to run during a tone. This is the driver a `PcmHw` will wrap (docs/AUDIO.md §7.2, row 4); the sound
+engine, `/dev/dsp` and mixer are not built.

@@ -231,6 +231,17 @@ pub(crate) fn play(
         play.status(),
         play.bytes
     ));
+    // What the codec says it was told.
+    let ask = |v: u32| link.command(s, v);
+    log(format_args!(
+        "tone: readback: converter {conv_nid}: format {:#x?}, stream/channel {:#x?}, digital {:#x?}, power {:#x?}; pin {pin_nid}: control {:#x?}, power {:#x?}",
+        ask(stream::get_converter_format(cad, conv_nid)),
+        ask(stream::get_stream_channel(cad, conv_nid)),
+        ask(stream::get_digital_converter(cad, conv_nid)),
+        ask(stream::get_power_state(cad, conv_nid)),
+        ask(stream::get_pin_control(cad, pin_nid)),
+        ask(stream::get_power_state(cad, pin_nid)),
+    ));
     // The ladder: does the link position advance, and does it wrap?
     let queue = sched::WaitQueue::new();
     let wait = |ms: u64| {
