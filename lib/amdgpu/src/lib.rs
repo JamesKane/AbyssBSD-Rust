@@ -43,4 +43,5 @@ pub mod pm4;
 pub mod psp;
 pub mod regs;
 pub mod timing;
+pub mod uapi;
 pub mod vm;
