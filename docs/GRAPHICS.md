@@ -1169,3 +1169,24 @@ the zone, and then the display microcontroller's load as one experiment. The fil
   scaler, output buffer and ODM width registers, which have not been read), and the KMS card still offering only the
   firmware's mode.
 
+### 16.17 R3.4 modes, step 2: the first pixel-clock change (720p60) did not carry the link (2026-11-24)
+
+- **Code.** `modeset::plan_retimed` (the request fields by the reference's rules, every value equal to 08 section 3.7.2's table
+  for seven modes, and every register that holds the active size: viewport, scaler receive size, mixer size, the scaler's copy of
+  the blanking, the pattern generator's size), `modeset::snapshot` / `plan_restore` (the firmware's own values put back exactly),
+  `dmcub::set_pixel_clock` (header `0x10000280`), window 3 sized to the video BIOS (top = base + size), and the platform's own
+  copy of the video BIOS (44,544 bytes at video memory `0x1fe20000`, signature `55 aa`, byte sum `0x2b`) copied into it. Host
+  tests: 106 in `amdgpu`.
+- **Read-only findings on the X870E.** The scaler reads as bypass (ratios `0x01000000`); the output buffer and ODM widths are 0 (left
+  alone, as the specification says); `BIOS_SCRATCH_6` reads 0 (the reference would power-gate every pipe first; not done);
+  `DSCL0_SCL_MODE` at `0x106ec` reads 1 where 0 was expected (not understood, ratios are 1.0).
+- **The attempt.** `mode=4` (720p60, 74.25 MHz): stop the generator, one set-pixel-clock command (taken; the generator then ran at
+  60.331 Hz with 1650 x 750 totals, which needs a 74.25 MHz clock, so the clock really retuned), 14 register writes, start.
+  **The monitor showed no signal.** Putting back the firmware's registers and sending the 148.5 MHz command did not bring it
+  back either. Every register read back as the firmware left it, so the plane, timing and clock source were not the cause;
+  the physical layer was not carrying a valid signal. Only a reboot cleared it (the platform firmware retrains the display).
+- **Reading.** On HDMI the pixel clock is the link clock; the reference sends a transmitter-control "off" before the clock
+  command and "on" after (08 section 3.7.5). This attempt sent the clock command alone, as the specification's author advised
+  trying first. Next: the transmitter off/on pair, whose layout for this firmware (the 1.7 one) the wall agent is asked to
+  give byte by byte.
+
