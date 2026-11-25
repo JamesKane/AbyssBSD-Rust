@@ -494,8 +494,6 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
     it;
   - after `p5` has run in the same boot, `kevent.pipe1000` is 7% slower until a reboot. Each
     knote's filter is still its own allocation;
-  - the kernel's profiler drops samples taken in user mode (`prof.rs`: `USER` and `OTHER` are the
-    same bit).
 - **The board does not always come back from a reset** (three times in some forty, and once more
   in about a hundred reboots on 2026-11-25, on a reboot of AbyssBSD into itself through `BootNext`):
   the system shuts down (`shutdown: reboot by root` and `syslogd` exiting are the last lines logged),

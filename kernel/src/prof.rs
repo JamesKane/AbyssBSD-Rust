@@ -56,8 +56,10 @@ static ONLY_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 static ONLY_THREAD: Once<&'static str> = Once::new();
 
 /// An interrupted address standing for another thread's, with
-/// [`ONLY_THREAD`]: not sampled.
-const OTHER: u64 = 1;
+/// [`ONLY_THREAD`]: not sampled. Not [`USER`]'s value: a user-mode sample
+/// is one to keep, and sharing it dropped them all. Neither is a kernel
+/// address.
+const OTHER: u64 = 2;
 
 /// A report is being made: what it costs is no benchmark's.
 static REPORTING: AtomicBool = AtomicBool::new(false);
