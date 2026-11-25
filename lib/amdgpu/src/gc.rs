@@ -207,8 +207,10 @@ pub fn program_ring<W: Window + ?Sized>(w: &W, r: &Ring, pause_us: &dyn Fn(u32))
 }
 
 /// Releases the graphics command processors (06 section 7.3): the context
-/// count and the device id, then CE, PFP and ME unhalted; waits for
-/// `CP_STAT` to read 0 (`polls` tries of `pause_us`). Returns whether it did.
+/// count and the device id, then CE, PFP and ME unhalted; looks at
+/// `CP_STAT` up to `polls` times and returns whether it read 0. A processor
+/// that has been released runs its firmware and normally reads busy: the
+/// caller does not treat that as a failure.
 pub fn unhalt<W: Window + ?Sized>(w: &W, polls: u32, pause_us: &dyn Fn(u32), wait_us: u32) -> bool {
     w.write32(CP_MAX_CONTEXT, 7);
     w.write32(CP_DEVICE_ID, 1);

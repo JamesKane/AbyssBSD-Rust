@@ -32,7 +32,10 @@ const BOOT_COMPLETE: u32 = 1 << 31;
 pub(crate) struct Gfx {
     /// The GPU address of the first byte of video memory.
     base: u64,
-    #[allow(dead_code, reason = "kept for the compute queues and the rings after it")]
+    #[allow(
+        dead_code,
+        reason = "kept for the compute queues and the rings after it"
+    )]
     ring: Ring,
     /// The write pointer, in dwords.
     wptr: u32,
@@ -44,8 +47,6 @@ pub(crate) struct Gfx {
 pub(crate) enum Stopped {
     /// The firmware autoload has not finished (the status register).
     NotLoaded(u32),
-    /// The command processor did not go idle after it was released.
-    Busy,
     /// The processor did not read what was written (the read pointer and
     /// where the write pointer was).
     Stalled(u32, u32),
@@ -137,17 +138,24 @@ pub(crate) fn start(
         rptr_report: base + REPORT_AT,
         wptr_poll: base + WPTR_POLL_AT,
     };
+    // Halted while the ring is programmed (so this can be run again), then
+    // released. A released processor is busy running its firmware: CP_STAT
+    // reads 0 only after a halt, so it is logged, not waited for.
+    w.write32(gc::CP_ME_CNTL, w.read32(gc::CP_ME_CNTL) | gc::ME_HALT_ALL);
     gc::program_ring(&w, &ring, &pause);
     log(format_args!(
         "GC: ring 0 programmed; releasing the processors"
     ));
-    if !gc::unhalt(&w, 200, &pause, 1000) {
-        return Err(Stopped::Busy);
-    }
+    let idle = gc::unhalt(&w, 3, &pause, 1000);
     log(format_args!(
-        "GC: processors released: CP_ME_CNTL {:#010x}, CP_STAT {:#x}",
+        "GC: processors released: CP_ME_CNTL {:#010x}, CP_STAT {:#x} ({})",
         w.read32(gc::CP_ME_CNTL),
-        w.read32(gc::CP_STAT)
+        w.read32(gc::CP_STAT),
+        if idle {
+            "idle"
+        } else {
+            "busy, as a running processor is"
+        }
     ));
     let mut gfx = Gfx {
         base,
