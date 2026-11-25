@@ -115,6 +115,11 @@ pub(crate) struct Amd {
     pub(crate) connected: core::sync::atomic::AtomicBool,
     /// The code of the mode now running (16 = the firmware's 1080p60).
     pub(crate) current_vic: core::sync::atomic::AtomicU8,
+    /// The display hub's translation context is set up (scan-out from system
+    /// memory).
+    pub(crate) display_vm: core::sync::atomic::AtomicBool,
+    /// How many pictures were shown from system memory in place.
+    pub(crate) scanout_frames: core::sync::atomic::AtomicU64,
     /// Link health: consecutive bad looks, recoveries tried, and whether the
     /// link has been seen healthy since the last mode set.
     pub(crate) link_bad: core::sync::atomic::AtomicU8,
@@ -181,6 +186,8 @@ impl Amd {
             connected: core::sync::atomic::AtomicBool::new(true),
             current_vic: core::sync::atomic::AtomicU8::new(16),
             relink: core::sync::atomic::AtomicBool::new(false),
+            display_vm: core::sync::atomic::AtomicBool::new(false),
+            scanout_frames: core::sync::atomic::AtomicU64::new(0),
             link_bad: core::sync::atomic::AtomicU8::new(0),
             link_recoveries: core::sync::atomic::AtomicU8::new(0),
             link_seen_healthy: core::sync::atomic::AtomicBool::new(false),
@@ -1081,6 +1088,44 @@ impl Amd {
         Ok(())
     }
 
+    /// Makes scan-out from system memory possible (08 section 2.3.1): the
+    /// translation hubs set up if they are not (the GART is shared), then the
+    /// display hub's context 0 programmed as a copy of it, once.
+    pub(crate) fn scanout_prepare(&self) -> Result<(), abi::errno::Errno> {
+        use abi::errno::Errno;
+        use amdgpu::gmc::{Hub, Reg};
+        use amdgpu::regs::Window;
+        use core::sync::atomic::Ordering::AcqRel;
+        if self.dummy.lock().is_none() {
+            self.gmc(Hub::Gfx)?;
+            self.gmc(Hub::Mm)?;
+        }
+        if self.display_vm.load(core::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        let table = (u64::from(w.read32(Hub::Mm.reg(Reg::FbOffset))) << 24) + GART_AT as u64;
+        let pause = || bus::manager().delay_us(5);
+        if self.display_vm.swap(true, AcqRel) {
+            return Ok(());
+        }
+        match amdgpu::scanout::program_context0(&w, table, 10_000, &pause) {
+            Ok(()) => {
+                self.log(format_args!(
+                    "scan-out from system memory: the display's translation context set up for the GART at {table:#x}"
+                ));
+                Ok(())
+            }
+            Err(e) => {
+                self.display_vm
+                    .store(false, core::sync::atomic::Ordering::Release);
+                self.log(format_args!("scan-out from system memory: {e:?}"));
+                Err(Errno::EIO)
+            }
+        }
+    }
+
     /// Looks at the link's health once a second (the hot-plug watcher calls
     /// it): the encoder's FIFO calibrated and error free. A link that was
     /// healthy and reads bad three times running is trained again, up to
@@ -1300,6 +1345,22 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         "irq",
         "What the interrupts have done",
         sysctl::Value::Str(Box::new(move |out| out.push_str(&r.irq.summary()))),
+    );
+    let r = Arc::clone(a);
+    let _ = t.add_value(
+        node,
+        sysctl::Number::Auto,
+        "scanout",
+        "How many pictures were shown in place from system memory, not copied",
+        sysctl::Value::Str(Box::new(move |out| {
+            let _ = core::fmt::Write::write_fmt(
+                out,
+                format_args!(
+                    "{} in place",
+                    r.scanout_frames.load(core::sync::atomic::Ordering::Relaxed)
+                ),
+            );
+        })),
     );
     let r = Arc::clone(a);
     let _ = t.add_value(

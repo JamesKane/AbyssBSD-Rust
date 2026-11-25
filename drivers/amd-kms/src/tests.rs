@@ -408,3 +408,59 @@ fn the_connector_follows_the_hot_plug_line_and_the_new_monitors_modes() {
         Err(Errno::EINVAL)
     );
 }
+
+#[test]
+fn a_buffer_is_shown_in_place_only_when_it_is_the_firmwares_surface() {
+    let g = Geometry {
+        width: 1920,
+        height: 1080,
+    };
+    let vis = |x, y, w, h, sx| kms_check::Visible {
+        shown: true,
+        src: kms_check::SrcRect { x: sx, y: 0, w, h },
+        dst: kms_check::DstRect { x, y, w, h },
+    };
+    let full = 1920 * 1080 * 4;
+    assert!(in_place_fits(g, 7680, 0, &vis(0, 0, 1920, 1080, 0), full));
+    // A different pitch, an offset, a smaller plane, a plane away from the
+    // corner, a source that does not start at the corner, a buffer too small.
+    assert!(!in_place_fits(g, 8192, 0, &vis(0, 0, 1920, 1080, 0), full));
+    assert!(!in_place_fits(
+        g,
+        7680,
+        4096,
+        &vis(0, 0, 1920, 1080, 0),
+        full
+    ));
+    assert!(!in_place_fits(g, 7680, 0, &vis(0, 0, 1280, 720, 0), full));
+    assert!(!in_place_fits(g, 7680, 0, &vis(8, 0, 1920, 1080, 0), full));
+    assert!(!in_place_fits(
+        g,
+        7680,
+        0,
+        &vis(0, 0, 1920, 1080, 1 << 16),
+        full
+    ));
+    assert!(!in_place_fits(
+        g,
+        7680,
+        0,
+        &vis(0, 0, 1920, 1080, 0),
+        full - 1
+    ));
+}
+
+#[test]
+fn a_display_that_cannot_show_pages_says_so_and_the_front_surface_stays() {
+    let d = Fake::new();
+    assert_eq!(d.show_pages(&[0x1000], 0), Err(Errno::ENOTSUP));
+    // A client surface is not in video memory: the copy path goes on from A.
+    assert_eq!(Front::Client(0).back(), Front::A);
+    assert_eq!(Front::Client(1).back(), Front::A);
+    // Restoring from one shows the console's surface and lets the pages go.
+    let c = card(1920, 1080, &d).unwrap();
+    *c.screen.front.lock() = Front::Client(1);
+    c.restore();
+    assert_eq!(*c.screen.front.lock(), Front::Console);
+    assert_eq!(*d.shown.lock().unwrap(), std::vec![0]);
+}

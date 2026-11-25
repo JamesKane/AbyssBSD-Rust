@@ -206,6 +206,16 @@ impl Gem {
             .collect()
     }
 
+    /// The physical address of each of its pages, populating them if
+    /// nothing touched them yet.
+    ///
+    /// # Errors
+    ///
+    /// `ENOMEM` when a page cannot be had.
+    pub fn phys_pages(&self) -> Result<alloc::vec::Vec<u64>, Errno> {
+        Ok(self.frames()?.into_iter().map(|p| p.addr().get()).collect())
+    }
+
     /// Calls `f` with page `index` (0 is the first) of the buffer,
     /// populating it if nothing touched it yet.
     ///

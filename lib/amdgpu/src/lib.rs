@@ -47,6 +47,7 @@ pub mod mqd;
 pub mod pm4;
 pub mod psp;
 pub mod regs;
+pub mod scanout;
 pub mod sdma;
 pub mod smu;
 pub mod timing;
