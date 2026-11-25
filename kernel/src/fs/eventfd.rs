@@ -184,3 +184,18 @@ impl Filter for EventfdFilter {
         Some(Box::new(Self(Arc::clone(&self.0), self.1)))
     }
 }
+
+/// A graphics driver adds one to an eventfd when a fence it was asked about
+/// has finished (`DRM_IOCTL_SYNCOBJ_EVENTFD`); a counter at its limit is
+/// left alone, as a write that would block is for a non-blocking writer.
+impl drm::Signal for Eventfd {
+    fn signal(&self) {
+        {
+            let mut c = self.count.lock();
+            if u64::MAX - 1 > *c {
+                *c += 1;
+            }
+        }
+        self.wakeup();
+    }
+}

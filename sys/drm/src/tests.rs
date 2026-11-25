@@ -157,6 +157,21 @@ fn setup() {
                 let i = usize::try_from(fd - 201).map_err(|_| Errno::EBADF)?;
                 t.get(i).cloned().ok_or(Errno::EBADF)
             },
+            export_syncobj: |_, obj, _| {
+                let mut t = SYNC_OBJS.lock().unwrap();
+                t.push(obj);
+                Ok(300 + i32::try_from(t.len()).unwrap())
+            },
+            import_syncobj: |_, fd| {
+                let t = SYNC_OBJS.lock().unwrap();
+                let i = usize::try_from(fd - 301).map_err(|_| Errno::EBADF)?;
+                t.get(i).cloned().ok_or(Errno::EBADF)
+            },
+            import_eventfd: |_, fd| {
+                let t = EVENTFDS.lock().unwrap();
+                let i = usize::try_from(fd - 401).map_err(|_| Errno::EBADF)?;
+                t.get(i).cloned().ok_or(Errno::EBADF)
+            },
             import_dmabuf: |_, fd| {
                 let t = DESCRIPTORS.lock().unwrap();
                 let i = usize::try_from(fd - 101).map_err(|_| Errno::EBADF)?;
@@ -172,6 +187,13 @@ static USER: std::sync::OnceLock<&'static Arena> = std::sync::OnceLock::new();
 
 /// The descriptors the mock kernel has handed out for dma-bufs, from 101.
 static DESCRIPTORS: Mutex<Vec<(Arc<crate::DmaBuf>, bool, bool)>> = Mutex::new(Vec::new());
+
+/// The synchronisation objects the mock kernel has handed out descriptors
+/// for, from 301.
+static SYNC_OBJS: Mutex<Vec<Arc<crate::SyncObj>>> = Mutex::new(Vec::new());
+
+/// The eventfds the mock kernel has, from 401.
+static EVENTFDS: Mutex<Vec<Arc<dyn crate::Signal>>> = Mutex::new(Vec::new());
 
 /// The descriptors the mock kernel has handed out for sync files, from 201.
 static SYNC_FILES: Mutex<Vec<Arc<crate::SyncFile>>> = Mutex::new(Vec::new());
@@ -2747,7 +2769,11 @@ fn a_synchronisation_object_exports_a_sync_file_and_takes_one_back() {
     let mut create = [0u8; 8];
     call(&f, req(0xbf, 8), &mut create).unwrap();
     let h = u32::from_le_bytes(create[..4].try_into().unwrap());
-    *f.syncobjs.lock().get(h).unwrap().lock() = Some(gate.clone() as Arc<dyn crate::Fence>);
+    f.syncobjs
+        .lock()
+        .get(h)
+        .unwrap()
+        .set(Some(gate.clone() as Arc<dyn crate::Fence>));
     // Export: handle, flags EXPORT_SYNC_FILE, then the descriptor.
     let mut e = [0u8; 24];
     e[..4].copy_from_slice(&h.to_le_bytes());
@@ -2758,9 +2784,10 @@ fn a_synchronisation_object_exports_a_sync_file_and_takes_one_back() {
     assert!(!sf.signaled());
     gate.finish();
     assert!(sf.signaled());
-    // No descriptor of the syncobj itself, and no unknown flag.
+    // A descriptor of the syncobj itself is a different thing; an unknown
+    // flag is refused.
     e[4..8].copy_from_slice(&0u32.to_le_bytes());
-    assert_eq!(call(&f, req(0xc1, 24), &mut e), Err(Errno::EOPNOTSUPP));
+    assert_eq!(call(&f, req(0xc1, 24), &mut e), Ok(0));
     e[4..8].copy_from_slice(&4u32.to_le_bytes());
     assert_eq!(call(&f, req(0xc1, 24), &mut e), Err(Errno::EINVAL));
     // An empty syncobj has nothing to export.
@@ -2782,8 +2809,7 @@ fn a_synchronisation_object_exports_a_sync_file_and_takes_one_back() {
             .lock()
             .get(new)
             .unwrap()
-            .lock()
-            .as_ref()
+            .fence()
             .unwrap()
             .signaled()
     );
@@ -2792,7 +2818,7 @@ fn a_synchronisation_object_exports_a_sync_file_and_takes_one_back() {
     j[4..8].copy_from_slice(&1u32.to_le_bytes());
     j[8..12].copy_from_slice(&fd.to_le_bytes());
     call(&f, req(0xc2, 24), &mut j).unwrap();
-    assert!(f.syncobjs.lock().get(empty).unwrap().lock().is_some());
+    assert!(f.syncobjs.lock().get(empty).unwrap().fence().is_some());
     // A descriptor that is not one.
     j[8..12].copy_from_slice(&999i32.to_le_bytes());
     assert_eq!(call(&f, req(0xc2, 24), &mut j), Err(Errno::EBADF));
@@ -2845,6 +2871,322 @@ fn the_sync_file_requests_merge_and_describe() {
     );
     assert_eq!(
         crate::sync_file::ioctl(&merged, &s(), 0x1234, &mut info),
+        Err(Errno::ENOTTY)
+    );
+}
+
+/// A counter that stands in for an eventfd.
+#[derive(Default)]
+struct Efd(std::sync::atomic::AtomicU32);
+
+impl crate::Signal for Efd {
+    fn signal(&self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Efd {
+    fn count(&self) -> u32 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+fn sreq(nr: u32, size: u32) -> u32 {
+    0xc000_0000u32 | (size << 16) | (0x64 << 8) | nr
+}
+
+fn new_obj(f: &Arc<crate::Open>) -> u32 {
+    let mut create = [0u8; 8];
+    call(f, sreq(0xbf, 8), &mut create).unwrap();
+    u32::from_le_bytes(create[..4].try_into().unwrap())
+}
+
+#[test]
+fn a_timeline_object_signals_waits_and_answers_queries() {
+    let c = card(true, true);
+    let f = open(&c);
+    let h = new_obj(&f);
+    put(0xb000, &h.to_le_bytes());
+    // Points 1 and 3 finished by hand, then a fence for 5.
+    let gate = Arc::new(Gate::default());
+    let obj = f.syncobjs.lock().get(h).unwrap();
+    obj.add_point(1, Arc::new(crate::Done)).unwrap();
+    obj.add_point(3, Arc::new(crate::Done)).unwrap();
+    obj.add_point(5, gate.clone() as Arc<dyn crate::Fence>)
+        .unwrap();
+    // Points must grow.
+    assert_eq!(obj.add_point(4, Arc::new(crate::Done)), Err(Errno::EINVAL));
+    // Query: last signalled is 3, last submitted 5.
+    put(0xb100, &[0; 8]);
+    let mut q = [0u8; 24];
+    q[..8].copy_from_slice(&(BASE + 0xb000).to_le_bytes());
+    q[8..16].copy_from_slice(&(BASE + 0xb100).to_le_bytes());
+    q[16..20].copy_from_slice(&1u32.to_le_bytes());
+    call(&f, sreq(0xcb, 24), &mut q).unwrap();
+    assert_eq!(u64::from_le_bytes(get(0xb100, 8).try_into().unwrap()), 3);
+    q[20..24].copy_from_slice(&1u32.to_le_bytes());
+    call(&f, sreq(0xcb, 24), &mut q).unwrap();
+    assert_eq!(u64::from_le_bytes(get(0xb100, 8).try_into().unwrap()), 5);
+    // Wait for point 3: done. For 4 or 5: the fence at 5, not finished yet.
+    let twait = |point: u64, flags: u32, timeout: u64| {
+        put(0xb200, &point.to_le_bytes());
+        let mut w = [0u8; 48];
+        w[..8].copy_from_slice(&(BASE + 0xb000).to_le_bytes());
+        w[8..16].copy_from_slice(&(BASE + 0xb200).to_le_bytes());
+        w[16..24].copy_from_slice(&timeout.to_le_bytes());
+        w[24..28].copy_from_slice(&1u32.to_le_bytes());
+        w[28..32].copy_from_slice(&flags.to_le_bytes());
+        call(&f, sreq(0xca, 48), &mut w)
+    };
+    assert_eq!(twait(3, 0, 6_000_000_000), Ok(0));
+    assert_eq!(twait(4, 0, 4_000_000_000), Err(Errno::ETIMEDOUT));
+    assert_eq!(twait(5, 0, 4_000_000_000), Err(Errno::ETIMEDOUT));
+    gate.finish();
+    assert_eq!(twait(5, 0, 6_000_000_000), Ok(0));
+    // A point past the last is not there; with WAIT_FOR_SUBMIT it is waited for.
+    assert_eq!(twait(9, 0, 6_000_000_000), Err(Errno::EINVAL));
+    assert_eq!(twait(9, 2, 4_000_000_000), Err(Errno::ETIMEDOUT));
+    // Signalling a point makes it so.
+    put(0xb300, &9u64.to_le_bytes());
+    let mut sig = [0u8; 24];
+    sig[..8].copy_from_slice(&(BASE + 0xb000).to_le_bytes());
+    sig[8..16].copy_from_slice(&(BASE + 0xb300).to_le_bytes());
+    sig[16..20].copy_from_slice(&1u32.to_le_bytes());
+    call(&f, sreq(0xcd, 24), &mut sig).unwrap();
+    assert_eq!(twait(9, 0, 6_000_000_000), Ok(0));
+    // A binary object has no points but 0.
+    let b = new_obj(&f);
+    f.syncobjs
+        .lock()
+        .get(b)
+        .unwrap()
+        .set(Some(Arc::new(crate::Done)));
+    assert_eq!(
+        f.syncobjs.lock().get(b).unwrap().find(2).err(),
+        Some(Errno::EINVAL)
+    );
+    assert_eq!(f.syncobjs.lock().get(b).unwrap().query(false), 0);
+}
+
+#[test]
+fn a_transfer_copies_a_points_fence_to_another_objects_point() {
+    let c = card(true, true);
+    let f = open(&c);
+    let (src, dst) = (new_obj(&f), new_obj(&f));
+    let gate = Arc::new(Gate::default());
+    f.syncobjs
+        .lock()
+        .get(src)
+        .unwrap()
+        .add_point(7, gate.clone() as Arc<dyn crate::Fence>)
+        .unwrap();
+    let mut t = [0u8; 32];
+    t[..4].copy_from_slice(&src.to_le_bytes());
+    t[4..8].copy_from_slice(&dst.to_le_bytes());
+    t[8..16].copy_from_slice(&7u64.to_le_bytes());
+    t[16..24].copy_from_slice(&2u64.to_le_bytes());
+    call(&f, sreq(0xcc, 32), &mut t).unwrap();
+    let d = f.syncobjs.lock().get(dst).unwrap();
+    assert_eq!(d.query(true), 2);
+    assert_eq!(d.query(false), 0);
+    gate.finish();
+    assert_eq!(d.query(false), 2);
+    // To a binary point (0), from a point that is not there.
+    t[16..24].copy_from_slice(&0u64.to_le_bytes());
+    call(&f, sreq(0xcc, 32), &mut t).unwrap();
+    assert!(
+        f.syncobjs
+            .lock()
+            .get(dst)
+            .unwrap()
+            .fence()
+            .unwrap()
+            .signaled()
+    );
+    t[8..16].copy_from_slice(&99u64.to_le_bytes());
+    assert_eq!(call(&f, sreq(0xcc, 32), &mut t), Err(Errno::EINVAL));
+    // Unknown flags.
+    t[24..28].copy_from_slice(&8u32.to_le_bytes());
+    assert_eq!(call(&f, sreq(0xcc, 32), &mut t), Err(Errno::EINVAL));
+}
+
+#[test]
+fn a_synchronisation_object_is_shared_through_a_descriptor() {
+    let c = card(true, true);
+    let f = open(&c);
+    let h = new_obj(&f);
+    let mut e = [0u8; 24];
+    e[..4].copy_from_slice(&h.to_le_bytes());
+    call(&f, sreq(0xc1, 24), &mut e).unwrap();
+    let fd = i32::from_le_bytes(e[8..12].try_into().unwrap());
+    // Another file imports it: its handle is for the same object.
+    let g = open(&c);
+    let mut i = [0u8; 24];
+    i[8..12].copy_from_slice(&fd.to_le_bytes());
+    call(&g, sreq(0xc2, 24), &mut i).unwrap();
+    let h2 = u32::from_le_bytes(i[..4].try_into().unwrap());
+    let (a, b) = (
+        f.syncobjs.lock().get(h).unwrap(),
+        g.syncobjs.lock().get(h2).unwrap(),
+    );
+    assert!(Arc::ptr_eq(&a, &b));
+    // A signal through one is seen through the other.
+    a.add_point(4, Arc::new(crate::Done)).unwrap();
+    assert_eq!(b.query(false), 4);
+    // The timeline flag needs a sync file.
+    e[4..8].copy_from_slice(&2u32.to_le_bytes());
+    assert_eq!(call(&f, sreq(0xc1, 24), &mut e), Err(Errno::EINVAL));
+    i[8..12].copy_from_slice(&999i32.to_le_bytes());
+    assert_eq!(call(&g, sreq(0xc2, 24), &mut i), Err(Errno::EBADF));
+}
+
+#[test]
+fn a_sync_file_exports_and_imports_at_a_timeline_point() {
+    let c = card(true, true);
+    let f = open(&c);
+    let h = new_obj(&f);
+    let gate = Arc::new(Gate::default());
+    f.syncobjs
+        .lock()
+        .get(h)
+        .unwrap()
+        .add_point(6, gate.clone() as Arc<dyn crate::Fence>)
+        .unwrap();
+    // Export the fence at point 6 as a sync file.
+    let mut e = [0u8; 24];
+    e[..4].copy_from_slice(&h.to_le_bytes());
+    e[4..8].copy_from_slice(&3u32.to_le_bytes());
+    e[16..24].copy_from_slice(&6u64.to_le_bytes());
+    call(&f, sreq(0xc1, 24), &mut e).unwrap();
+    let fd = i32::from_le_bytes(e[8..12].try_into().unwrap());
+    let sf = SYNC_FILES.lock().unwrap()[usize::try_from(fd - 201).unwrap()].clone();
+    assert!(!sf.signaled());
+    gate.finish();
+    assert!(sf.signaled());
+    // Import it into another object at point 11.
+    let h2 = new_obj(&f);
+    let mut i = [0u8; 24];
+    i[..4].copy_from_slice(&h2.to_le_bytes());
+    i[4..8].copy_from_slice(&3u32.to_le_bytes());
+    i[8..12].copy_from_slice(&fd.to_le_bytes());
+    i[16..24].copy_from_slice(&11u64.to_le_bytes());
+    call(&f, sreq(0xc2, 24), &mut i).unwrap();
+    assert_eq!(f.syncobjs.lock().get(h2).unwrap().query(false), 11);
+}
+
+#[test]
+fn an_eventfd_is_signalled_when_the_fence_has_finished_or_arrived() {
+    let c = card(true, true);
+    let f = open(&c);
+    let h = new_obj(&f);
+    let (a, b, d) = (
+        Arc::new(Efd::default()),
+        Arc::new(Efd::default()),
+        Arc::new(Efd::default()),
+    );
+    let base = EVENTFDS.lock().unwrap().len();
+    {
+        let mut t = EVENTFDS.lock().unwrap();
+        t.push(a.clone());
+        t.push(b.clone());
+        t.push(d.clone());
+    }
+    let efd = |n: usize| i32::try_from(401 + base + n).unwrap();
+    let ev = |fd: i32, point: u64, flags: u32| {
+        let mut e = [0u8; 24];
+        e[..4].copy_from_slice(&h.to_le_bytes());
+        e[4..8].copy_from_slice(&flags.to_le_bytes());
+        e[8..16].copy_from_slice(&point.to_le_bytes());
+        e[16..20].copy_from_slice(&fd.to_le_bytes());
+        call(&f, sreq(0xcf, 24), &mut e)
+    };
+    // Waiting for the fence to finish (a), and to arrive (b), on an empty object.
+    assert_eq!(ev(efd(0), 0, 0), Ok(0));
+    assert_eq!(ev(efd(1), 0, 4), Ok(0));
+    assert_eq!((a.count(), b.count()), (0, 0));
+    // A fence arrives: b is told, a is not (it has not finished).
+    let gate = Arc::new(Gate::default());
+    f.syncobjs
+        .lock()
+        .get(h)
+        .unwrap()
+        .set(Some(gate.clone() as Arc<dyn crate::Fence>));
+    assert_eq!((a.count(), b.count()), (0, 1));
+    // It finishes: a is told, once.
+    gate.finish();
+    assert_eq!((a.count(), b.count()), (1, 1));
+    // An already finished fence signals at once; a bad descriptor and a
+    // flag that is not one are errors.
+    assert_eq!(d.count(), 0);
+    assert_eq!(ev(efd(2), 0, 0), Ok(0));
+    assert_eq!(d.count(), 1);
+    assert_eq!(ev(999, 0, 0), Err(Errno::EBADF));
+    assert_eq!(ev(efd(2), 0, 8), Err(Errno::EINVAL));
+    // A point a binary object cannot have.
+    assert_eq!(ev(efd(2), 5, 0), Err(Errno::EINVAL));
+}
+
+#[test]
+fn a_dma_buf_exports_the_fences_its_users_wait_for_and_takes_a_sync_files() {
+    use abi::drm::{DMA_BUF_IOCTL_EXPORT_SYNC_FILE, DMA_BUF_IOCTL_IMPORT_SYNC_FILE};
+    let c = card(true, true);
+    let f = open(&c);
+    let handle = dumb(&f, 16, 16);
+    let buf = crate::DmaBuf::new(f.gem(handle).unwrap());
+    let (reader, writer) = (Arc::new(Gate::default()), Arc::new(Gate::default()));
+    buf.gem()
+        .reservation()
+        .lock()
+        .add(reader.clone() as Arc<dyn crate::Fence>, false, false);
+    buf.gem()
+        .reservation()
+        .lock()
+        .add(writer.clone() as Arc<dyn crate::Fence>, true, false);
+    let export = |flags: u32| {
+        let mut a = [0u8; 8];
+        a[..4].copy_from_slice(&flags.to_le_bytes());
+        crate::dmabuf::ioctl(&buf, &s(), DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &mut a).map(|_| {
+            let fd = i32::from_le_bytes(a[4..8].try_into().unwrap());
+            SYNC_FILES.lock().unwrap()[usize::try_from(fd - 201).unwrap()].clone()
+        })
+    };
+    // A reader waits for the writer only; a writer for both.
+    let for_read = export(1).unwrap();
+    let for_write = export(2).unwrap();
+    assert_eq!((for_read.len(), for_write.len()), (1, 2));
+    assert!(export(0).is_err());
+    assert!(export(4).is_err());
+    writer.finish();
+    assert!(for_read.signaled());
+    assert!(!for_write.signaled());
+    reader.finish();
+    assert!(for_write.signaled());
+    // Everything finished: nothing to wait for.
+    assert!(export(3).unwrap().signaled());
+    // Import a sync file as a write fence: later readers wait for it, and so
+    // does a job's dependency check (it is external).
+    let gate = Arc::new(Gate::default());
+    let file = crate::SyncFile::new(std::vec![gate.clone() as Arc<dyn crate::Fence>]);
+    let fd = {
+        let mut t = SYNC_FILES.lock().unwrap();
+        t.push(file);
+        i32::try_from(200 + t.len()).unwrap()
+    };
+    let mut a = [0u8; 8];
+    a[..4].copy_from_slice(&2u32.to_le_bytes());
+    a[4..8].copy_from_slice(&fd.to_le_bytes());
+    crate::dmabuf::ioctl(&buf, &s(), DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &mut a).unwrap();
+    assert_eq!(
+        buf.gem().reservation().lock().blocking(false, false).len(),
+        1
+    );
+    assert_eq!(buf.gem().reservation().lock().blocking(true, true).len(), 1);
+    assert!(!export(1).unwrap().signaled());
+    gate.finish();
+    assert!(export(1).unwrap().signaled());
+    // A request that is not one.
+    assert_eq!(
+        crate::dmabuf::ioctl(&buf, &s(), 0x1234, &mut a),
         Err(Errno::ENOTTY)
     );
 }

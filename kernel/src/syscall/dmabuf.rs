@@ -86,3 +86,53 @@ pub(crate) fn import_syncfile(s: &Sleepable, fd: i32) -> Result<Arc<drm::SyncFil
         _ => Err(Errno::EINVAL),
     }
 }
+
+/// A new descriptor in the calling process for the synchronisation object
+/// `obj`: close on exec if `cloexec`.
+pub(crate) fn export_syncobj(
+    s: &Sleepable,
+    obj: Arc<drm::SyncObj>,
+    cloexec: bool,
+) -> Result<i32, Errno> {
+    let p = process()?;
+    let limit = super::io::max_files(&p);
+    p.files.lock(s).alloc(
+        File::new(FileKind::SyncObj(obj), FREAD | FWRITE)?,
+        FdFlags {
+            cloexec,
+            clofork: false,
+            resolve_beneath: false,
+        },
+        0,
+        limit,
+    )
+}
+
+/// The synchronisation object the calling process's descriptor `fd` names.
+///
+/// # Errors
+///
+/// `EBADF` for no such descriptor; `EINVAL` for one that is not one.
+pub(crate) fn import_syncobj(s: &Sleepable, fd: i32) -> Result<Arc<drm::SyncObj>, Errno> {
+    let fd = u64::try_from(fd).map_err(|_| Errno::EBADF)?;
+    let f = super::io::current_file(s, fd, &crate::capsicum::rights::EVENT)?;
+    match f.kind() {
+        FileKind::SyncObj(o) => Ok(Arc::clone(o)),
+        _ => Err(Errno::EINVAL),
+    }
+}
+
+/// The eventfd the calling process's descriptor `fd` names, to signal.
+///
+/// # Errors
+///
+/// `EBADF` for no such descriptor or one that cannot be written;
+/// `EINVAL` for one that is not an eventfd.
+pub(crate) fn import_eventfd(s: &Sleepable, fd: i32) -> Result<Arc<dyn drm::Signal>, Errno> {
+    let fd = u64::try_from(fd).map_err(|_| Errno::EBADF)?;
+    let f = super::io::current_file(s, fd, &crate::capsicum::rights::WRITE)?;
+    match f.kind() {
+        FileKind::Eventfd(e) => Ok(Arc::clone(e) as Arc<dyn drm::Signal>),
+        _ => Err(Errno::EINVAL),
+    }
+}

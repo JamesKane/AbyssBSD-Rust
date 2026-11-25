@@ -334,6 +334,12 @@ pub const DMA_BUF_SYNC_END: u64 = 1 << 2;
 /// `DMA_BUF_IOCTL_SYNC`: `_IOW('b', 0, struct dma_buf_sync)`, one
 /// 64-bit flags word.
 pub const DMA_BUF_IOCTL_SYNC: u32 = ioc_of(IOC_IN, DMA_BUF_BASE, 0, 8);
+/// `DMA_BUF_IOCTL_EXPORT_SYNC_FILE`: `_IOWR('b', 2, struct dma_buf_export_sync_file)`,
+/// the flags (`DMA_BUF_SYNC_READ`/`WRITE`) and the descriptor (out).
+pub const DMA_BUF_IOCTL_EXPORT_SYNC_FILE: u32 = ioc_of(IOC_IN | IOC_OUT, DMA_BUF_BASE, 2, 8);
+/// `DMA_BUF_IOCTL_IMPORT_SYNC_FILE`: `_IOW('b', 3, struct dma_buf_import_sync_file)`,
+/// the flags and the descriptor.
+pub const DMA_BUF_IOCTL_IMPORT_SYNC_FILE: u32 = ioc_of(IOC_IN, DMA_BUF_BASE, 3, 8);
 
 /// `SYNC_IOC_MAGIC`: the group letter of the sync file requests.
 pub const SYNC_IOC_MAGIC: u8 = b'>';

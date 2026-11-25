@@ -87,6 +87,8 @@ pub struct Gem {
     placement: Placement,
     /// The fake file offset of its first page, in pages.
     offset: PageIndex,
+    /// The fences of the jobs using it.
+    resv: sync::SpinLock<crate::resv::Reservation>,
 }
 
 impl Gem {
@@ -122,7 +124,14 @@ impl Gem {
             size,
             placement,
             offset,
+            resv: sync::SpinLock::new(crate::resv::Reservation::default()),
         }))
+    }
+
+    /// Its reservation: the fences of the jobs that use it.
+    #[must_use]
+    pub fn reservation(&self) -> &sync::SpinLock<crate::resv::Reservation> {
+        &self.resv
     }
 
     /// Where it lives and how it is cached.

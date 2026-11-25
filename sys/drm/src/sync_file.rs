@@ -18,7 +18,7 @@ use abi::errno::Errno;
 use abi::event::{POLLIN, POLLRDNORM};
 use vfs::event::{Notify, Wake};
 
-use crate::syncobj::Fence;
+use crate::syncobj::{All, Fence};
 
 /// The bytes of `struct sync_merge_data`: name, the other descriptor, the
 /// new descriptor (out), flags, padding.
@@ -218,35 +218,6 @@ impl SyncFile {
         let fd = (env.export_syncfile)(s, merged, true)?;
         arg[36..40].copy_from_slice(&fd.to_le_bytes());
         Ok(0)
-    }
-}
-
-/// Several fences as one: finished when every one is.
-struct All(Vec<Arc<dyn Fence>>);
-
-impl Fence for All {
-    fn signaled(&self) -> bool {
-        self.0.iter().all(|f| f.signaled())
-    }
-
-    fn wait(&self, s: &sched::Sleepable, ns: u64) -> bool {
-        // The first unfinished one gets the time; the rest are asked
-        // after.
-        match self.0.iter().find(|f| !f.signaled()) {
-            Some(f) => {
-                let _ = f.wait(s, ns);
-                self.signaled()
-            }
-            None => true,
-        }
-    }
-
-    fn register(&self, w: &Arc<dyn Wake>) {
-        for f in &self.0 {
-            if !f.signaled() {
-                f.register(w);
-            }
-        }
     }
 }
 

@@ -214,7 +214,8 @@ struct FileState {
     contexts: BTreeMap<u32, u32>,
     /// The compute queue each (context, slot) is bound to.
     queues: BTreeMap<(u32, u8), u8>,
-    lists: Vec<u32>,
+    /// The buffer lists: an id and the buffer handles in it.
+    lists: BTreeMap<u32, Vec<u32>>,
     /// The metadata a client keeps with a buffer, by handle.
     metadata: BTreeMap<u32, Vec<u8>>,
     /// Where the next buffer the kernel maps for itself (a fence word) goes,
@@ -534,7 +535,7 @@ impl Render {
                     maps: Vec::new(),
                     contexts: BTreeMap::new(),
                     queues: BTreeMap::new(),
-                    lists: Vec::new(),
+                    lists: BTreeMap::new(),
                     metadata: BTreeMap::new(),
                     kernel_next: KERNEL_VA,
                     fence_pages: false,
@@ -693,7 +694,9 @@ impl Render {
         let mut ibs = Vec::new();
         let mut engine: Option<Engine> = None;
         let mut fence: Option<(u32, u32)> = None;
-        let mut out_syncobjs: Vec<u32> = Vec::new();
+        let mut out_syncobjs: Vec<(u32, u64)> = Vec::new();
+        // What the job waits for before it runs: objects (at points).
+        let mut in_syncobjs: Vec<(u32, u64)> = Vec::new();
         for i in 0..u64::from(r.num_chunks) {
             let mut p = [0u8; 8];
             cx.copy_in(&mut p, r.chunks + 8 * i)?;
@@ -704,7 +707,12 @@ impl Render {
             // chunks read below are fetched.
             if !matches!(
                 c.id,
-                uapi::chunk::IB | uapi::chunk::FENCE | uapi::chunk::SYNCOBJ_OUT
+                uapi::chunk::IB
+                    | uapi::chunk::FENCE
+                    | uapi::chunk::SYNCOBJ_OUT
+                    | uapi::chunk::SYNCOBJ_IN
+                    | uapi::chunk::SYNCOBJ_TIMELINE_WAIT
+                    | uapi::chunk::SYNCOBJ_TIMELINE_SIGNAL
             ) {
                 continue;
             }
@@ -737,12 +745,24 @@ impl Render {
                         data.as_chunks::<4>()
                             .0
                             .iter()
-                            .map(|c| u32::from_le_bytes(*c)),
+                            .map(|c| (u32::from_le_bytes(*c), 0)),
                     );
                 }
-                // Dependencies and synchronisation objects waited on: every
-                // job is on one ring, in order, and the fences of other
-                // owners are finished; the buffer handles list is not needed
+                // Objects waited on, and objects (with points) to signal.
+                uapi::chunk::SYNCOBJ_IN => {
+                    in_syncobjs.extend(
+                        data.as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|c| (u32::from_le_bytes(*c), 0)),
+                    );
+                }
+                uapi::chunk::SYNCOBJ_TIMELINE_WAIT => in_syncobjs.extend(timeline_entries(&data)),
+                uapi::chunk::SYNCOBJ_TIMELINE_SIGNAL => {
+                    out_syncobjs.extend(timeline_entries(&data))
+                }
+                // Dependencies on other jobs of this driver: every job is on
+                // one ring, in order; the buffer handles list is not needed
                 // (every mapping stays resident).
                 _ => {}
             }
@@ -752,6 +772,25 @@ impl Render {
             return Err(Errno::EINVAL);
         }
         let user_fence_gem = fence.and_then(|(h, o)| cx.gem(h).map(|g| (g, u64::from(o))));
+        // The buffers of the job's list: what it waits for from outside,
+        // and what its fence goes on.
+        let list_amd = self.amd()?;
+        let bos: Vec<Arc<drm::gem::Gem>> = self
+            .with_file(&list_amd, cx.file_id(), |fs, _| {
+                Ok(fs.lists.get(&r.bo_list).cloned().unwrap_or_default())
+            })?
+            .into_iter()
+            .filter_map(|h| cx.gem(h))
+            .collect();
+        wait_dependencies(cx, &in_syncobjs, &bos)?;
+        // A point that does not follow the last is refused before the job
+        // runs, not after.
+        for (h, point) in &out_syncobjs {
+            let slot = cx.syncobj(*h).ok_or(Errno::ENOENT)?;
+            if *point != 0 && slot.query(true) >= *point {
+                return Err(Errno::EINVAL);
+            }
+        }
         let amd = self.amd()?;
         match engine {
             Engine::Dma if !amd.sdma_ready() => return Err(Errno::ENODEV),
@@ -1027,15 +1066,23 @@ impl Render {
                 break seq;
             },
         };
-        for h in out_syncobjs {
+        let job: Arc<dyn drm::Fence> = Arc::new(JobFence {
+            amd: self.amd.clone(),
+            render: self.me.clone(),
+            queue: Arc::clone(&self.queue),
+            engine,
+            seq,
+        });
+        for (h, point) in out_syncobjs {
             let slot = cx.syncobj(h).ok_or(Errno::ENOENT)?;
-            *slot.lock() = Some(Arc::new(JobFence {
-                amd: self.amd.clone(),
-                render: self.me.clone(),
-                queue: Arc::clone(&self.queue),
-                engine,
-                seq,
-            }));
+            // The point was checked; the handle may have been destroyed or
+            // another job taken the point since, which is the caller's race.
+            let _ = slot.add_point(point, Arc::clone(&job));
+        }
+        // Whoever uses these buffers next waits for this job (implicit
+        // synchronisation, which sync files export and import).
+        for g in &bos {
+            g.reservation().lock().add(Arc::clone(&job), true, false);
         }
         let handle = match engine {
             Engine::Compute(q) => compute_handle(q, seq),
@@ -1203,22 +1250,30 @@ impl RenderApi for Render {
                 let r = uapi::BoListRequest::decode(arg).map_err(|_| Errno::EINVAL)?;
                 match r.operation {
                     uapi::bo_list_op::CREATE => {
+                        let bos = bo_list_handles(cx, &r)?;
                         let id = self.with_file(&amd, cx.file_id(), |fs, c| {
                             let id = c.next_id;
                             c.next_id += 1;
-                            fs.lists.push(id);
+                            fs.lists.insert(id, bos);
                             Ok(id)
                         })?;
                         uapi::BoListRequest::answer(arg, id);
                     }
                     uapi::bo_list_op::DESTROY => {
                         self.with_file(&amd, cx.file_id(), |fs, _| {
-                            fs.lists.retain(|l| *l != r.list_handle);
+                            fs.lists.remove(&r.list_handle);
                             Ok(())
                         })?;
                         uapi::BoListRequest::answer(arg, 0);
                     }
-                    uapi::bo_list_op::UPDATE => uapi::BoListRequest::answer(arg, r.list_handle),
+                    uapi::bo_list_op::UPDATE => {
+                        let bos = bo_list_handles(cx, &r)?;
+                        self.with_file(&amd, cx.file_id(), |fs, _| {
+                            fs.lists.insert(r.list_handle, bos);
+                            Ok(())
+                        })?;
+                        uapi::BoListRequest::answer(arg, r.list_handle);
+                    }
                     _ => return Err(Errno::EINVAL),
                 }
                 Ok(0)
@@ -1402,6 +1457,70 @@ impl Live for LiveState {
         use amdgpu::regs::Window;
         Some(crate::amd::Bar5(&self.gpu).read32(usize::try_from(index).ok()? * 4))
     }
+}
+
+/// The buffer handles a buffer list request names (entries of at least 8
+/// bytes: the handle, then the priority).
+fn bo_list_handles(cx: &IoctlCx<'_>, r: &uapi::BoListRequest) -> Result<Vec<u32>, Errno> {
+    if r.count == 0 {
+        return Ok(Vec::new());
+    }
+    if r.count > 4096 || r.entry_size < 8 || r.entry_size > 64 {
+        return Err(Errno::EINVAL);
+    }
+    let size = r.entry_size as usize;
+    let mut raw = alloc::vec![0u8; r.count as usize * size];
+    cx.copy_in(&mut raw, r.entries)?;
+    Ok(raw
+        .chunks_exact(size)
+        .filter_map(|e| uapi::bo_list_entry(e, 0).map(|(h, _)| h))
+        .collect())
+}
+
+/// The (handle, point) pairs of a timeline chunk: 16 bytes each (the handle,
+/// flags, the 64-bit point).
+fn timeline_entries(data: &[u8]) -> impl Iterator<Item = (u32, u64)> + '_ {
+    data.as_chunks::<16>().0.iter().map(|e| {
+        (
+            u32::from_le_bytes([e[0], e[1], e[2], e[3]]),
+            u64::from_le_bytes([e[8], e[9], e[10], e[11], e[12], e[13], e[14], e[15]]),
+        )
+    })
+}
+
+/// How long a submission waits for the fences it depends on, in
+/// nanoseconds.
+const DEPENDENCY_WAIT_NS: u64 = 10_000_000_000;
+
+/// Waits for the fences a job depends on that are not this driver's own
+/// ordering: the objects it waits on, and the fences other programs put on
+/// its buffers (imported sync files).
+fn wait_dependencies(
+    cx: &IoctlCx<'_>,
+    objects: &[(u32, u64)],
+    bos: &[Arc<drm::gem::Gem>],
+) -> Result<(), Errno> {
+    let mut fences: Vec<Arc<dyn drm::Fence>> = Vec::new();
+    for (h, point) in objects {
+        let slot = cx.syncobj(*h).ok_or(Errno::ENOENT)?;
+        // An object with nothing at the point is an error, as for the
+        // reference: a dependency that was never submitted cannot be waited
+        // for.
+        fences.push(slot.find(*point)?.ok_or(Errno::EINVAL)?);
+    }
+    for g in bos {
+        fences.extend(g.reservation().lock().blocking(true, true));
+    }
+    let start = sched::now_ns();
+    for f in fences {
+        while !f.signaled() {
+            if sched::now_ns().saturating_sub(start) > DEPENDENCY_WAIT_NS {
+                return Err(Errno::ETIMEDOUT);
+            }
+            let _ = f.wait(cx.sleepable(), 20_000_000);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

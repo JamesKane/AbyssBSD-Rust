@@ -464,7 +464,8 @@ fn get_cap(f: &Open, a: &mut DrmGetCap) -> Result<usize, Errno> {
         DRM_CAP_CURSOR_WIDTH | DRM_CAP_CURSOR_HEIGHT => 64,
         DRM_CAP_ADDFB2_MODIFIERS | DRM_CAP_CRTC_IN_VBLANK_EVENT => u64::from(d.has_kms()),
         DRM_CAP_SYNCOBJ => 1,
-        DRM_CAP_SYNCOBJ_TIMELINE | DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP => 0,
+        DRM_CAP_SYNCOBJ_TIMELINE => 1,
+        DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP => 0,
         other => d.cap(other).ok_or(Errno::EINVAL)?,
     };
     Ok(0)

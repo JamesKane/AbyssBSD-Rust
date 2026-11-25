@@ -44,5 +44,8 @@ pub(crate) fn init() {
         import_dmabuf: crate::syscall::dmabuf::import,
         export_syncfile: crate::syscall::dmabuf::export_syncfile,
         import_syncfile: crate::syscall::dmabuf::import_syncfile,
+        export_syncobj: crate::syscall::dmabuf::export_syncobj,
+        import_syncobj: crate::syscall::dmabuf::import_syncobj,
+        import_eventfd: crate::syscall::dmabuf::import_eventfd,
     });
 }
