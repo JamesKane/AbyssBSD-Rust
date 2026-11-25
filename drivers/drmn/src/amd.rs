@@ -791,6 +791,18 @@ impl Amd {
         Ok(())
     }
 
+    /// Runs an indirect buffer from a virtual address in VMID 1 on the
+    /// started graphics ring (stage R4.3); `gc_ring` first.
+    pub(crate) fn gc_vm(&self) -> Result<(), abi::errno::Errno> {
+        use abi::errno::Errno;
+        let gpu = self.gpu()?;
+        let log = |args: core::fmt::Arguments<'_>| self.log(args);
+        let mut g = self.gfx.lock().take().ok_or(Errno::ENXIO)?;
+        let ok = crate::gcring::vm_test(&gpu, &mut g, &log);
+        *self.gfx.lock() = Some(g);
+        if ok { Ok(()) } else { Err(Errno::EIO) }
+    }
+
     /// Logs the graphics block's state (reads only; see `gcload::snapshot`).
     pub(crate) fn gc_probe(&self) -> Result<(), abi::errno::Errno> {
         let gpu = self.gpu()?;
@@ -1600,6 +1612,11 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             "gc_fault",
             "Write 1 to log the translation hubs' fault status and set-up (reads only)",
             Amd::gc_fault,
+        ),
+        (
+            "gc_vm",
+            "Write 1 to run an indirect buffer at a virtual address in VMID 1 on the graphics ring (after gc_ring)",
+            Amd::gc_vm,
         ),
         (
             "gc_probe",

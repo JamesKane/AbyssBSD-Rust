@@ -245,6 +245,26 @@ impl Packets {
         )
     }
 
+    /// `WAIT_REG_MEM` on a register: wait until `(read & mask) function
+    /// reference` for the register at dword index `reg`, polling every
+    /// `interval`, on the prefetch parser (`pfp`) or the micro engine.
+    pub fn wait_reg(
+        &mut self,
+        function: u32,
+        reg: u32,
+        reference: u32,
+        mask: u32,
+        interval: u32,
+        pfp: bool,
+    ) -> &mut Self {
+        let d1 = (function & 7) | (u32::from(pfp) << 8);
+        self.packet(
+            op::WAIT_REG_MEM,
+            false,
+            &[d1, reg, 0, reference, mask, interval],
+        )
+    }
+
     /// `INDIRECT_BUFFER`: run `length_dwords` dwords at `address` (dword
     /// aligned) in VM `vmid`.
     pub fn indirect_buffer(
@@ -411,6 +431,24 @@ mod tests {
                 .is_none()
         );
         assert!(p.0.is_empty());
+    }
+
+    #[test]
+    fn wait_reg_waits_on_a_register_not_memory() {
+        let mut p = Packets::new();
+        p.wait_reg(3, 0x2000, 0x2, 0x2, 0x20, true);
+        assert_eq!(
+            p.0,
+            [
+                header(op::WAIT_REG_MEM, 6, false),
+                3 | (1 << 8),
+                0x2000,
+                0,
+                2,
+                2,
+                0x20
+            ]
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ use amdgpu::mqd::{self, Queue};
 use amdgpu::pm4::Packets;
 use amdgpu::psp::Memory;
 use amdgpu::regs::Window;
+use amdgpu::vm::Tables as _;
 use vgapci::Aperture;
 
 use crate::amd::Bar5;
@@ -377,4 +378,141 @@ pub(crate) fn test(
     ));
     fault(gpu, log);
     reg_ok && mem_ok
+}
+
+// ---- a user address space (stage R4.3) ----
+
+/// Where the test's page tables, indirect buffer and data page are (video
+/// memory offsets).
+const VM_TABLES_AT: u64 = 172 << 20;
+const VM_TABLES: usize = 64;
+const VM_IB_AT: u64 = 173 << 20;
+const VM_DATA_AT: u64 = VM_IB_AT + 0x1000;
+/// The test's virtual addresses for them.
+const VA_IB: u64 = 0x10_0000;
+const VA_DATA: u64 = 0x10_1000;
+
+/// Page tables in video memory: table `n` is at `VM_TABLES_AT + 4096 n`,
+/// written through the aperture.
+struct VramTables {
+    gpu: Arc<Aperture>,
+    /// The video memory's physical offset (the carve-out's address).
+    phys: u64,
+    used: usize,
+}
+
+impl VramTables {
+    fn at(&self, handle: usize) -> u64 {
+        VM_TABLES_AT + 4096 * handle as u64
+    }
+}
+
+impl amdgpu::vm::Tables for VramTables {
+    fn alloc(&mut self) -> Option<usize> {
+        if self.used >= VM_TABLES {
+            return None;
+        }
+        let h = self.used;
+        self.used += 1;
+        for i in 0..1024u64 {
+            self.gpu
+                .vram_write32(usize::try_from(self.at(h) + 4 * i).unwrap_or(0), 0);
+        }
+        Some(h)
+    }
+
+    fn address(&self, handle: usize) -> (u64, bool) {
+        (self.phys + self.at(handle), false)
+    }
+
+    fn write(&mut self, handle: usize, index: usize, entry: u64) {
+        let at = usize::try_from(self.at(handle)).unwrap_or(0) + 8 * index;
+        self.gpu.vram_write32(at, (entry & 0xffff_ffff) as u32);
+        self.gpu.vram_write32(at + 4, (entry >> 32) as u32);
+    }
+
+    fn read(&self, handle: usize, index: usize) -> u64 {
+        let at = usize::try_from(self.at(handle)).unwrap_or(0) + 8 * index;
+        let lo = self.gpu.vram_read32(at).unwrap_or(0);
+        let hi = self.gpu.vram_read32(at + 4).unwrap_or(0);
+        u64::from(lo) | (u64::from(hi) << 32)
+    }
+
+    fn table_at(&self, entry: u64) -> Option<usize> {
+        let a = (entry & 0x0000_ffff_ffff_f000).checked_sub(self.phys + VM_TABLES_AT)?;
+        let h = usize::try_from(a / 4096).ok()?;
+        (h < self.used).then_some(h)
+    }
+}
+
+/// An indirect buffer at a virtual address, run in VMID 1 (06 section 10.4):
+/// the page tables built in video memory, two pages mapped (the buffer and a
+/// data page), the page table switched and flushed on the ring, the buffer
+/// run. The buffer writes a word to the data page and fences to it, by
+/// virtual address; the CPU reads the page back. Logs; returns whether both
+/// landed.
+pub(crate) fn vm_test(
+    gpu: &Arc<Aperture>,
+    g: &mut Gfx,
+    log: &dyn Fn(core::fmt::Arguments<'_>),
+) -> bool {
+    use amdgpu::vm::{Flags, Space};
+    let w = Bar5(gpu);
+    let mem = crate::psp::vram_memory(gpu, g.base);
+    let phys = u64::from(w.read32(Hub::Gfx.reg(Reg::FbOffset))) << 24;
+    let tables = VramTables {
+        gpu: Arc::clone(gpu),
+        phys,
+        used: 0,
+    };
+    let Ok(mut space) = Space::new(tables) else {
+        log(format_args!("VM: no memory for the root table"));
+        return false;
+    };
+    let ok = space
+        .map(VA_IB, 1, Flags::VRAM_RW, |_| phys + VM_IB_AT)
+        .and_then(|()| space.map(VA_DATA, 1, Flags::VRAM_RW, |_| phys + VM_DATA_AT));
+    if ok.is_err() {
+        log(format_args!("VM: mapping failed: {ok:?}"));
+        return false;
+    }
+    let root = space.tables().address(space.root()).0;
+    log(format_args!(
+        "VM: root table at {root:#x}; {VA_IB:#x} and {VA_DATA:#x} mapped to video memory offsets {VM_IB_AT:#x} and {VM_DATA_AT:#x}"
+    ));
+    // The indirect buffer: a write and a fence, by virtual address.
+    let mut ib = Packets::new();
+    ib.write_data_mem(VA_DATA, &[0xcafe_0001]);
+    ib.fence(VA_DATA + 8, 0xfeed_0002, false, false);
+    ib.pad(8);
+    put(gpu, VM_IB_AT, &ib.0);
+    put(gpu, VM_DATA_AT, &[0, 0, 0, 0]);
+    let _ = gpu.vram_read32(0);
+    amdgpu::flip::hdp_flush(&w);
+    // The ring: switch and flush VMID 1, run the buffer in it, then a fence of
+    // the ring's own to say the buffer is done.
+    let mut ring = amdgpu::gmc::ring_vm_flush(1, root, false, 0);
+    ring.indirect_buffer(VA_IB, u32::try_from(ib.0.len()).unwrap_or(0), 1, false);
+    put(gpu, FENCE_AT, &[0, 0]);
+    amdgpu::flip::hdp_flush(&w);
+    ring.fence(g.base + FENCE_AT, 0x600d_f00d, false, false);
+    g.gfx.submit(gpu, &mem, &ring.0);
+    let (mut data, mut fence, mut ring_fence) = (0, 0, 0);
+    for _ in 0..300 {
+        mem.invalidate();
+        data = mem.read32(g.base + VM_DATA_AT);
+        fence = mem.read32(g.base + VM_DATA_AT + 8);
+        ring_fence = mem.read32(g.base + FENCE_AT);
+        if ring_fence == 0x600d_f00d {
+            break;
+        }
+        bus::manager().delay_us(1000);
+    }
+    let ok = data == 0xcafe_0001 && fence == 0xfeed_0002 && ring_fence == 0x600d_f00d;
+    log(format_args!(
+        "VM: the buffer ran in VMID 1: data {data:#010x}, its fence {fence:#010x}, the ring's fence {ring_fence:#010x} ({})",
+        if ok { "all seen" } else { "NOT all seen" }
+    ));
+    fault(gpu, log);
+    ok
 }

@@ -436,6 +436,28 @@ pub const fn invalidate_request(vmid: u32) -> u32 {
     (1 << vmid) | 0xf << 19 | 1 << 23
 }
 
+/// The packets a ring writes to switch VMID `vmid`'s page table to the root
+/// at `root` (a physical address; `system` if it is in system memory) and
+/// flush its translations, through invalidation engine `engine` (05 section
+/// 5.3): the base written low then high (the root as a directory entry:
+/// valid, plus system), the request, a wait on the acknowledgement of that
+/// VMID's bit, then `PFP_SYNC_ME`. The graphics hub only.
+#[must_use]
+pub fn ring_vm_flush(vmid: u32, root: u64, system: bool, engine: usize) -> crate::pm4::Packets {
+    let hub = Hub::Gfx;
+    let (base_lo, base_hi) = hub.context_table(vmid as usize)[0];
+    let (_, req, ack, _, _) = hub.engine(engine);
+    let entry = crate::vm::pde(root, system);
+    let dword = |byte: usize| u32::try_from(byte / 4).unwrap_or(0);
+    let mut p = crate::pm4::Packets::new();
+    p.write_data_reg(dword(base_lo), (entry & 0xffff_ffff) as u32);
+    p.write_data_reg(dword(base_hi), (entry >> 32) as u32);
+    p.write_data_reg(dword(req), invalidate_request(vmid));
+    p.wait_reg(3, dword(ack), 1 << vmid, 1 << vmid, 0x20, true);
+    p.pfp_sync_me();
+    p
+}
+
 /// Why an invalidation did not finish.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InvalidateError {
@@ -766,5 +788,35 @@ mod tests {
         let (sem, ..) = Hub::Gfx.engine(CPU_ENGINE);
         assert!(m.log.borrow().iter().all(|w| w.0 != sem));
         assert!(!*m.sem.borrow());
+    }
+
+    #[test]
+    fn a_ring_switches_a_page_table_and_flushes_in_the_specifications_order() {
+        let p = ring_vm_flush(1, 0x18_4a00_0000, false, 0);
+        let (lo, hi) = Hub::Gfx.context_table(1)[0];
+        let (_, req, ack, _, _) = Hub::Gfx.engine(0);
+        // base low, base high, request, wait for the acknowledgement, sync.
+        let w = &p.0;
+        assert_eq!(
+            w[0],
+            crate::pm4::header(crate::pm4::op::WRITE_DATA, 4, false)
+        );
+        assert_eq!(w[2] as usize, lo / 4);
+        assert_eq!(w[4], 0x4a00_0001, "the root as a valid directory entry");
+        assert_eq!(w[7] as usize, hi / 4);
+        assert_eq!(w[9], 0x18);
+        assert_eq!(w[12] as usize, req / 4);
+        assert_eq!(w[14], invalidate_request(1));
+        assert_eq!(
+            w[15],
+            crate::pm4::header(crate::pm4::op::WAIT_REG_MEM, 6, false)
+        );
+        assert_eq!(w[17] as usize, ack / 4);
+        assert_eq!((w[19], w[20]), (2, 2));
+        assert_eq!(*w.last().unwrap(), 0);
+        // A root in system memory carries the system bit.
+        let p = ring_vm_flush(2, 0x1_2345_6000, true, 1);
+        assert_eq!(p.0[4], 0x2345_6003);
+        assert_eq!(p.0[9], 1);
     }
 }
