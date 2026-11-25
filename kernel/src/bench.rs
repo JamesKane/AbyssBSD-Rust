@@ -127,6 +127,7 @@ pub(crate) fn run(s: &Sleepable, suite: &str) -> bool {
         "rwdiag" => suite_rwdiag,
         "ctxdiag" => suite_ctxdiag,
         "ctxpmu" => suite_ctxpmu,
+        "mtxpmu" => suite_mtxpmu,
         _ => {
             kprintln!("bench: unknown suite {suite:?}");
             return false;
@@ -1213,6 +1214,85 @@ fn suite_ctxpmu(s: &Sleepable) {
 #[cfg(not(target_arch = "aarch64"))]
 fn suite_ctxpmu(_: &Sleepable) {
     kprintln!("bench: ctxpmu is aarch64 only");
+}
+
+/// The contended mutex (`mtx.t2`, `mtx.t4`) with the performance monitors
+/// counting on every worker's CPU (aarch64; investigation): per 1000
+/// operations, the cycles and four events' counts for each worker, for each
+/// set of events as in [`suite_ctxpmu`]. Compare two kernels by the
+/// instruction counts, not by the times, on the little cores.
+#[cfg(target_arch = "aarch64")]
+fn suite_mtxpmu(s: &Sleepable) {
+    const SETS: [[u16; 4]; 3] = [
+        [0x08, 0x03, 0x17, 0x19],
+        [0x01, 0x10, 0x23, 0x24],
+        [0x05, 0x2a, 0x13, 0x16],
+    ];
+    let lock = lock_sets()[0];
+    for t in [2usize, 4] {
+        if !fits(t) {
+            continue;
+        }
+        let cpus: Vec<CpuId> = (0..t).map(default_cpu).collect();
+        for set in SETS {
+            let counts: Arc<Vec<[AtomicU64; 5]>> =
+                Arc::new((0..t).map(|_| [const { AtomicU64::new(0) }; 5]).collect());
+            let run = Run::new();
+            let sh = Arc::clone(&counts);
+            let ticks = launch(s, &run, &cpus, PLACEMENT_NS, move |run, i, ws| {
+                let mut n = 0u64;
+                crate::arch::cpu::pmu_start(set);
+                while !run.stopped() {
+                    *lock.mtx.lock(ws) += 1;
+                    n += 1;
+                }
+                for (c, v) in sh[i].iter().zip(crate::arch::cpu::pmu_read()) {
+                    c.store(v, Ordering::Relaxed);
+                }
+                run.ops[i].0.store(n, Ordering::Relaxed);
+            });
+            let milli = milli_ns_per_op(&run, t, ticks);
+            kprintln!(
+                "kbench mtxpmu.t{t} {}.{:03} ns/op",
+                milli / 1000,
+                milli % 1000
+            );
+            // The mutex is unfair: one worker may take nearly every
+            // operation. So the counts are totals over the workers, per
+            // 1000 operations of all of them, and the shares are shown.
+            let ops: Vec<u64> = (0..t)
+                .map(|w| run.ops[w].0.load(Ordering::Relaxed))
+                .collect();
+            let total_ops: u64 = ops.iter().sum::<u64>().max(1);
+            let c: Vec<u64> = (0..5)
+                .map(|e| {
+                    counts
+                        .iter()
+                        .map(|w| w[e].load(Ordering::Relaxed))
+                        .sum::<u64>()
+                        * 1000
+                        / total_ops
+                })
+                .collect();
+            kprintln!(
+                "kbench mtxpmu.t{t}.total cycles {} ev{:#x} {} ev{:#x} {} ev{:#x} {} ev{:#x} {} (per 1000 ops, all workers) ops {:?}",
+                c[0],
+                set[0],
+                c[1],
+                set[1],
+                c[2],
+                set[2],
+                c[3],
+                set[3],
+                c[4],
+                ops
+            );
+        }
+    }
+}
+#[cfg(not(target_arch = "aarch64"))]
+fn suite_mtxpmu(_: &Sleepable) {
+    kprintln!("bench: mtxpmu is aarch64 only");
 }
 
 /// Strict alternation between two workers on `a` and `b`.

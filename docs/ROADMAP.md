@@ -476,8 +476,13 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
   class; `p2` (`2026-11-24-8c3a7ae-p2.txt`) passes all but `mtx` on the little cores (1.058: `mtx.t4`
   1.27 and `mtx.t2` 1.12, 31 to 39 ns against FreeBSD's 31; it was 0.979 at `ae38a29`, and the little
   cores' code layout moves such a result). To do:
-  - `p2`'s `mtx` on the little cores: whether it is layout or the contended path (compare by
-    instructions executed);
+  - `p2`'s `mtx` on the little cores: not the code path. `abyss.bench=mtxpmu` (PMU counts per
+    operation, three boots each of `cb14683` with the suite, and `8c3a7ae` with and without
+    `-strict-align`) shows the same 84.0 instructions an operation at two threads on all three
+    (27.8, 30.4 and 28.2 ns, each 24 to 31 across boots). At four threads the mutex is unfair: two
+    of the four workers take nearly every operation, which two varies, and the time swings from 26
+    to 81 ns with it, on every kernel. The ten-run gate will say whether the component passes;
+    a fairer benchmark or FreeBSD's own spread at four threads is the next thing to measure;
   - the 10-run gate on every class, for `p2` and `p4` to `p7`;
   - the SMMU's stage 6 (IOMMU.md §10: sync once per unmap, range invalidation, `rge` and `vtnet`
     transmit bounce, the low-memory check), each after its audit against FreeBSD's design;

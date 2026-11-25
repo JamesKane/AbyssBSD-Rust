@@ -44,11 +44,11 @@ mod event;
 mod exec;
 mod fido;
 mod firmware;
+mod firmware_files;
 mod firstuse;
 mod fs;
 mod geom_ctl;
 mod geom_kern;
-mod firmware_files;
 mod gopkms;
 #[cfg(target_arch = "x86_64")]
 mod hwpstate_amd;
