@@ -82,6 +82,10 @@ impl Display for Scanout {
         self.gpu.upgrade().and_then(|g| g.vram_len()).unwrap_or(0)
     }
 
+    fn connected(&self) -> bool {
+        self.amd.upgrade().is_none_or(|a| a.connected())
+    }
+
     fn modes(&self) -> alloc::vec::Vec<kms_check::Mode> {
         // What the monitor's EDID allows of the modes the card can set.
         match self.amd.upgrade() {

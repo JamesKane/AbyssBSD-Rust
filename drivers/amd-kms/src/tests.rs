@@ -196,6 +196,10 @@ fn the_controller_has_a_vblank_interrupt_only_if_the_display_does() {
 struct Modal {
     inner: Arc<Fake>,
     sets: Mutex<Vec<Option<(u16, u16)>>>,
+    /// The hot-plug line.
+    plugged: core::sync::atomic::AtomicBool,
+    /// The monitor offers only 720p.
+    small: core::sync::atomic::AtomicBool,
 }
 
 fn cta(h: u16, v: u16, ht: u16, vt: u16, khz: u32) -> Mode {
@@ -231,10 +235,16 @@ impl Display for Modal {
         254 << 20
     }
     fn modes(&self) -> Vec<Mode> {
+        if self.small.load(core::sync::atomic::Ordering::Relaxed) {
+            return std::vec![cta(1280, 720, 1650, 750, 74_250)];
+        }
         std::vec![
             cta(1920, 1080, 2200, 1125, 148_500),
             cta(1280, 720, 1650, 750, 74_250),
         ]
+    }
+    fn connected(&self) -> bool {
+        self.plugged.load(core::sync::atomic::Ordering::Relaxed)
     }
     fn set_mode(&self, _: Option<&sched::Sleepable>, mode: Option<&Mode>) -> Result<(), Errno> {
         self.sets
@@ -249,6 +259,8 @@ fn modal() -> (Arc<Modal>, Arc<AmdKms>) {
     let d = Arc::new(Modal {
         inner: Fake::new(),
         sets: Mutex::new(Vec::new()),
+        plugged: true.into(),
+        small: false.into(),
     });
     let c = create(
         Geometry {
@@ -366,4 +378,33 @@ fn crtc_update<'a>(
         modeset,
         s: None,
     }
+}
+
+#[test]
+fn the_connector_follows_the_hot_plug_line_and_the_new_monitors_modes() {
+    use core::sync::atomic::Ordering::Relaxed;
+    let (d, c) = modal();
+    let conn = Connector(c.screen.clone());
+    assert_eq!(conn.detect(), Connection::Connected);
+    assert_eq!(conn.modes().len(), 2);
+    // Unplugged.
+    d.plugged.store(false, Relaxed);
+    assert_eq!(conn.detect(), Connection::Disconnected);
+    // A monitor with fewer modes is plugged in: the connector and the
+    // controller follow it.
+    d.small.store(true, Relaxed);
+    d.plugged.store(true, Relaxed);
+    assert_eq!(conn.detect(), Connection::Connected);
+    assert_eq!(conn.modes().len(), 1);
+    let crtc = Crtc(c.screen.clone());
+    let old = drm::kms::CrtcSt::default();
+    let new = drm::kms::CrtcSt {
+        active: true,
+        mode: Some(cta(1920, 1080, 2200, 1125, 148_500)),
+        ..Default::default()
+    };
+    assert_eq!(
+        crtc.check(&crtc_update(&old, &new, true)),
+        Err(Errno::EINVAL)
+    );
 }

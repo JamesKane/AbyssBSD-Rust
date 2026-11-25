@@ -32,6 +32,7 @@ mod control;
 mod dmcub;
 mod gcload;
 mod gcring;
+mod hotplug;
 mod interrupt;
 mod kms;
 mod psp;

@@ -36,6 +36,7 @@ mod gc_tables;
 pub mod gcfw;
 pub mod gmc;
 pub mod hdmi;
+pub mod hpd;
 pub mod ih;
 pub mod info;
 pub mod kiq;
