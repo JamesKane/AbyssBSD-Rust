@@ -736,6 +736,61 @@ impl Amd {
         if ok { Ok(()) } else { Err(Errno::EIO) }
     }
 
+    /// Logs the translation hubs' fault status and what they were set to
+    /// (reads only), to find why the engine did not read an address.
+    pub(crate) fn gc_fault(&self) -> Result<(), abi::errno::Errno> {
+        use amdgpu::gmc::{Hub, Reg};
+        use amdgpu::regs::Window;
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        for (name, hub, addr_at) in [
+            ("GFXHUB", Hub::Gfx, 0xa0a4usize),
+            ("MMHUB", Hub::Mm, 0x69c34),
+        ] {
+            let st = w.read32(hub.reg(Reg::FaultStatus));
+            self.log(format_args!(
+                "FAULT: {name}: status {st:#010x} (client {}, vmid {}, write {}, mapping error {}, permission {:#x}, walker {}), address {:#x}{:08x}",
+                (st >> 9) & 0x1ff,
+                (st >> 20) & 0xf,
+                (st >> 18) & 1,
+                (st >> 8) & 1,
+                (st >> 4) & 0xf,
+                (st >> 1) & 7,
+                w.read32(addr_at + 4) & 0xf,
+                w.read32(addr_at)
+            ));
+            for (n, r) in [
+                ("FB_LOCATION_BASE", Reg::FbLocationBase),
+                ("FB_LOCATION_TOP", Reg::FbLocationTop),
+                ("FB_OFFSET", Reg::FbOffset),
+                ("APERTURE_LOW", Reg::ApertureLow),
+                ("APERTURE_HIGH", Reg::ApertureHigh),
+                ("L1_TLB_CNTL", Reg::L1Tlb),
+                ("L2_CNTL", Reg::L2Cntl),
+                ("FAULT_CNTL", Reg::FaultCntl),
+            ] {
+                self.log(format_args!(
+                    "  {name} {n} @{:#07x} = {:#010x}",
+                    hub.reg(r),
+                    w.read32(hub.reg(r))
+                ));
+            }
+            self.log(format_args!(
+                "  {name} CONTEXT0_CNTL @{:#07x} = {:#010x}",
+                hub.context_cntl(0),
+                w.read32(hub.context_cntl(0))
+            ));
+            for (a, b) in hub.context_table(0) {
+                self.log(format_args!(
+                    "  {name} context 0 registers @{a:#07x}/{b:#07x} = {:#010x}/{:#010x}",
+                    w.read32(a),
+                    w.read32(b)
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Logs the graphics block's state (reads only; see `gcload::snapshot`).
     pub(crate) fn gc_probe(&self) -> Result<(), abi::errno::Errno> {
         let gpu = self.gpu()?;
@@ -1540,6 +1595,11 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             "gc_ring",
             "Write 1 to start graphics ring 0 and run the ring test (after gc_fw); again, only the test",
             Amd::gc_ring,
+        ),
+        (
+            "gc_fault",
+            "Write 1 to log the translation hubs' fault status and set-up (reads only)",
+            Amd::gc_fault,
         ),
         (
             "gc_probe",
