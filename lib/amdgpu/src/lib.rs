@@ -40,3 +40,4 @@ pub mod modeset;
 pub mod psp;
 pub mod regs;
 pub mod timing;
+pub mod vm;
