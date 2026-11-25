@@ -422,6 +422,30 @@ fn tcp_data_half_close_and_time_wait() {
     l.close();
 }
 
+/// The loopback connect benchmark's refusal: the server closes first, its
+/// side waits in TIME_WAIT, the client comes again from the same port, and
+/// the old connection has just ended (dropped under its lock, its PCB not
+/// yet out of the tables). The SYN belongs to the listener, not to a reset.
+#[test]
+fn tcp_syn_after_a_connection_just_ended_reaches_the_listener() {
+    let _g = setup();
+    let (l, c, s) = connected(20053);
+    let cport = c.sockname().port;
+    s.close();
+    c.close();
+    assert_eq!(s.tcp_state(), Tstate::TimeWait);
+    s.inner.lock().tcp.as_mut().unwrap().dropped = true;
+    let e = tcp4();
+    set_int(&e, SOL_SOCKET, SO_REUSEADDR, 1);
+    e.bind(&sockaddr_in(LO, cport), &user()).unwrap();
+    assert_eq!(e.connect(&sockaddr_in(LO, 20053), &user(), false), Ok(()));
+    let a = l.accept().unwrap();
+    assert_eq!(e.tcp_state(), Tstate::Established);
+    for x in [e, a, l] {
+        x.close();
+    }
+}
+
 #[test]
 fn tcp_flow_control_and_window() {
     let _g = setup();

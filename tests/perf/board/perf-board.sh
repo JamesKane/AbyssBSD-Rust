@@ -109,6 +109,34 @@ on() {
 	if [ "$1" = abyss ]; then shift; ab "$@"; else shift; fb "$@"; fi
 }
 
+# Runs CMD as root on SIDE with its output and errors in OUT (an error from
+# a benchmark is what says why it stopped), for up to two hours, and fails
+# when OUT has not grown for ABYSS_STALL seconds (15 minutes): a benchmark
+# that died can leave a helper holding the output open, and the run would
+# wait out the two hours. What it left on the board is killed then.
+run_watched() {
+	local side=$1 cmd=$2 out=$3 pid last=-1 size idle=0 stall=${ABYSS_STALL:-900}
+	if [ "$side" = abyss ]; then
+		timeout 7200 ssh $SSHOPT -o UserKnownHostsFile=$S/abyss_known_hosts root@$B "$cmd" > "$out" 2>&1 < /dev/null &
+	else
+		timeout 7200 ssh $SSHOPT jkane@$B "su root -c '$cmd' < /dev/null" > "$out" 2>&1 < /dev/null &
+	fi
+	pid=$!
+	while kill -0 $pid 2> /dev/null; do
+		sleep 15
+		size=$(stat -c %s "$out" 2> /dev/null || echo 0)
+		if [ "$size" = "$last" ]; then idle=$((idle + 15)); else idle=0; last=$size; fi
+		if [ $idle -ge $stall ]; then
+			log "no output for $stall s: stopping the run and what it left on the board"
+			kill $pid 2> /dev/null
+			wait $pid 2> /dev/null
+			on $side 'pkill -f "[/]tmp/ubench"; pkill -f "[p]erf-run.sh"; pkill -f "[p]7-run.sh"; pkill -f "[/]tmp/iperf3"; true' > /dev/null
+			return 124
+		fi
+	done
+	wait $pid
+}
+
 # p7's peers on the build server, started under CI's lock (waiting for
 # it) and stopped after each run; their pids are in ~/abyss/perf/p7peer.pids.
 case " $SUITES " in *" p7 "*) p7=1 ;; *) p7= ;; esac
@@ -190,7 +218,7 @@ for run in $(seq 0 $((RUNS - 1))); do
 		log "run $((run + 1))/$RUNS: $side ($SUITES)"
 		start=$(date +%s)
 		peer_start
-		T=7200 on $side "env PERF_PEER=$PEER sh /mnt/perf/perf-run.sh $SUITES" > "$out.tmp" 2>&1
+		run_watched $side "env PERF_PEER=$PEER sh /mnt/perf/perf-run.sh $SUITES" "$out.tmp"
 		rc=$?
 		peer_stop
 		ends=$(grep -c '^kbench end' "$out.tmp")

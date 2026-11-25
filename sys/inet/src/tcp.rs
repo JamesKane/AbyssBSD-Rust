@@ -1968,11 +1968,19 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
         zone: a.zone,
         fib: 0,
     };
-    // Lookups, more than once after a TIME_WAIT gives way.
-    for _ in 0..2 {
+    // Lookups, more than once after a TIME_WAIT gives way, or a connection
+    // is found that has just ended (dropped under its lock, its PCB still
+    // to leave the tables): that one is as good as not found, and the
+    // segment goes on to the listener, as FreeBSD's `in_pcblookup` does
+    // for a freed PCB. A reset here refused a connection to a listener
+    // that was there.
+    let mut ended = false;
+    for _ in 0..4 {
         // A connection's segment: the connected hash, no lock
         // (`in_pcblookup_hash_smr`); else the table, for listeners.
-        let fast = {
+        let fast = if ended {
+            None
+        } else {
             let section = net::view::enter();
             match a.family {
                 Family::Inet => crate::pcb::TCB_HASH.lookup4(
@@ -1992,8 +2000,8 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
         let mut lp = None;
         let found = fast.map(|so| (so, false)).or_else(|| {
             let tb = TCB.lock();
-            let p = match a.family {
-                Family::Inet => tb.lookup4(
+            let p = match (a.family, ended) {
+                (Family::Inet, false) => tb.lookup4(
                     vnet.id,
                     a4(&a.foreign),
                     t.sport,
@@ -2001,7 +2009,11 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
                     t.dport,
                     true,
                 ),
-                Family::Inet6 => tb.lookup6(vnet.id, &a.foreign, t.sport, &a.local, t.dport, true),
+                (Family::Inet6, false) => {
+                    tb.lookup6(vnet.id, &a.foreign, t.sport, &a.local, t.dport, true)
+                }
+                (Family::Inet, true) => tb.lookup4_listener(vnet.id, a4(&a.local), t.dport),
+                (Family::Inet6, true) => tb.lookup6_listener(vnet.id, &a.local, t.dport),
             };
             p.and_then(|p| {
                 lp = Some(ListenerPcb {
@@ -2016,8 +2028,8 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
             return;
         };
         if dropped {
-            closed_port(vnet, st, &inc, &t, tlen, a);
-            return;
+            ended = true;
+            continue;
         }
         // Whether it listens or has ended since the hash showed it
         // (`INP_FREED`) is asked under the hold that runs the segment.
@@ -2064,7 +2076,14 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
         });
         let ran = match ran {
             Ok(r) => r,
-            Err(Not::Dropped) => None,
+            Err(Not::Dropped) => {
+                // Ended between the lookup and the lock: look again, past it.
+                if let Some(s) = seg.take() {
+                    data = s.data;
+                }
+                ended = true;
+                continue;
+            }
             Err(Not::Listening) => {
                 let data = seg.take().map(|s| s.data).unwrap_or_default();
                 listen_input(vnet, st, &so, lp, &inc, &t, opts, data, a);

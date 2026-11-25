@@ -753,6 +753,14 @@ impl Table {
         if exact.is_some() || !wildcard {
             return exact;
         }
+        self.lookup4_listener(vnet, laddr, lport)
+    }
+
+    /// The unconnected PCB bound to `laddr` or the wildcard on `lport`,
+    /// an IPv4 one before a mapped IPv6 one: [`Table::lookup4`] without
+    /// the connected PCBs, for a segment whose connection has just gone.
+    #[must_use]
+    pub fn lookup4_listener(&self, vnet: u32, laddr: [u8; 4], lport: u16) -> Option<&Pcb> {
         let (mut exact_l, mut wild, mut wild_mapped) = (None, None, None);
         for p in self.on_port_wild(vnet, lport) {
             if p.vnet.id != vnet || !p.hashed || !p.v4() || !p.wild() || p.lport != lport {
@@ -797,6 +805,12 @@ impl Table {
         if exact.is_some() || !wildcard {
             return exact;
         }
+        self.lookup6_listener(vnet, laddr, lport)
+    }
+
+    /// [`Table::lookup4_listener`] for IPv6.
+    #[must_use]
+    pub fn lookup6_listener(&self, vnet: u32, laddr: &In6, lport: u16) -> Option<&Pcb> {
         let (mut exact_l, mut wild) = (None, None);
         for p in self.on_port_wild(vnet, lport) {
             if p.vnet.id != vnet || !p.hashed || !p.v6() || !p.wild() || p.lport != lport {
