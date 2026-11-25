@@ -1,0 +1,99 @@
+kbench env side=freebsd ident=GENERIC-HMP-IOMMU-NODEBUG 16.0-CURRENT
+kbench env cpu2 freq=1800 cx=C1
+kbench env cpu8 freq=2200 cx=C1
+kbench env cpu6 freq=2300 cx=C1
+kbench env cpu10 freq=2500 cx=C1
+kbench env cpu0 freq=2600 cx=C1
+kbench env processes=53 load={ 0.28 1.12 1.11 }
+kbench class big 0,1,10,11
+kbench begin p7 cpus=12
+kbench tcp.rr.lo.p50 10510 ns
+kbench tcp.rr.lo.p99 12549 ns
+kbench tcp.connect.lo 22255.0 ns/op
+kbench tcp.rr.net.p50 208084 ns
+kbench tcp.rr.net.p99 218074 ns
+kbench tcp.connect.net 362606.3 ns/op
+kbench sendfile.plain 22477.0 ns/op
+kbench sendfile.ktls 18903.4 ns/op
+kbench tcp.lo.s1 339.719 ns/op
+kbench tcp.lo.s4 136.378 ns/op
+kbench tcp.tx.s1 21537.604 ns/op
+kbench tcp.tx.s4 21217.411 ns/op
+kbench tcp.rx.s1 19123.923 ns/op
+kbench tcp.rx.s4 18939.333 ns/op
+kbench tcp.cpu.tx 32944.997 ns/op
+kbench tcp.cpu.rx 27651.187 ns/op
+kbench udp.tx.bulk 8565.920 ns/op
+kbench udp.rx.bulk 8660.324 ns/op
+kbench udp.tx.small 6034.320 ns/op
+kbench udp.rx.small 13214.608 ns/op
+kbench end p7
+kbench class mid 6,7,8,9
+kbench begin p7 cpus=12
+kbench tcp.rr.lo.p50 10739 ns
+kbench tcp.rr.lo.p99 11789 ns
+kbench tcp.connect.lo 23011.7 ns/op
+kbench tcp.rr.net.p50 207685 ns
+kbench tcp.rr.net.p99 218514 ns
+kbench tcp.connect.net 363217.3 ns/op
+kbench sendfile.plain 23247.6 ns/op
+kbench sendfile.ktls 22877.3 ns/op
+kbench tcp.lo.s1 315.636 ns/op
+kbench tcp.lo.s4 133.544 ns/op
+kbench tcp.tx.s1 21325.891 ns/op
+kbench tcp.tx.s4 21008.091 ns/op
+kbench tcp.rx.s1 18666.630 ns/op
+kbench tcp.rx.s4 18606.764 ns/op
+kbench tcp.cpu.tx 38013.648 ns/op
+kbench tcp.cpu.rx 27822.264 ns/op
+kbench udp.tx.bulk 8565.740 ns/op
+kbench udp.rx.bulk 8680.201 ns/op
+kbench udp.tx.small 6312.337 ns/op
+kbench udp.rx.small 13291.451 ns/op
+kbench end p7
+kbench class little 2,3,4,5
+kbench begin p7 cpus=12
+kbench tcp.rr.lo.p50 61659 ns
+kbench tcp.rr.lo.p99 75608 ns
+kbench tcp.connect.lo 120584.5 ns/op
+kbench tcp.rr.net.p50 216394 ns
+kbench tcp.rr.net.p99 226354 ns
+kbench tcp.connect.net 554211.9 ns/op
+kbench sendfile.plain 13167.2 ns/op
+kbench sendfile.ktls 16679.6 ns/op
+kbench tcp.lo.s1 930.606 ns/op
+kbench tcp.lo.s4 1335.987 ns/op
+kbench tcp.tx.s1 21836.832 ns/op
+kbench tcp.tx.s4 22555.873 ns/op
+kbench tcp.rx.s1 18298.499 ns/op
+kbench tcp.rx.s4 18663.186 ns/op
+kbench tcp.cpu.tx 34883.401 ns/op
+kbench tcp.cpu.rx 29812.857 ns/op
+kbench udp.tx.bulk 12327.677 ns/op
+kbench udp.rx.bulk 8753.876 ns/op
+kbench udp.tx.small 15629.770 ns/op
+kbench udp.rx.small 12384.200 ns/op
+kbench end p7
+kbench class all 0-7
+kbench begin p7 cpus=12
+kbench tcp.rr.lo.p50 30049 ns
+kbench tcp.rr.lo.p99 47458 ns
+kbench tcp.connect.lo 56023.3 ns/op
+kbench tcp.rr.net.p50 207724 ns
+kbench tcp.rr.net.p99 217324 ns
+kbench tcp.connect.net 365427.0 ns/op
+kbench sendfile.plain 23488.5 ns/op
+kbench sendfile.ktls 23178.5 ns/op
+kbench tcp.lo.s1 358.547 ns/op
+kbench tcp.lo.s4 153.286 ns/op
+kbench tcp.tx.s1 21327.279 ns/op
+kbench tcp.tx.s4 21557.101 ns/op
+kbench tcp.rx.s1 19781.228 ns/op
+kbench tcp.rx.s4 18857.067 ns/op
+kbench tcp.cpu.tx 34161.600 ns/op
+kbench tcp.cpu.rx 27459.061 ns/op
+kbench udp.tx.bulk 8565.812 ns/op
+kbench udp.rx.bulk 8761.685 ns/op
+kbench udp.tx.small 6381.971 ns/op
+kbench udp.rx.small 13144.720 ns/op
+kbench end p7

@@ -12,6 +12,12 @@
 # --platform opi6p --dir WORKDIR` makes the report. Rerun with the same
 # WORKDIR to resume: runs with a complete log are kept.
 #
+# FreeBSD's side is a golden set (golden/p2/, its MANIFEST says what it was
+# made from), as perf-board.sh's: a run with a log there is copied into
+# WORKDIR instead of run, and the set is refused when kbench.ko or
+# kbench-run.sh changed on the board (ABYSS_GOLDEN=0 ignores it,
+# ABYSS_GOLDEN=refresh runs only FreeBSD's side and rewrites it).
+#
 # Usage: p2-board.sh WORKDIR RUNS
 #
 # AbyssBSD's command line (EFI/ABYSS/CMDLINE on its ESP, the Samsung's
@@ -29,6 +35,9 @@ CLASSES=${P2_CLASSES:-"big:2,0,1,10,11 mid:2,6,7,8,9 little:6,2,3,4,5 all:0,1,2,
 NCLASS=$(echo $CLASSES | wc -w)
 SSHOPT="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
 mkdir -p "$S"
+GOLDEN_DIR=$(cd "$(dirname "$0")" && pwd)/golden/p2
+GOLDEN=${ABYSS_GOLDEN:-1}
+INPUTS="kbench-run.sh kbench.ko"
 fb() { timeout "${T:-120}" ssh $SSHOPT jkane@$B "su root -c '$*' < /dev/null" 2>/dev/null; }
 # AbyssBSD's host key is kept apart from FreeBSD's, in WORKDIR/abyss_known_hosts.
 ab() { timeout "${T:-120}" ssh $SSHOPT -o UserKnownHostsFile=$S/abyss_known_hosts root@$B "$*" 2>/dev/null; }
@@ -69,14 +78,40 @@ set_cmdline() {
 	fb "df /mnt | grep -q kyuawork && umount /mnt; mount -t msdosfs /dev/gpt/abyssefi /mnt && printf %s \"\$(cat /mnt/EFI/ABYSS/CMDLINE.noprof)$1\" > /mnt/EFI/ABYSS/CMDLINE; r=\$?; umount /mnt; exit \$r"
 }
 
+abyss_up() { [ "$(T=15 ab 'sysctl -n kern.ident')" = ABYSSBSD ]; }
+
+# The same from AbyssBSD, which has its ESP at /boot/efi and can set
+# BootNext itself: consecutive AbyssBSD boots need no FreeBSD between.
+ab_set_cmdline() {
+	ab "printf %s \"\$(cat /boot/efi/EFI/ABYSS/CMDLINE.noprof)$1\" > /boot/efi/EFI/ABYSS/CMDLINE && sync"
+}
+
 restore() {
-	if [ "$(which_os)" = freebsd ] || [ "$(which_os)" = freebsd-debug ]; then
+	if abyss_up; then
+		ab_set_cmdline "" && log "AbyssBSD's command line put back"
+	elif [ "$(which_os)" = freebsd ] || [ "$(which_os)" = freebsd-debug ]; then
 		set_cmdline "" && log "AbyssBSD's command line put back"
 	else
 		log "WARNING: the board is not in FreeBSD: put CMDLINE.noprof back as CMDLINE on abyssefi"
 	fi
 }
 trap restore EXIT
+
+inputs_hash() {
+	to_freebsd >&2
+	fb "df /mnt | grep -q kyuawork || { fsck_ffs -p /dev/gpt/kyuawork; mount /dev/gpt/kyuawork /mnt; } > /dev/null 2>&1; cd /mnt/perf && sha256 -q $INPUTS | md5 -q" | tail -n 1
+}
+golden_ok=
+if [ "$GOLDEN" = 1 ] && [ -f "$GOLDEN_DIR/MANIFEST" ]; then
+	want=$(sed -n 's/^inputs //p' "$GOLDEN_DIR/MANIFEST")
+	now=$(inputs_hash)
+	if [ "$now" = "$want" ]; then
+		golden_ok=1
+	else
+		log "golden set is stale: the inputs on the board are $now, it was made with $want (ABYSS_GOLDEN=refresh makes a new one, ABYSS_GOLDEN=0 ignores it)"
+		exit 1
+	fi
+fi
 
 complete() { [ -f "$1" ] && [ "$(grep -c '^kbench end p2$' "$1")" -eq "$NCLASS" ]; }
 
@@ -85,13 +120,22 @@ for run in $(seq 0 $((RUNS - 1))); do
 	for side in $order; do
 		out=$(printf '%s/%s-%02d.log' "$S" "$side" "$run")
 		complete "$out" && continue
+		[ "$GOLDEN" = refresh ] && [ "$side" = abyss ] && continue
+		g=$(printf '%s/freebsd-%02d.log' "$GOLDEN_DIR" "$run")
+		if [ "$side" = freebsd ] && [ -n "$golden_ok" ] && [ -f "$g" ]; then
+			log "run $((run + 1))/$RUNS: freebsd from the golden set"
+			cp "$g" "$out"
+			continue
+		fi
 		rm -f "$out.tmp"
 		start=$(date +%s)
 		for class in $CLASSES; do
 			serial=
 			name=${class%%:*}
 			cpus=${class#*:}
-			to_freebsd
+			# AbyssBSD's side without a serial adapter goes from one AbyssBSD
+			# boot to the next; everything else starts in FreeBSD.
+			if [ $side = abyss ] && [ ! -c "$TTY" ] && abyss_up; then :; else to_freebsd; fi
 			log "run $((run + 1))/$RUNS: $side, $name ($cpus)"
 			echo "kbench class $name $cpus" >> "$out.tmp"
 			if [ $side = freebsd ]; then
@@ -116,10 +160,18 @@ for run in $(seq 0 $((RUNS - 1))); do
 				else
 					# No serial: the suite runs, the boot carries on to
 					# multi-user, and the kernel log is read over ssh.
-					set_cmdline " abyss.bench=p2 abyss.bench.boot abyss.bench.cpus=$cpus" ||
-					    { log "could not set AbyssBSD's command line"; exit 1; }
 					serial="$out.log-$name"
-					fb 'nextboot -k kernel.nodebug && efibootmgr -n -b 0007 > /dev/null && shutdown -r now' > /dev/null
+					if abyss_up; then
+						ab_set_cmdline " abyss.bench=p2 abyss.bench.boot abyss.bench.cpus=$cpus" ||
+						    { log "could not set AbyssBSD's command line"; exit 1; }
+						ab 'efibootmgr -n -b 0007 > /dev/null; shutdown -r now' > /dev/null
+						# The old boot's sshd is gone well before the new one's is up.
+						sleep 20
+					else
+						set_cmdline " abyss.bench=p2 abyss.bench.boot abyss.bench.cpus=$cpus" ||
+						    { log "could not set AbyssBSD's command line"; exit 1; }
+						fb 'nextboot -k kernel.nodebug && efibootmgr -n -b 0007 > /dev/null && shutdown -r now' > /dev/null
+					fi
 					for i in $(seq 720); do
 						sleep 5
 						[ "$(T=15 ab 'sysctl -n kern.ident')" = ABYSSBSD ] || continue
@@ -127,11 +179,9 @@ for run in $(seq 0 $((RUNS - 1))); do
 						grep -aq '^kbench end p2' "$serial" && break
 					done
 					grep -a '^kbench ' "$serial" | sed -n '/^kbench begin p2/,/^kbench end p2/p' >> "$out.tmp"
-					# Back to FreeBSD, the default boot.
-					ab 'shutdown -r now' > /dev/null
 				fi
-				# The reset follows the suite: wait for FreeBSD before the next.
-				sleep 60
+				# With a serial adapter the reset follows the suite: wait for FreeBSD.
+				[ -c "$TTY" ] && sleep 60
 			fi
 			if [ "$(grep -c '^kbench end p2$' "$out.tmp")" -ne "$(grep -c '^kbench class' "$out.tmp")" ]; then
 				log "run $((run + 1)) on $side, $name: no complete suite (see $out.tmp${serial:+, $serial})"
@@ -139,6 +189,17 @@ for run in $(seq 0 $((RUNS - 1))); do
 			fi
 		done
 		mv "$out.tmp" "$out"
+		if [ "$GOLDEN" = refresh ] && [ "$side" = freebsd ]; then
+			mkdir -p "$GOLDEN_DIR"
+			cp "$out" "$GOLDEN_DIR/freebsd-$(printf %02d $run).log"
+			{
+				echo "suites p2"
+				echo "inputs $(inputs_hash)"
+				echo "kernel $(sed -n 's/^kbench env side=freebsd ident=//p' "$out" | head -1)"
+				echo "date $(date +%F)"
+				echo "runs $((run + 1))"
+			} > "$GOLDEN_DIR/MANIFEST"
+		fi
 		log "run $((run + 1)) on $side done in $(( $(date +%s) - start )) s"
 	done
 done

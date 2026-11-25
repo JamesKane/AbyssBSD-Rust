@@ -1,0 +1,5 @@
+suites p4 p5 p6
+inputs 904d0eb06391894006020e9c6edabfb5
+kernel GENERIC-HMP-IOMMU-NODEBUG 16.0-CURRENT
+date 2026-11-24
+runs 3

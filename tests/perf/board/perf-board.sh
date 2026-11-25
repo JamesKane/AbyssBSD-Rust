@@ -9,11 +9,11 @@
 # WORKDIR` makes the report. Rerun with the same WORKDIR to resume: runs
 # with a complete log are kept.
 #
-# FreeBSD's side is a golden set (tests/perf/board/golden/, its MANIFEST
+# FreeBSD's side is a golden set (tests/perf/board/golden/<suites>/, its MANIFEST
 # says what it was made from): a run whose FreeBSD log is there is copied
 # into WORKDIR, not run again, so only AbyssBSD's side costs board time.
 # The set is stale when the board's FreeBSD kernel, the benchmark inputs
-# (/mnt/perf), or the userland they run against change: perf-board.sh
+# (/mnt/perf's files that the suites use), or the userland they run against change: perf-board.sh
 # refuses to use it then (ABYSS_GOLDEN=0 ignores the set and runs FreeBSD;
 # `ABYSS_GOLDEN=refresh` runs FreeBSD and writes its logs and MANIFEST
 # into golden/).
@@ -37,7 +37,17 @@ B=${ABYSS_BOARD:-192.168.0.19}
 PEER=${ABYSS_PEER:-192.168.0.14}
 SSHOPT="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
 mkdir -p "$S"
-GOLDEN_DIR=$(cd "$(dirname "$0")" && pwd)/golden
+GOLDEN_DIR=$(cd "$(dirname "$0")" && pwd)/golden/$(echo $SUITES | tr ' ' '-')
+# What the golden set depends on besides FreeBSD's kernel: the files of
+# /mnt/perf its runs use.
+INPUTS="perf-run.sh"
+for s in $SUITES; do
+	case $s in
+	p4 | p5 | p6) INPUTS="$INPUTS fsx tree.tar ubench ubench-p6" ;;
+	p7) INPUTS="$INPUTS p7-run.sh iperf3 libiperf.so.0 ubench-p6" ;;
+	esac
+done
+INPUTS=$(echo $INPUTS | tr ' ' '\n' | sort -u | tr '\n' ' ')
 GOLDEN=${ABYSS_GOLDEN:-1}
 fb() { timeout "${T:-120}" ssh $SSHOPT jkane@$B "su root -c '$*' < /dev/null" 2>/dev/null; }
 ab() { timeout "${T:-120}" ssh $SSHOPT -o UserKnownHostsFile=$S/abyss_known_hosts root@$B "$*" 2>/dev/null; }
@@ -129,8 +139,9 @@ last=${SUITES##* }
 # the ones on the board now.
 inputs_hash() {
 	local os=$(which_os)
-	[ "$os" = down ] && { boot_to abyss; os=abyss; }
-	case $os in abyss) mount_inputs abyss; ab 'md5 -q /mnt/perf/SHA256' ;; *) mount_inputs freebsd; fb 'md5 -q /mnt/perf/SHA256' ;; esac
+	[ "$os" = down ] && { boot_to abyss >&2; os=abyss; }
+	local sum="cd /mnt/perf && sha256 -q $INPUTS | md5 -q"
+	case $os in abyss) mount_inputs abyss >&2; ab "$sum" ;; *) mount_inputs freebsd >&2; fb "$sum" ;; esac | tail -n 1
 }
 golden_ok=
 if [ "$GOLDEN" = 1 ] && [ -f "$GOLDEN_DIR/MANIFEST" ]; then
@@ -161,6 +172,13 @@ for run in $(seq 0 $((RUNS - 1))); do
 			log "run $((run + 1))/$RUNS: freebsd from the golden set"
 			cp "$g" "$out"
 			continue
+		fi
+		# Each run on a fresh boot (state left by an earlier suite counts); from
+		# AbyssBSD that is a reboot into itself: it sets BootNext as FreeBSD does.
+		if [ "$side" = abyss ] && [ "$(which_os)" = abyss ]; then
+			log "AbyssBSD: fresh boot"
+			ab 'efibootmgr -n -b 0007 > /dev/null; shutdown -r now' > /dev/null
+			sleep 30
 		fi
 		boot_to $side
 		mount_inputs $side
