@@ -138,10 +138,11 @@ way, and the Ryzen 9 7900X / X870E (AMD64) has had its first AbyssBSD boots (Pha
 - **Graphics on the X870E (M-G, under way):** the Radeon 610M scans out as a graphics card
   (`amd-kms`): it flips between buffers, measures its refresh rate from the timing generator,
   runs stock Sway on its display, keeps the last frame (and shows the console on a panic) through
-  shutdown and reset, and sets the modes its monitor's EDID lists at the firmware's pixel clock.
-  The display firmware is loaded through the platform security processor, and HDMI audio's
-  endpoint is programmed from the EDID. Modes at other pixel clocks are in progress. The RTX 4070
-  is identified, its Video BIOS and firmware read, and the first firmware step (FRTS) has run.
+  shutdown and reset, and sets the seven modes its monitor's EDID lists (1080p at 60 and 50 Hz,
+  720p, 480p, 576p, and 640x480), including those at another pixel clock. The display firmware is
+  loaded through the platform security processor, and HDMI audio's endpoint is programmed from
+  the EDID. The RTX 4070 is identified, its Video BIOS and firmware read, and the first firmware
+  step (FRTS) has run.
 
 Next: finish Phase 9's open items and Phase 10, then self-hosting and hardening (Phase 11, v1.0),
 then RV64, the Rust userland, and the desktop.
