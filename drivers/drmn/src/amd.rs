@@ -709,6 +709,61 @@ impl Amd {
         }
     }
 
+    /// Hands the graphics, compute and DMA engines' firmware to the security
+    /// processor and starts the RLC autoload (stage R4.1), on the calling
+    /// kernel thread (which reads the files). The processor is brought up
+    /// first if it is not.
+    pub(crate) fn gc_load(&self, s: &sched::Sleepable) {
+        let Ok(gpu) = self.gpu() else {
+            return;
+        };
+        if self.psp.lock().is_none() {
+            self.psp_bring_up(s);
+        }
+        let Some(mut brought) = self.psp.lock().take() else {
+            self.log(format_args!("GC: no security processor"));
+            return;
+        };
+        let log = |args: core::fmt::Arguments<'_>| self.log(args);
+        let Some(fw) = crate::firmware() else {
+            self.log(format_args!("GC: no firmware reader"));
+            *self.psp.lock() = Some(brought);
+            return;
+        };
+        let mut data = alloc::vec::Vec::new();
+        for name in crate::gcload::FILES {
+            let path = alloc::format!("{}{name}", crate::gcload::DIR);
+            match fw.read(s, &path) {
+                Ok(d) => data.push(d),
+                Err(e) => {
+                    self.log(format_args!("GC: {path} not read: {e:?}"));
+                    *self.psp.lock() = Some(brought);
+                    return;
+                }
+            }
+        }
+        let files = amdgpu::gcfw::Files {
+            sdma: &data[0],
+            ce: &data[1],
+            pfp: &data[2],
+            me: &data[3],
+            mec: &data[4],
+            mec2: &data[5],
+            rlc: &data[6],
+        };
+        crate::gcload::snapshot(&gpu, "before", &log);
+        match crate::gcload::load(&gpu, &mut brought.psp, &files, &log) {
+            Ok(()) => {
+                for ms in [10u32, 100, 1000] {
+                    bus::manager().delay_us(u64::from(ms) * 1000);
+                    crate::gcload::snapshot(&gpu, &alloc::format!("{ms} ms later"), &log);
+                }
+            }
+            Err(e) => self.log(format_args!("GC: stopped: {e:?}")),
+        }
+        *self.psp.lock() = Some(brought);
+    }
+
     /// Loads the display microcontroller's firmware (stage R3.3), on the
     /// calling kernel thread: the security processor first if it is not up.
     pub(crate) fn dmcub_load(&self, s: &sched::Sleepable) {
@@ -1464,6 +1519,19 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
         let r = Arc::clone(a);
         crate::control::trigger(t, node, name, help, move || f(&r));
     }
+    let r = Arc::clone(a);
+    crate::control::trigger(
+        t,
+        node,
+        "gc_fw",
+        "Write 1 to hand the graphics, compute and DMA engines' firmware to the security processor and start the RLC autoload (on a kernel thread; see the log)",
+        move || {
+            let r = Arc::clone(&r);
+            sched::spawn("amd-gc", sched::Priority::KERNEL, move |s| r.gc_load(s))
+                .map(|_| ())
+                .map_err(|_| abi::errno::Errno::EAGAIN)
+        },
+    );
     let r = Arc::clone(a);
     crate::control::trigger(
         t,
