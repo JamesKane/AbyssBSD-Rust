@@ -78,8 +78,18 @@ set_cmdline() {
 	fb "df /mnt | grep -q kyuawork && umount /mnt; mount -t msdosfs /dev/gpt/abyssefi /mnt && printf %s \"\$(cat /mnt/EFI/ABYSS/CMDLINE.noprof)$1\" > /mnt/EFI/ABYSS/CMDLINE; r=\$?; umount /mnt; exit \$r"
 }
 
+abyss_up() { [ "$(T=15 ab 'sysctl -n kern.ident')" = ABYSSBSD ]; }
+
+# The same from AbyssBSD, which has its ESP at /boot/efi and can set
+# BootNext itself: consecutive AbyssBSD boots need no FreeBSD between.
+ab_set_cmdline() {
+	ab "printf %s \"\$(cat /boot/efi/EFI/ABYSS/CMDLINE.noprof)$1\" > /boot/efi/EFI/ABYSS/CMDLINE && sync"
+}
+
 restore() {
-	if [ "$(which_os)" = freebsd ] || [ "$(which_os)" = freebsd-debug ]; then
+	if abyss_up; then
+		ab_set_cmdline "" && log "AbyssBSD's command line put back"
+	elif [ "$(which_os)" = freebsd ] || [ "$(which_os)" = freebsd-debug ]; then
 		set_cmdline "" && log "AbyssBSD's command line put back"
 	else
 		log "WARNING: the board is not in FreeBSD: put CMDLINE.noprof back as CMDLINE on abyssefi"
@@ -88,8 +98,8 @@ restore() {
 trap restore EXIT
 
 inputs_hash() {
-	to_freebsd
-	fb "df /mnt | grep -q kyuawork || { fsck_ffs -p /dev/gpt/kyuawork; mount /dev/gpt/kyuawork /mnt; }; cd /mnt/perf && sha256 -q $INPUTS | md5 -q"
+	to_freebsd >&2
+	fb "df /mnt | grep -q kyuawork || { fsck_ffs -p /dev/gpt/kyuawork; mount /dev/gpt/kyuawork /mnt; } > /dev/null 2>&1; cd /mnt/perf && sha256 -q $INPUTS | md5 -q" | tail -n 1
 }
 golden_ok=
 if [ "$GOLDEN" = 1 ] && [ -f "$GOLDEN_DIR/MANIFEST" ]; then
@@ -123,7 +133,9 @@ for run in $(seq 0 $((RUNS - 1))); do
 			serial=
 			name=${class%%:*}
 			cpus=${class#*:}
-			to_freebsd
+			# AbyssBSD's side without a serial adapter goes from one AbyssBSD
+			# boot to the next; everything else starts in FreeBSD.
+			if [ $side = abyss ] && [ ! -c "$TTY" ] && abyss_up; then :; else to_freebsd; fi
 			log "run $((run + 1))/$RUNS: $side, $name ($cpus)"
 			echo "kbench class $name $cpus" >> "$out.tmp"
 			if [ $side = freebsd ]; then
@@ -148,10 +160,18 @@ for run in $(seq 0 $((RUNS - 1))); do
 				else
 					# No serial: the suite runs, the boot carries on to
 					# multi-user, and the kernel log is read over ssh.
-					set_cmdline " abyss.bench=p2 abyss.bench.boot abyss.bench.cpus=$cpus" ||
-					    { log "could not set AbyssBSD's command line"; exit 1; }
 					serial="$out.log-$name"
-					fb 'nextboot -k kernel.nodebug && efibootmgr -n -b 0007 > /dev/null && shutdown -r now' > /dev/null
+					if abyss_up; then
+						ab_set_cmdline " abyss.bench=p2 abyss.bench.boot abyss.bench.cpus=$cpus" ||
+						    { log "could not set AbyssBSD's command line"; exit 1; }
+						ab 'efibootmgr -n -b 0007 > /dev/null; shutdown -r now' > /dev/null
+						# The old boot's sshd is gone well before the new one's is up.
+						sleep 20
+					else
+						set_cmdline " abyss.bench=p2 abyss.bench.boot abyss.bench.cpus=$cpus" ||
+						    { log "could not set AbyssBSD's command line"; exit 1; }
+						fb 'nextboot -k kernel.nodebug && efibootmgr -n -b 0007 > /dev/null && shutdown -r now' > /dev/null
+					fi
 					for i in $(seq 720); do
 						sleep 5
 						[ "$(T=15 ab 'sysctl -n kern.ident')" = ABYSSBSD ] || continue
@@ -159,11 +179,9 @@ for run in $(seq 0 $((RUNS - 1))); do
 						grep -aq '^kbench end p2' "$serial" && break
 					done
 					grep -a '^kbench ' "$serial" | sed -n '/^kbench begin p2/,/^kbench end p2/p' >> "$out.tmp"
-					# Back to FreeBSD, the default boot.
-					ab 'shutdown -r now' > /dev/null
 				fi
-				# The reset follows the suite: wait for FreeBSD before the next.
-				sleep 60
+				# With a serial adapter the reset follows the suite: wait for FreeBSD.
+				[ -c "$TTY" ] && sleep 60
 			fi
 			if [ "$(grep -c '^kbench end p2$' "$out.tmp")" -ne "$(grep -c '^kbench class' "$out.tmp")" ]; then
 				log "run $((run + 1)) on $side, $name: no complete suite (see $out.tmp${serial:+, $serial})"

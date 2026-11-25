@@ -139,9 +139,9 @@ last=${SUITES##* }
 # the ones on the board now.
 inputs_hash() {
 	local os=$(which_os)
-	[ "$os" = down ] && { boot_to abyss; os=abyss; }
+	[ "$os" = down ] && { boot_to abyss >&2; os=abyss; }
 	local sum="cd /mnt/perf && sha256 -q $INPUTS | md5 -q"
-	case $os in abyss) mount_inputs abyss; ab "$sum" ;; *) mount_inputs freebsd; fb "$sum" ;; esac
+	case $os in abyss) mount_inputs abyss >&2; ab "$sum" ;; *) mount_inputs freebsd >&2; fb "$sum" ;; esac | tail -n 1
 }
 golden_ok=
 if [ "$GOLDEN" = 1 ] && [ -f "$GOLDEN_DIR/MANIFEST" ]; then
@@ -172,6 +172,13 @@ for run in $(seq 0 $((RUNS - 1))); do
 			log "run $((run + 1))/$RUNS: freebsd from the golden set"
 			cp "$g" "$out"
 			continue
+		fi
+		# Each run on a fresh boot (state left by an earlier suite counts); from
+		# AbyssBSD that is a reboot into itself: it sets BootNext as FreeBSD does.
+		if [ "$side" = abyss ] && [ "$(which_os)" = abyss ]; then
+			log "AbyssBSD: fresh boot"
+			ab 'efibootmgr -n -b 0007 > /dev/null; shutdown -r now' > /dev/null
+			sleep 30
 		fi
 		boot_to $side
 		mount_inputs $side

@@ -470,16 +470,20 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
 
 **Open:**
 - **Performance** (the exit's gate: every suite within 2% of FreeBSD on the board, per core class,
-  P7's over `rge`). Last reports: `p4`, `p5`, `p6` at `8c3a7ae`
-  (`2026-11-24-8c3a7ae.txt`, against the golden FreeBSD set in `tests/perf/board/golden/`), `p7` at `1f04988` with the `rge` transmit slots
-  (`2026-11-22-rgetx-p7.txt`), `p2` at `ae38a29` (`2026-11-24-ae38a29-p2.txt`): every component
-  passes on every class (big, mid, little, all), three runs a side. To do:
+  P7's over `rge`). Last reports, three runs against the golden FreeBSD sets
+  (`tests/perf/board/golden/`), AbyssBSD's kernel at `8c3a7ae`: `p4`, `p5`, `p6`
+  (`2026-11-24-8c3a7ae.txt`) and `p7` (`2026-11-24-8c3a7ae-p7.txt`) pass every component on every
+  class; `p2` (`2026-11-24-8c3a7ae-p2.txt`) passes all but `mtx` on the little cores (1.058: `mtx.t4`
+  1.27 and `mtx.t2` 1.12, 31 to 39 ns against FreeBSD's 31; it was 0.979 at `ae38a29`, and the little
+  cores' code layout moves such a result). To do:
+  - `p2`'s `mtx` on the little cores: whether it is layout or the contended path (compare by
+    instructions executed);
   - the 10-run gate on every class, for `p2` and `p4` to `p7`;
   - the SMMU's stage 6 (IOMMU.md §10: sync once per unmap, range invalidation, `rge` and `vtnet`
     transmit bounce, the low-memory check), each after its audit against FreeBSD's design;
   - benchmarks behind inside passing components: `p7` `tcp.rr.lo.p50` (1.40 on the big cores),
-    `tcp.lo.s4` (1.17), `tcp.connect.lo` (1.04); `p6` `pty.raw` (1.04 on the big cores); `p2` `ctxsw.cross` (1.12 big) and `page.miss.t1`
-    (1.06 all cores);
+    `tcp.lo.s4` (1.17 at `1f04988`, 1.27 at `8c3a7ae`), `tcp.connect.lo` (1.04); `p6` `pty.raw` (1.04 on the big cores); `p2` `page.miss.t1`
+    (1.04 to 1.05 on the big and all cores) and `rw.wr.t4` (1.055 little);
   - the little cores' code layout: where the linker puts the kernel's functions moves a benchmark
     20 to 60% either way (ordering the hot functions was measured and dropped). A small change is
     compared there by instructions executed (PMU event `0x08`), not time, until something controls
