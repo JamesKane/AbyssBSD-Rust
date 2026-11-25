@@ -145,7 +145,7 @@ fn simple(file: &[u8], jump_table_dwords_at: Option<usize>) -> Result<&[u8], Err
 
 /// A (size, file offset) pair of the RLC header, as a slice of the file; an
 /// image with size 0 is absent.
-fn rlc_image<'a>(file: &'a [u8], size_at: usize, offset_at: usize) -> Result<&'a [u8], Error> {
+fn rlc_image(file: &[u8], size_at: usize, offset_at: usize) -> Result<&[u8], Error> {
     let size = u64::from(le32(file, size_at).ok_or(Error::Short)?);
     if size == 0 {
         return Ok(&[]);
@@ -246,12 +246,12 @@ mod tests {
     /// A container: the common header, `payload` at 0x100.
     fn file(major: u16, minor: u16, header_size: u32, payload: &[u8]) -> Vec<u8> {
         let mut f = vec![0u8; 0x100 + payload.len()];
-        let len = f.len() as u32;
+        let len = u32::try_from(f.len()).unwrap();
         put32(&mut f, 0, len);
         put32(&mut f, 4, header_size);
         f[8..10].copy_from_slice(&major.to_le_bytes());
         f[10..12].copy_from_slice(&minor.to_le_bytes());
-        put32(&mut f, 0x14, payload.len() as u32);
+        put32(&mut f, 0x14, u32::try_from(payload.len()).unwrap());
         put32(&mut f, 0x18, 0x100);
         f[0x100..].copy_from_slice(payload);
         f
@@ -273,8 +273,8 @@ mod tests {
         for (size_at, offset_at, data) in extra {
             let at = f.len();
             f.extend(data);
-            put32(&mut f, *size_at, data.len() as u32);
-            put32(&mut f, *offset_at, at as u32);
+            put32(&mut f, *size_at, u32::try_from(data.len()).unwrap());
+            put32(&mut f, *offset_at, u32::try_from(at).unwrap());
         }
         f
     }

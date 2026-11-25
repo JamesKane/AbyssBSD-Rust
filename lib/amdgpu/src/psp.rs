@@ -55,17 +55,6 @@ pub mod cmd {
     pub const SETUP_TMR: u32 = 0x05;
     /// Load an engine's firmware.
     pub const LOAD_IP_FW: u32 = 0x06;
-    /// Tell the security processor every graphics image has been delivered,
-    /// so the RLC brings the engines up from the trusted memory region
-    /// (command `0x21`, no arguments).
-    #[must_use]
-    pub fn start_rlc_autoload() -> Self {
-        Self {
-            id: cmd::START_RLC_AUTOLOAD,
-            args: [0; 8],
-        }
-    }
-
     /// Destroy the trusted memory region.
     pub const DESTROY_TMR: u32 = 0x07;
     /// Load the table of contents.
@@ -214,6 +203,17 @@ impl Command {
         Self {
             id: cmd::LOAD_IP_FW,
             args: [lo(address), hi(address), size, kind, 0, 0, 0, 0],
+        }
+    }
+
+    /// Tell the security processor every graphics image has been delivered,
+    /// so the RLC brings the engines up from the trusted memory region
+    /// (command `0x21`, no arguments).
+    #[must_use]
+    pub fn start_rlc_autoload() -> Self {
+        Self {
+            id: cmd::START_RLC_AUTOLOAD,
+            args: [0; 8],
         }
     }
 
