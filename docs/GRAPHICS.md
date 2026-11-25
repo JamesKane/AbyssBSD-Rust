@@ -1317,3 +1317,21 @@ board before the next is built on it. Anything that can hang the machine is aske
   whether the direct path is valid with this firmware, is asked of the specification's author. The kernel interface queue path (the queue
   descriptors, the compute queue registers, `SET_RESOURCES` and `MAP_QUEUES`, the doorbells) is the next thing to build if it is required.
 
+### 16.24 R4.4: the graphics ring runs, through the kernel interface queue (2026-11-24)
+
+- **What was wrong (16.23).** The graphics queue has to be mapped through the KIQ with a queue descriptor: with only the ring registers
+  programmed, the firmware read the (zero) descriptor address and faulted at address 0 (`CP_GFX_MQD_BASE_ADDR`). The specification's author
+  confirmed the reference's default is the KIQ path and that the direct ring path is not supported until it works.
+- **Code.** `lib/amdgpu/src/mqd.rs`: the compute and graphics queue descriptors from the specification's tables (21 and 11 non-zero dwords),
+  the mirror of the descriptor in the queue registers (byte offset `0xc824 + (MQD offset - 0x200)`, which reproduces the specification's own
+  register table for nine registers), `SET_RESOURCES` and `MAP_QUEUES`; `lib/amdgpu/src/kiq.rs`: the KIQ's programming (06 section 9.2); 64-bit
+  doorbell writes (`regs::Mmio::write64`, `vgapci::Aperture::doorbell_write64`); `drivers/drmn/src/gcring.rs`.
+- **On the X870E** (`gc_fw` then `gc_ring`): the golden settings, shader memory and the 949-dword clear-state buffer; the KIQ programmed
+  (MEC2 pipe 1; active; `CP_MEC_CNTL` 0); **the KIQ test**: a `WRITE_DATA` through its doorbell wrote its word (read pointer 5 of 5);
+  `SET_RESOURCES` and `MAP_QUEUES` for graphics queue 0 in one submission, taken: `CP_GFX_MQD_BASE_ADDR` `0xf4:0x0aa12000`,
+  `CP_GFX_HQD_ACTIVE` 1, `CP_GFX_HQD_BASE` `0xf40aa000`; the graphics processors released (`CP_STAT` 0 idle); the clear state and `SET_BASE` read by the ring (read
+  pointer 953 of 953); **the ring test: `SCRATCH_REG0` took the value the ring wrote, and a memory write and an end-of-pipe fence (`RELEASE_MEM`) both
+  landed.** No translation fault, and the display ran on (6,536 frame starts, no overflow).
+- **Not done:** the compute queues (not needed for graphics), the fence interrupt through the interrupt ring (the test polls memory), user address
+  spaces (VMIDs 1 to 7 and the TLB flushes), then the render interface itself.
+
