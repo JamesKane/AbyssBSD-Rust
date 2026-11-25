@@ -263,6 +263,9 @@ pub(crate) struct Render {
     /// wakes them is running.
     fence_wakers: SpinLock<Vec<Arc<dyn vfs::event::Wake>>>,
     notifier_running: core::sync::atomic::AtomicBool,
+    /// The engines (bit per [`Engine::index`]) that a waiting fence is on:
+    /// the only ones the notifier looks for a hung ring on.
+    waited_engines: AtomicU32,
     /// Itself, for the fences it hands out.
     me: Weak<Render>,
     /// For each engine, the number of the last job seen finished and when it
@@ -300,6 +303,7 @@ impl Render {
             kick: Arc::new(AtomicU32::new(0)),
             fence_wakers: SpinLock::new(Vec::new()),
             notifier_running: core::sync::atomic::AtomicBool::new(false),
+            waited_engines: AtomicU32::new(0),
             state: PreemptLock::new(State {
                 files: BTreeMap::new(),
                 slots: [false; VMIDS],
@@ -323,8 +327,10 @@ impl Render {
     /// running. A job's fence interrupt wakes the thread at once; every 50
     /// ms it also wakes them anyway and looks for a hung ring, so a lost
     /// interrupt costs latency, not a wait for ever.
-    fn add_waker(&self, w: &Arc<dyn vfs::event::Wake>) {
+    fn add_waker(&self, w: &Arc<dyn vfs::event::Wake>, engine: Engine) {
         use core::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+        self.waited_engines
+            .fetch_or(1 << engine.index(), Ordering::AcqRel);
         self.fence_wakers.lock().push(Arc::clone(w));
         if self.notifier_running.swap(true, AcqRel) {
             return;
@@ -363,8 +369,11 @@ impl Render {
                 }
                 idle = 0;
                 if let Some(amd) = r.amd.upgrade() {
-                    // A job that never finishes is found here too.
-                    for e in Engine::all() {
+                    // A job that never finishes is found here too, on the
+                    // engines something waits for (an idle engine's last job
+                    // is not a hang).
+                    let mask = r.waited_engines.swap(0, AcqRel);
+                    for e in Engine::all().filter(|e| mask & (1 << e.index()) != 0) {
                         r.hang_check(&amd, e);
                     }
                 }
@@ -1394,7 +1403,7 @@ impl drm::Fence for JobFence {
 
     fn register(&self, w: &Arc<dyn vfs::event::Wake>) {
         if let Some(r) = self.render.upgrade() {
-            r.add_waker(w);
+            r.add_waker(w, self.engine);
         }
     }
 }

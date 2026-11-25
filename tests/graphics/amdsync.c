@@ -27,6 +27,7 @@ struct sobj_create { uint32_t handle, flags; };
 struct sobj_handle { uint32_t handle, flags; int32_t fd; uint32_t pad; uint64_t point; };
 struct sobj_wait { uint64_t handles; int64_t timeout; uint32_t count, flags, first, pad; uint64_t deadline; };
 struct sobj_array { uint64_t handles, points; uint32_t count, flags; };
+struct sobj_arr { uint64_t handles; uint32_t count, pad; };
 struct sobj_twait { uint64_t handles, points; int64_t timeout; uint32_t count, flags, first, pad; uint64_t deadline; };
 struct sobj_transfer { uint32_t src, dst; uint64_t src_point, dst_point; uint32_t flags, pad; };
 struct sobj_eventfd { uint32_t handle, flags; uint64_t point; int32_t fd, pad; };
@@ -49,7 +50,7 @@ struct sync_info { char name[32]; int32_t status; uint32_t flags, num_fences, pa
 #define SOBJ_TRANSFER _IOWR('d', 0xcc, struct sobj_transfer)
 #define SOBJ_TSIGNAL _IOWR('d', 0xcd, struct sobj_array)
 #define SOBJ_EVENTFD _IOWR('d', 0xcf, struct sobj_eventfd)
-#define SOBJ_SIGNAL _IOWR('d', 0xc5, struct sobj_array)
+#define SOBJ_SIGNAL _IOWR('d', 0xc5, struct sobj_arr)
 #define PRIME_H2F _IOWR('d', 0x2d, struct prime)
 #define DMABUF_EXPORT_SYNC _IOWR('b', 2, struct dmabuf_sync)
 #define DMABUF_IMPORT_SYNC _IOW('b', 3, struct dmabuf_sync)
@@ -194,9 +195,9 @@ int main(int argc, char **argv)
 		CHECK(r == 0, "waiting for the imported handle failed (%d)", errno);
 	}
 
-	/* 5. What is refused: a syncobj descriptor (not a sync file), an empty syncobj, a bad descriptor. */
-	struct sobj_handle e = { .handle = s1, .flags = 0 };
-	CHECK(ioctl(fd, SOBJ_TO_FD, &e) < 0 && errno == EOPNOTSUPP, "a plain syncobj descriptor should be EOPNOTSUPP");
+	/* 5. What is refused: an empty syncobj as a sync file, a bad descriptor, an unknown flag. */
+	struct sobj_handle e = { .handle = s1, .flags = 8 };
+	CHECK(ioctl(fd, SOBJ_TO_FD, &e) < 0 && errno == EINVAL, "an unknown flag should be EINVAL");
 	uint32_t empty = sobj_new();
 	struct sobj_handle e2 = { .handle = empty, .flags = 1 };
 	CHECK(ioctl(fd, SOBJ_TO_FD, &e2) < 0 && errno == EINVAL, "an empty syncobj should be EINVAL");
@@ -211,7 +212,7 @@ int main(int argc, char **argv)
 		struct sobj_handle io = { .fd = xo.fd };
 		if (ioctl(fd, SOBJ_FROM_FD, &io) < 0) { perror("SYNCOBJ_FD_TO_HANDLE (object)"); bad = 1; }
 		else {
-			struct sobj_array sg = { .handles = (uintptr_t)&io.handle, .count = 1 };
+			struct sobj_arr sg = { .handles = (uintptr_t)&io.handle, .count = 1 };
 			ioctl(fd, SOBJ_SIGNAL, &sg);
 			struct sobj_wait w2 = { .handles = (uintptr_t)&o1, .count = 1 };
 			struct timespec now;
@@ -268,13 +269,13 @@ int main(int argc, char **argv)
 	printf("eventfd: poll %d, count %llu\n", pr, (unsigned long long)cnt);
 	CHECK(pr == 1 && cnt == 1, "the eventfd was not signalled once");
 	/* WAIT_AVAILABLE on an object with no fence yet: signalled when the job is submitted. */
-	uint32_t late = sobj_new();
+	uint32_t pending_obj = sobj_new();
 	int efd2 = eventfd(0, EFD_NONBLOCK);
-	struct sobj_eventfd sa = { .handle = late, .flags = 4, .fd = efd2 };
+	struct sobj_eventfd sa = { .handle = pending_obj, .flags = 4, .fd = efd2 };
 	CHECK(ioctl(fd, SOBJ_EVENTFD, &sa) == 0, "SYNCOBJ_EVENTFD (available) failed (%d)", errno);
 	uint64_t none = 0;
 	CHECK(read(efd2, &none, sizeof none) < 0 && errno == EAGAIN, "signalled before any fence");
-	if (submit(late, 10) < 0) { perror("CS"); bad = 1; }
+	if (submit(pending_obj, 10) < 0) { perror("CS"); bad = 1; }
 	pe.fd = efd2;
 	pr = poll(&pe, 1, 2000);
 	printf("eventfd (available): poll %d\n", pr);

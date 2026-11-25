@@ -307,11 +307,11 @@ const TABLE: &[Def] = &[
 fn render_allowed(n: u8) -> bool {
     // 0x00 VERSION, 0x0c GET_CAP, 0x0d SET_CLIENT_CAP, 0x09 GEM_CLOSE,
     // 0x2d and 0x2e PRIME handle-to-fd and fd-to-handle, 0x01 GET_UNIQUE
-    // (read only), the synchronisation objects 0xbf to 0xcd, and the
+    // (read only), the synchronisation objects 0xbf to 0xcd and 0xcf, and the
     // driver's own range.
     matches!(
         n,
-        0x00 | 0x01 | 0x09 | 0x0c | 0x0d | 0x2d | 0x2e | 0xbf..=0xcd
+        0x00 | 0x01 | 0x09 | 0x0c | 0x0d | 0x2d | 0x2e | 0xbf..=0xcd | 0xcf
     ) || (DRM_COMMAND_BASE..DRM_COMMAND_END).contains(&n)
 }
 

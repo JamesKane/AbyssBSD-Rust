@@ -925,7 +925,7 @@ Mesa's `radeonsi` on a render node, and runs Sway with hardware rendering. The N
 The card has a render node (`dri/renderD<128+N>`, device `drm/<128+N>`; `drivers/drmn/src/render.rs`) that takes
 rendering requests only: amdgpu interface 3.64 with `INFO`, `GEM_CREATE/MMAP/VA/OP/METADATA/WAIT_IDLE`, contexts,
 buffer lists, `CS` (IB, fence and syncobj-out chunks), `WAIT_CS`, and synchronisation objects in `sys/drm`
-(create, destroy, wait, reset, signal, and sync file export and import, §16.12; no syncobj descriptors or timelines yet). Mesa's `radeonsi` (ACO) initialises
+(create, destroy, wait, reset, signal, the timeline requests, descriptors, `SYNCOBJ_EVENTFD`, and sync file export and import: §16.12 and §16.13). Mesa's `radeonsi` (ACO) initialises
 through it and `glmark2-es2-gbm --off-screen` completes the whole suite on the Radeon 610M (score about 11,900
 at the first run, terrain about 430 FPS); Sway's `gles2` renderer and its clients (jellyfish about 7,400 FPS)
 draw on it, with the compositor importing every client's shared buffer
@@ -989,9 +989,9 @@ reboot (always set `BootNext` first so the board does not boot Fedora).
 
 ### 16.10 Not built
 
-- Descriptors for synchronisation objects themselves (`HANDLE_TO_FD` and `FD_TO_HANDLE` without the sync file
-  flag), timeline objects (`TIMELINE_WAIT`, `TRANSFER`, `QUERY`), `SYNCOBJ_EVENTFD`, and the dma-buf fence
-  ioctls (`EXPORT_SYNC_FILE` and `IMPORT_SYNC_FILE` on a dma-buf).
+- Fence dependencies between jobs of this driver on different rings (the job's buffers carry its fence, and a
+  job waits only for fences that came from outside; two of the driver's own rings that share a buffer are not
+  ordered), and `DRM_IOCTL_SYNCOBJ_*` deadline hints (`deadline_nsec` is read and ignored).
 - Hot-plug by interrupt (needs the line's interrupt control offset from the specification); the hot-plug
   event for the other connector types (only HDMI-A-1 is watched).
 - Compute and graphics preemption verification; the wave-kill soft recovery; the DMA reset's freeze step.
@@ -1041,3 +1041,42 @@ merge, export and import, merge and info requests), and `tests/graphics/amdsync.
 job's sync file is pending at once and readable within 2 s, kqueue reports it, two merge into one with two
 fences that becomes readable and describes itself with status 1, an import is waited for as a syncobj, and
 the refusals (a plain syncobj descriptor, an empty syncobj, a bad descriptor) are the errors above.
+
+### 16.13 Timeline objects, object descriptors, eventfds and dma-buf fences
+
+- **Timeline objects** (`sys/drm/src/syncobj.rs`). A syncobj is binary (one fence, point 0) until a point above 0
+  is put in: then it is a timeline, a map from 64-bit point to fence whose points only grow (`EINVAL` for one that
+  does not). A point is finished when its fence and every earlier one is, as a fence chain is. Requests:
+  `TIMELINE_SIGNAL` (0xcd), `TIMELINE_WAIT` (0xca, with `WAIT_ALL`, `WAIT_FOR_SUBMIT`, `WAIT_AVAILABLE`), `QUERY`
+  (0xcb: the last finished point, or with `LAST_SUBMITTED` the last put in; a binary object is at 0), `TRANSFER`
+  (0xcc: the fence at a source point to a destination point, waiting up to 10 s for a submission with
+  `WAIT_FOR_SUBMIT`), and `HANDLE_TO_FD`/`FD_TO_HANDLE` with `TIMELINE` for a sync file at a point. The
+  capability `DRM_CAP_SYNCOBJ_TIMELINE` is 1. A point past the last waits for submission only with the flag.
+- **A descriptor for the object itself** (`FileKind::SyncObj`, `DTYPE` 19, `KF_TYPE_SYNCOBJ`): `HANDLE_TO_FD`
+  without flags exports the object, and `FD_TO_HANDLE` in another file (or another process) names the same one,
+  so a signal through either handle is seen through the other. It has no `read`, `write` or `poll`.
+- **`SYNCOBJ_EVENTFD`** (0xcf, allowed on the render node): when the fence at a point has finished (or is
+  there, with `WAIT_AVAILABLE`, even on an object that has none yet) one is added to the eventfd. It rides on
+  `Fence::register` for the fence and on a list of waiters for the next fence put in the object
+  (`drm::Signal`, which the kernel's `Eventfd` implements).
+- **dma-buf fences.** Every buffer has a `Reservation` (`sys/drm/src/resv.rs`): fences by use (write or read) and
+  whether they came from outside. `DMA_BUF_IOCTL_EXPORT_SYNC_FILE` (`_IOWR('b', 2)`) gives a sync file of the
+  fences someone who will read (the writers') or write (all) has to wait for; `IMPORT_SYNC_FILE` (`_IOW('b', 3)`)
+  adds a sync file's fence as a reader's or a writer's, marked external. The Radeon's `CS` keeps the buffer
+  handles of each buffer list (`BO_LIST` create and update read them), puts the job's fence on every buffer of its
+  list as a write fence, and before it runs waits for the fences of the objects it names and for the external
+  fences on its buffers.
+- **Command submission chunks:** `SYNCOBJ_IN` (4) and `SYNCOBJ_TIMELINE_WAIT` (8) are waited for before the job
+  runs (an object or point with no fence is `EINVAL`, as for the reference); `SYNCOBJ_OUT` (5) and
+  `SYNCOBJ_TIMELINE_SIGNAL` (9) take the job's fence, and a point that does not follow the last is refused
+  before the job runs.
+- **The fence notifier** looks for a hung ring only on engines that a registered fence is on, so an idle
+  engine's last job is never taken for a hang (the first version looked at all and reset idle rings).
+- **Tested:** 11 `sys/drm` host tests for these (timeline signal, wait, query, transfer, point export and import,
+  object descriptors, the eventfd's three paths, the dma-buf requests), and `tests/graphics/amdsync.c` on the
+  X870E, which adds to §16.12's checks: an object descriptor (a signal seen through the other handle), a
+  timeline job (a point signalled by a job, waited for, queried, a point that does not grow refused,
+  transferred to a binary object), an eventfd signalled when a job finishes and when a fence arrives, and a
+  dma-buf whose job fence is exported as a sync file, imported back and exported again; three runs in a row
+  with `amdrender`, glmark2 (terrain 425 FPS) and `amdhang` unchanged.
+
