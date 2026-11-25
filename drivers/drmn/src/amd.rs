@@ -84,6 +84,10 @@ pub(crate) struct Amd {
     /// them before a clock change (`DIG_FE_CNTL`, `DIG_BE_CNTL`), for the
     /// reconnection.
     link_saved: SpinLock<Option<(u32, u32)>>,
+    /// Itself, for the card's display to reach the driver.
+    me: Weak<Amd>,
+    /// A mode set is running (one at a time).
+    modeset_busy: core::sync::atomic::AtomicBool,
 }
 
 /// Where the GART's page table is in video memory (BAR0 offset): past the
@@ -116,7 +120,7 @@ pub(crate) fn identify(gpu: &Aperture) -> Option<Identity> {
 }
 
 impl Amd {
-    pub(crate) fn new(name: String, gpu: Weak<Aperture>) -> Self {
+    pub(crate) fn new(name: String, gpu: Weak<Aperture>, me: Weak<Amd>) -> Self {
         Self {
             name,
             table: SpinLock::new(None),
@@ -131,6 +135,8 @@ impl Amd {
             baseline: SpinLock::new(None),
             dmcub_up: core::sync::atomic::AtomicBool::new(false),
             link_saved: SpinLock::new(None),
+            me,
+            modeset_busy: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -455,7 +461,7 @@ impl Amd {
                 return;
             }
         }
-        let card = match crate::kms::card(&gpu, Arc::clone(&self.irq)) {
+        let card = match crate::kms::card(&gpu, Arc::clone(&self.irq), self.me.clone()) {
             Ok(c) => c,
             Err(e) => {
                 self.log(format_args!("no graphics card: {e:?}"));
@@ -502,6 +508,8 @@ impl Amd {
         let held = self.kms.lock().take();
         if let Some((card, node)) = held {
             if restore {
+                // The console is the firmware's picture: its mode first.
+                let _ = self.set_mode_for(Some(s), None);
                 card.restore();
             }
             node.unregister(s);
@@ -830,6 +838,77 @@ impl Amd {
     /// clock. A plan is checked and logged before anything is written; the
     /// picture goes while the generator is stopped.
     pub(crate) fn set_mode(&self, vic: i32) -> Result<(), abi::errno::Errno> {
+        self.set_mode_by_code(vic, true)
+    }
+
+    /// The modes the card offers (CTA video identification code, timing),
+    /// the firmware's first and preferred. 640x480 has the specification's
+    /// 25.175 MHz clock (the shared table rounds it to 25.2).
+    pub(crate) fn supported_modes() -> alloc::vec::Vec<(u8, kms_check::Mode)> {
+        use abi::drm::DRM_MODE_TYPE_PREFERRED;
+        [16u8, 31, 4, 19, 3, 18, 1]
+            .into_iter()
+            .filter_map(|vic| {
+                let mut m = edid::mode_for_vic(vic)?;
+                if vic == 1 {
+                    m.clock_khz = 25_175;
+                }
+                if vic == 16 {
+                    m.kind |= DRM_MODE_TYPE_PREFERRED;
+                }
+                Some((vic, m))
+            })
+            .collect()
+    }
+
+    /// Sets the mode `mode` (one of [`Amd::supported_modes`]), or the
+    /// firmware's if `None`; the card's display calls it on a mode set. A
+    /// pixel clock change needs the display firmware, which is loaded here on
+    /// the first need (this may sleep on `s`, the requesting thread).
+    pub(crate) fn set_mode_for(
+        &self,
+        s: Option<&sched::Sleepable>,
+        mode: Option<&kms_check::Mode>,
+    ) -> Result<(), abi::errno::Errno> {
+        use abi::errno::Errno;
+        use core::sync::atomic::Ordering;
+        let vic = match mode {
+            None => 16,
+            Some(m) => Self::supported_modes()
+                .into_iter()
+                .find(|(_, w)| {
+                    (w.hdisplay, w.vdisplay, w.htotal, w.vtotal, w.clock_khz)
+                        == (m.hdisplay, m.vdisplay, m.htotal, m.vtotal, m.clock_khz)
+                })
+                .map(|(v, _)| v)
+                .ok_or(Errno::EINVAL)?,
+        };
+        if self.modeset_busy.swap(true, Ordering::AcqRel) {
+            return Err(Errno::EBUSY);
+        }
+        let mut result = Ok(());
+        // The display firmware is needed for any clock other than the one
+        // running; the platform's own copy of the video BIOS is read then.
+        let wanted = Self::supported_modes()
+            .into_iter()
+            .find(|(v, _)| *v == vic)
+            .map_or(0, |(_, m)| m.clock_khz);
+        if wanted != self.clock_khz.load(Ordering::Acquire)
+            && !self.dmcub_up.load(Ordering::Acquire)
+        {
+            match s {
+                Some(s) => self.dmcub_load(s),
+                None => result = Err(Errno::ENXIO),
+            }
+        }
+        if result.is_ok() {
+            result = self.set_mode_by_code(i32::from(vic), false);
+        }
+        self.modeset_busy.store(false, Ordering::Release);
+        result
+    }
+
+    fn set_mode_by_code(&self, vic: i32, measure: bool) -> Result<(), abi::errno::Errno> {
         use abi::errno::Errno;
         use amdgpu::regs::Window;
         use amdgpu::{dmcub, flip, hdmi, modeset};
@@ -1010,7 +1089,9 @@ impl Amd {
             bus::manager().delay_us(100_000);
             self.link_state(&w, "after");
         }
-        let _ = self.refresh();
+        if measure {
+            let _ = self.refresh();
+        }
         if !apply {
             return Err(Errno::EIO);
         }

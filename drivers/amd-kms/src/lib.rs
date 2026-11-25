@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! Kernel mode setting over a Radeon display the firmware left running
-//! (stage R1 of docs/GRAPHICS.md §16): one display controller, one primary
-//! plane, one connector, and the one mode the firmware set.
+//! (stages R1 and R3.4 of docs/GRAPHICS.md §16): one display controller, one
+//! primary plane, one connector, the mode the firmware set and the others
+//! the display itself can be set to.
 //!
-//! The display is adopted as it is: its timing, format, pitch and
-//! watermarks are never written. What changes is the address of the
-//! surface it scans out. Clients' buffers are in system memory (the buffer
+//! The display is adopted as it is: its format, pitch and watermarks are
+//! never written. What changes is the address of the surface it scans out;
+//! a mode set goes through [`Display::set_mode`], which the driver for the
+//! chip does. A smaller mode scans the top-left part of the same surfaces
+//! (their line pitch stays that of the firmware's picture). Clients' buffers are in system memory (the buffer
 //! objects of `sys/drm` are cached system pages), which the display cannot
 //! read before the memory stage, so a commit copies the pixels into the
 //! back one of two surfaces in video memory through the PCI aperture and
@@ -62,6 +65,23 @@ pub trait Display: Send + Sync {
     /// aperture's size, less what the firmware's display microcontroller
     /// still holds at the top.
     fn usable(&self) -> usize;
+    /// The modes the display can be set to, the firmware's first and
+    /// preferred. Empty: only the firmware's mode.
+    fn modes(&self) -> Vec<Mode> {
+        Vec::new()
+    }
+    /// Sets the mode: `Some(mode)` one of [`Display::modes`], `None` back to
+    /// the firmware's. May sleep on `s` (the requesting thread) to load
+    /// what the change needs. The picture is gone for a moment.
+    ///
+    /// # Errors
+    ///
+    /// An error number if the mode could not be set; the display is left
+    /// as that step left it.
+    fn set_mode(&self, s: Option<&sched::Sleepable>, mode: Option<&Mode>) -> Result<(), Errno> {
+        let _ = (s, mode);
+        Ok(())
+    }
 }
 
 /// The size of the firmware's picture.
@@ -150,7 +170,10 @@ impl FrameMemory for Opaque<'_> {
 
 /// The card's shared parts.
 struct Screen {
+    /// The biggest picture: the surfaces' size and pitch.
     geometry: Geometry,
+    /// The modes the connector offers, the firmware's first.
+    modes: Vec<Mode>,
     /// Where the two surfaces to draw on start.
     at: (usize, usize),
     display: Arc<dyn Display>,
@@ -228,27 +251,35 @@ impl CrtcHw for Crtc {
         self.0.display.vblank_interrupt()
     }
 
-    /// Only the mode the firmware set can be shown: its timing is not
-    /// reprogrammed.
+    /// Only the modes the connector offers.
     fn check(&self, u: &CrtcUpdate<'_>) -> Result<(), Errno> {
         let Some(m) = u.new.mode.as_ref().filter(|_| u.new.active) else {
             return Ok(());
         };
-        let want = mode_of(&self.0.geometry);
-        if (m.hdisplay, m.vdisplay, m.htotal, m.vtotal, m.clock_khz)
-            == (
-                want.hdisplay,
-                want.vdisplay,
-                want.htotal,
-                want.vtotal,
-                want.clock_khz,
-            )
-        {
+        if self.0.modes.iter().any(|w| same_timing(w, m)) {
             Ok(())
         } else {
             Err(Errno::EINVAL)
         }
     }
+
+    /// A mode set: the display is set to the mode, or back to the
+    /// firmware's if the controller is turned off. Called after the
+    /// plane's commit, which has put the picture on the surface.
+    fn commit(&self, u: &CrtcUpdate<'_>) {
+        if !u.modeset {
+            return;
+        }
+        let mode = u.new.mode.as_ref().filter(|_| u.new.active);
+        let _ = self.0.display.set_mode(u.s, mode);
+    }
+}
+
+/// Whether two modes are the same timing (name, kind and the clock's
+/// rounding aside).
+fn same_timing(a: &Mode, b: &Mode) -> bool {
+    (a.hdisplay, a.vdisplay, a.htotal, a.vtotal, a.clock_khz)
+        == (b.hdisplay, b.vdisplay, b.htotal, b.vtotal, b.clock_khz)
 }
 
 struct Encoder;
@@ -270,7 +301,7 @@ impl ConnectorHw for Connector {
     }
 
     fn modes(&self) -> Vec<Mode> {
-        alloc::vec![mode_of(&self.0.geometry)]
+        self.0.modes.clone()
     }
 }
 
@@ -284,20 +315,20 @@ impl PlaneHw for Plane {
     }
 
     /// The whole screen only: the picture is drawn into a surface the
-    /// display then shows entire, and the pixels of the part a smaller
-    /// plane leaves out would have to come from the one on show.
+    /// display then shows entire, so the plane starts at the corner and is
+    /// the size of one of the modes (what a smaller plane leaves out would
+    /// have to come from the picture on show).
     fn check(&self, u: &PlaneUpdate<'_>) -> Result<(), Errno> {
-        let g = self.0.geometry;
-        if u.fb.is_some()
-            && u.visible.shown
-            && (
-                u.visible.dst.x,
-                u.visible.dst.y,
-                u.visible.dst.w,
-                u.visible.dst.h,
-            ) != (0, 0, g.width, g.height)
-        {
-            return Err(Errno::EINVAL);
+        if u.fb.is_some() && u.visible.shown {
+            let d = u.visible.dst;
+            let sized = self
+                .0
+                .modes
+                .iter()
+                .any(|m| (u32::from(m.hdisplay), u32::from(m.vdisplay)) == (d.w, d.h));
+            if (d.x, d.y) != (0, 0) || !sized {
+                return Err(Errno::EINVAL);
+            }
         }
         Ok(())
     }
@@ -314,6 +345,8 @@ impl PlaneHw for Plane {
         };
         let g = s.geometry;
         let v = u.visible;
+        // The picture is the plane's size; the surface keeps the firmware's pitch.
+        let (w, h) = (v.dst.w.min(g.width), v.dst.h.min(g.height));
         let mut front = s.front.lock();
         s.settle();
         let back = front.back();
@@ -328,8 +361,8 @@ impl PlaneHw for Plane {
             Rect {
                 x: v.src.x >> 16,
                 y: v.src.y >> 16,
-                w: g.width,
-                h: g.height,
+                w,
+                h,
             },
             (0, 0),
             usize::try_from(g.width).unwrap_or(0) * 4,
@@ -385,8 +418,13 @@ pub fn create(g: Geometry, display: Arc<dyn Display>) -> Result<Arc<AmdKms>, Err
     {
         return Err(Error::Size);
     }
+    let mut modes = display.modes();
+    if modes.is_empty() {
+        modes.push(mode_of(&g));
+    }
     let screen = Arc::new(Screen {
         geometry: g,
+        modes,
         at,
         display,
         front: SpinLock::new(Front::Console),
@@ -410,7 +448,7 @@ impl DrmDriver for AmdKms {
         // Not "amdgpu": there is no render side yet (GRAPHICS.md §16.3).
         DriverInfo {
             name: "amd-display",
-            desc: "AMD display, firmware mode",
+            desc: "AMD display",
             date: "20261124",
             major: 0,
             minor: 1,

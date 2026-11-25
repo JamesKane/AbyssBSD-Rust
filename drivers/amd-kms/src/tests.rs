@@ -190,3 +190,175 @@ fn the_controller_has_a_vblank_interrupt_only_if_the_display_does() {
     // The fake has none: the core times frames.
     assert!(!Crtc(c.screen.clone()).vblank_interrupt());
 }
+
+/// A display that offers several modes and records the mode sets it is asked
+/// for.
+struct Modal {
+    inner: Arc<Fake>,
+    sets: Mutex<Vec<Option<(u16, u16)>>>,
+}
+
+fn cta(h: u16, v: u16, ht: u16, vt: u16, khz: u32) -> Mode {
+    Mode {
+        clock_khz: khz,
+        hdisplay: h,
+        hsync_start: h + 8,
+        hsync_end: h + 16,
+        htotal: ht,
+        vdisplay: v,
+        vsync_start: v + 2,
+        vsync_end: v + 4,
+        vtotal: vt,
+        ..Mode::default()
+    }
+}
+
+impl Display for Modal {
+    fn write(&self, o: usize, d: &[u8]) {
+        self.inner.write(o, d);
+    }
+    fn flush(&self) {
+        self.inner.flush();
+    }
+    fn show(&self, o: usize) {
+        self.inner.show(o);
+    }
+    fn pending(&self) -> bool {
+        self.inner.pending()
+    }
+    fn delay_us(&self, _: u32) {}
+    fn usable(&self) -> usize {
+        254 << 20
+    }
+    fn modes(&self) -> Vec<Mode> {
+        std::vec![
+            cta(1920, 1080, 2200, 1125, 148_500),
+            cta(1280, 720, 1650, 750, 74_250),
+        ]
+    }
+    fn set_mode(&self, _: Option<&sched::Sleepable>, mode: Option<&Mode>) -> Result<(), Errno> {
+        self.sets
+            .lock()
+            .unwrap()
+            .push(mode.map(|m| (m.hdisplay, m.vdisplay)));
+        Ok(())
+    }
+}
+
+fn modal() -> (Arc<Modal>, Arc<AmdKms>) {
+    let d = Arc::new(Modal {
+        inner: Fake::new(),
+        sets: Mutex::new(Vec::new()),
+    });
+    let c = create(
+        Geometry {
+            width: 1920,
+            height: 1080,
+        },
+        d.clone(),
+    )
+    .unwrap();
+    (d, c)
+}
+
+#[test]
+fn the_connector_offers_the_displays_modes_and_the_controller_accepts_only_those() {
+    let (_, c) = modal();
+    assert_eq!(Connector(c.screen.clone()).modes().len(), 2);
+    let crtc = Crtc(c.screen.clone());
+    let old = drm::kms::CrtcSt::default();
+    let mut new = drm::kms::CrtcSt {
+        active: true,
+        mode: Some(cta(1280, 720, 1650, 750, 74_250)),
+        ..Default::default()
+    };
+    assert_eq!(crtc.check(&crtc_update(&old, &new, true)), Ok(()));
+    // The right size at another clock is not a mode the display has.
+    new.mode = Some(cta(1280, 720, 1650, 750, 74_000));
+    assert_eq!(
+        crtc.check(&crtc_update(&old, &new, true)),
+        Err(Errno::EINVAL)
+    );
+    new.mode = Some(cta(1024, 768, 1344, 806, 65_000));
+    assert_eq!(
+        crtc.check(&crtc_update(&old, &new, true)),
+        Err(Errno::EINVAL)
+    );
+    // Off: nothing to check.
+    new.active = false;
+    assert_eq!(crtc.check(&crtc_update(&old, &new, true)), Ok(()));
+}
+
+#[test]
+fn a_mode_set_commit_sets_the_mode_and_turning_off_goes_back_to_the_firmwares() {
+    let (d, c) = modal();
+    let crtc = Crtc(c.screen.clone());
+    let old = drm::kms::CrtcSt::default();
+    let on = drm::kms::CrtcSt {
+        active: true,
+        mode: Some(cta(1280, 720, 1650, 750, 74_250)),
+        ..Default::default()
+    };
+    let off = drm::kms::CrtcSt::default();
+    // A flip that is not a mode set does not touch the mode.
+    crtc.commit(&crtc_update(&old, &on, false));
+    assert!(d.sets.lock().unwrap().is_empty());
+    crtc.commit(&crtc_update(&old, &on, true));
+    crtc.commit(&crtc_update(&old, &off, true));
+    assert_eq!(*d.sets.lock().unwrap(), std::vec![Some((1280, 720)), None]);
+}
+
+#[test]
+fn the_plane_takes_the_size_of_a_mode_at_the_corner_and_no_other() {
+    let (_, c) = modal();
+    let plane = Plane(c.screen.clone());
+    let st = drm::kms::PlaneSt::default();
+    let vis = |x, y, w, h| kms_check::Visible {
+        shown: true,
+        src: kms_check::SrcRect { x: 0, y: 0, w, h },
+        dst: kms_check::DstRect { x, y, w, h },
+    };
+    let fb = fake_fb();
+    let upd = |v| PlaneUpdate {
+        index: 0,
+        crtc: Some(0),
+        fb: Some(&fb),
+        visible: v,
+        old: &st,
+        new: &st,
+    };
+    assert_eq!(plane.check(&upd(vis(0, 0, 1920, 1080))), Ok(()));
+    assert_eq!(plane.check(&upd(vis(0, 0, 1280, 720))), Ok(()));
+    assert_eq!(plane.check(&upd(vis(0, 0, 1280, 1080))), Err(Errno::EINVAL));
+    assert_eq!(plane.check(&upd(vis(8, 0, 1280, 720))), Err(Errno::EINVAL));
+}
+
+/// A framebuffer with no memory, for a check that only reads its existence.
+fn fake_fb() -> Arc<drm::kms::Fb> {
+    Arc::new(drm::kms::Fb {
+        id: kms_check::ObjId(1),
+        width: 1920,
+        height: 1080,
+        format: format::XRGB8888,
+        modifier: drm_fourcc::MOD_LINEAR,
+        flags: 0,
+        gems: [None, None, None, None],
+        pitches: [7680, 0, 0, 0],
+        offsets: [0; 4],
+        owner: 0,
+    })
+}
+
+fn crtc_update<'a>(
+    old: &'a drm::kms::CrtcSt,
+    new: &'a drm::kms::CrtcSt,
+    modeset: bool,
+) -> CrtcUpdate<'a> {
+    CrtcUpdate {
+        index: 0,
+        old,
+        new,
+        modeset,
+        s: None,
+    }
+}

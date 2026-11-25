@@ -257,7 +257,9 @@ impl Driver for Drmn {
                         if id.psp_ready { "ready" } else { "not ready" },
                     ));
                     Ok(Self {
-                        backend: Backend::Amd(Arc::new(amd::Amd::new(name, registers.0.clone()))),
+                        backend: Backend::Amd(Arc::new_cyclic(|me| {
+                            amd::Amd::new(name, registers.0.clone(), me.clone())
+                        })),
                     })
                 }
                 None => {

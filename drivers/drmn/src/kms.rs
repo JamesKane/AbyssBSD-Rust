@@ -26,6 +26,8 @@ struct Scanout {
     hdp_ready: SpinLock<bool>,
     /// The interrupts: while they run, frames come from them.
     irq: Arc<crate::interrupt::Irq>,
+    /// The driver, for a mode set.
+    amd: Weak<crate::amd::Amd>,
 }
 
 impl Display for Scanout {
@@ -79,6 +81,24 @@ impl Display for Scanout {
     fn usable(&self) -> usize {
         self.gpu.upgrade().and_then(|g| g.vram_len()).unwrap_or(0)
     }
+
+    fn modes(&self) -> alloc::vec::Vec<kms_check::Mode> {
+        crate::amd::Amd::supported_modes()
+            .into_iter()
+            .map(|(_, m)| m)
+            .collect()
+    }
+
+    fn set_mode(
+        &self,
+        s: Option<&sched::Sleepable>,
+        mode: Option<&kms_check::Mode>,
+    ) -> Result<(), abi::errno::Errno> {
+        self.amd
+            .upgrade()
+            .ok_or(abi::errno::Errno::ENXIO)?
+            .set_mode_for(s, mode)
+    }
 }
 
 /// Why the display was not made a card.
@@ -100,6 +120,7 @@ pub(crate) enum Refused {
 pub(crate) fn card(
     gpu: &Arc<Aperture>,
     irq: Arc<crate::interrupt::Irq>,
+    amd: Weak<crate::amd::Amd>,
 ) -> Result<Arc<AmdKms>, Refused> {
     let phys = gpu.vram_phys().ok_or(Refused::NoAperture)?;
     let w = Bar5(gpu);
@@ -122,6 +143,7 @@ pub(crate) fn card(
         base: adopted.vram_base,
         hdp_ready: SpinLock::new(false),
         irq,
+        amd,
     });
     amd_kms::create(Geometry { width, height }, display).map_err(|_| Refused::Size)
 }
