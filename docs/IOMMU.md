@@ -610,7 +610,7 @@ listed. Nothing touches the board before stage 5.
 | **3. Translated DMA** | `sys/iommu` (units, domains, contexts, page tables), `vm::dma`'s `Iommu` backend, the broker's selection, host-bridge window reservations, relaxed ordering, the virtio pass-through rule. `DmaTag` becomes `Clone` | `vm::dma` host tests against the model. QEMU `aarch64-smmu` with `hw.pci.enable_msix=0`: storage and network ktests, the deliberate fault, unmap-before-reuse |
 | **4. MSI** | The doorbell window and message translation (§4.8) | QEMU `aarch64-smmu` with MSI-X (the default). The multi-user scenario with `--iommu` once |
 | **5. The board** | Deploy with translation on and `hw.physmem` still set. Then without it | Boot. `devinfo -rv` and `sysctl dev.smmu hw.iommu hw.smmu` against the corpus. No events. The high-memory write test that wedged it (512 MiB, then 2 GiB writes, several rounds). fsx with `fsck_ffs` on the NVMe. A USB disk with all RAM in use (§12). `rge` under the P7 suite's load. Warm reboots through `efibootmgr -n`. `hw.physmem=29G` comes out of the board's command line and the roadmap. (A day of looped scenarios was dropped, §18) |
-| **6. Performance** | Measure P5's storage suite and P7's network suite on the board against the FreeBSD baseline (§13 question 3). Audit first: the per-I/O path against FreeBSD's (map, unmap, syncs, lock hold times). Only then consider the candidates: no TLBI on map (if IHI 0070 forbids caching invalid entries), range or ASID invalidation, block mappings for large coherent allocations, a three-level 39-bit space, and per-queue command batching | `cargo xtask perf --platform opi6p`, suite geometric means within 2% |
+| **6. Performance (done: no change, §19)** | Measure P5's storage suite and P7's network suite on the board against the FreeBSD baseline (§13 question 3). Audit first: the per-I/O path against FreeBSD's (map, unmap, syncs, lock hold times). Only then consider the candidates: no TLBI on map (if IHI 0070 forbids caching invalid entries), range or ASID invalidation, block mappings for large coherent allocations, a three-level 39-bit space, and per-queue command batching | `cargo xtask perf --platform opi6p`, suite geometric means within 2% |
 | **M-G (later)** | Named-component contexts, RMR identity maps, non-coherent domains (§4.9) | With the first display or NPU driver |
 
 ## 9. Deferred
@@ -1120,3 +1120,36 @@ load is part of stage 6's measurement.
 For stage 6: an I/O still syncs twice, and `rge` and `vtnet` bounce on transmit. The low-memory
 change adds a check to the allocation path. Stage 6's audit measures all three.
 
+
+## 19. Stage 6 as measured (2026-11-25)
+
+Stage 6 was the performance stage (§8, §10): measure P5's storage suite and P7's network suite on
+the board against FreeBSD, audit the per-I/O path, and only then consider the candidates. The
+measurement came first and made the rest unnecessary, so **it is closed with no change.**
+
+**What was measured.** Ten AbyssBSD runs, each on a fresh boot, with the SMMU translating (all RAM in
+use, `dev.smmu.N.dma=1`), against FreeBSD's three golden runs on the same board (its
+`GENERIC-HMP-IOMMU-NODEBUG`, which translates too: its boot log has "relaxed ordering disabled (IOMMU
+translation)"). The geometric mean of the AbyssBSD time over FreeBSD's, per core class (big, mid,
+little, all):
+
+| Component | Ratio |
+|---|---|
+| `fs.ufs` (P5, storage over NVMe) | 0.499, 0.498, 0.521, 0.504 |
+| `fs.tmpfs` (P5) | 0.492, 0.464, 0.572, 0.463 |
+| `tcp` (P7, over `rge`) | 0.517, 0.540, 0.430, 0.513 |
+| `udp` (P7) | 0.414, 0.412, 0.302, 0.412 |
+| `sendfile` (P7) | 0.423, 0.377, 0.850, 0.373 |
+
+Every component passes (the gate is 1.02) on every class, and by a wide margin. The reports are
+`tests/perf/board/results/2026-11-25-8c3a7ae-gate10-p456.txt` and `2026-11-25-77c4e93-gate10-p7.txt`.
+
+**What was not done, and why.** The three costs §18 named are still there: an I/O syncs twice, `rge`
+and `vtnet` copy each frame they send into a heap buffer that translation bounces, and the low-memory
+change adds a check to the allocation path. The candidates (no TLBI on map, range or ASID
+invalidation, block mappings for large coherent allocations, a three-level 39-bit space, per-queue
+command batching) were not built. The project's rule is that a component's geometric mean decides, and
+none is near the gate; "no TLBI on map" rests on a reading of IHI 0070 (§4.7's `cache_faults` knob)
+that is not worth depending on without a measured reason. If a later suite on another board or
+under a heavier network load shows an SMMU cost, this is where to start: the audit of the per-I/O path
+against FreeBSD's (map, unmap, syncs, lock hold times) first, then the candidates in §8's order.

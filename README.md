@@ -118,13 +118,13 @@ way, and the Ryzen 9 7900X / X870E (AMD64) has had its first AbyssBSD boots (Pha
     unaligned access as FreeBSD's does, and the device tree's differences from FreeBSD's `devinfo`
     are recorded in [docs/compat-deviations.md](docs/compat-deviations.md).
   - Performance is measured on the board per core class (big, mid, little, all), against FreeBSD's
-    recorded results. At three runs a side every component of `p4` to `p7` passes on every class
-    (`p4` to `p6` take 0.52 to 0.57 of FreeBSD's time overall, `p7` over the physical NIC 0.43 to
-    0.48), and `p2` does too except contended mutexes on the little cores (1.058). In bhyve every
-    component of `p2` to `p7` passes. Open: the ten-run gate on the board (under way), the SMMU's
-    last stage, and the little cores' code-layout sensitivity.
-  - Also open: the board occasionally does not return from a reset (suspected firmware), and a few
-    hangs seen once.
+    recorded results, with the SMMU translating. At ten runs every component of `p2` and `p4` to `p7`
+    passes on every class (`p4` to `p6` take 0.55 to 0.57 of FreeBSD's time overall, `p2` 0.58 to 0.63,
+    and `p7` over the physical NIC 0.43 to 0.49). In bhyve every component of `p2` to `p7` passes.
+    Open: the little cores' code-layout sensitivity.
+  - The board occasionally does not return from a reboot (four times in about a hundred and forty,
+    from both kernels; the firmware's reset path is the suspect), and a power cycle recovers it. It is
+    recorded in [docs/compat-deviations.md](docs/compat-deviations.md) with what a next sighting needs.
 - **X870E (Phase 10, begun 2026-11-23):** the first boots on the AMD64 reference machine. The
   loader now allocates only `EfiLoaderData`, because its AMI firmware never returns from
   `ExitBootServices` otherwise, and the console no longer assumes a COM1 the machine lacks. It boots

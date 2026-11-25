@@ -481,8 +481,6 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
   two varies), so its time is a coin. The ten-run gate also found a TCP defect, fixed in `77c4e93`:
   a SYN that met a connection which had just ended got a reset (`ECONNREFUSED` to a live listener,
   about one loopback run in twenty-five; 150 runs after the fix had none). To do:
-  - the SMMU's stage 6 (IOMMU.md §10: sync once per unmap, range invalidation, `rge` and `vtnet`
-    transmit bounce, the low-memory check), each after its audit against FreeBSD's design;
   - benchmarks behind inside passing components: `p7` `tcp.rr.lo.p50` (1.40 on the big cores),
     `tcp.lo.s4` (1.17 at `1f04988`, 1.27 at `8c3a7ae`), `tcp.connect.lo` (1.04); `p6` `pty.raw` (1.04
     on the big cores) and `thr.rwlock.t2` (1.23 on the little); `p2` `page.miss.t1` (1.04 to 1.05 on
@@ -493,14 +491,7 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
     compared there by instructions executed (PMU event `0x08`), not time, until something controls
     it;
   - after `p5` has run in the same boot, `kevent.pipe1000` is 7% slower until a reboot. Each
-    knote's filter is still its own allocation;
-- **The board does not always come back from a reset** (three times in some forty, and once more
-  in about a hundred reboots on 2026-11-25, on a reboot of AbyssBSD into itself through `BootNext`):
-  the system shuts down (`shutdown: reboot by root` and `syslogd` exiting are the last lines logged),
-  and no loader starts; a power cycle recovers, and `BootNext` is still set then. Seen from both
-  kernels, so the firmware's reset path is the suspect. No serial capture was running, and the
-  loader left no `PREVLOG.TXT`; the next failure needs the FTDI adapter on `/dev/ttyUSB0`
-  capturing from the start.
+    knote's filter is still its own allocation.
 - **Hang seen once, not reproduced:** `aarch64-el2` (INTx) in `tests/user/cam`, once in three runs in
   QEMU. (The held key on `vt` is closed, and recorded in compat-deviations.)
 - **`devinfo` against the board's FreeBSD** (tests/corpus/opi6p/freebsd/devinfo-rv.txt): the RX8900,
