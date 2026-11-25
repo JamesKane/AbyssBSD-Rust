@@ -70,6 +70,11 @@ pub trait Display: Send + Sync {
     fn modes(&self) -> Vec<Mode> {
         Vec::new()
     }
+    /// Whether a monitor is connected (the hot-plug line's sense). Asked on
+    /// every connector probe.
+    fn connected(&self) -> bool {
+        true
+    }
     /// Sets the mode: `Some(mode)` one of [`Display::modes`], `None` back to
     /// the firmware's. May sleep on `s` (the requesting thread) to load
     /// what the change needs. The picture is gone for a moment.
@@ -172,7 +177,8 @@ impl FrameMemory for Opaque<'_> {
 struct Screen {
     /// The biggest picture: the surfaces' size and pitch.
     geometry: Geometry,
-    /// The modes the connector offers, the firmware's first.
+    /// The modes the connector offers when the display names none, the
+    /// firmware's.
     modes: Vec<Mode>,
     /// Where the two surfaces to draw on start.
     at: (usize, usize),
@@ -181,6 +187,13 @@ struct Screen {
 }
 
 impl Screen {
+    /// The modes the connector offers now: what the display says the monitor
+    /// accepts (it changes when a monitor is plugged in), else the firmware's.
+    fn current_modes(&self) -> Vec<Mode> {
+        let m = self.display.modes();
+        if m.is_empty() { self.modes.clone() } else { m }
+    }
+
     /// Waits for a pending flip, so the surface about to be drawn on is no
     /// longer scanned out.
     fn settle(&self) {
@@ -256,7 +269,7 @@ impl CrtcHw for Crtc {
         let Some(m) = u.new.mode.as_ref().filter(|_| u.new.active) else {
             return Ok(());
         };
-        if self.0.modes.iter().any(|w| same_timing(w, m)) {
+        if self.0.current_modes().iter().any(|w| same_timing(w, m)) {
             Ok(())
         } else {
             Err(Errno::EINVAL)
@@ -302,11 +315,15 @@ impl ConnectorHw for Connector {
     }
 
     fn detect(&self) -> Connection {
-        Connection::Connected
+        if self.0.display.connected() {
+            Connection::Connected
+        } else {
+            Connection::Disconnected
+        }
     }
 
     fn modes(&self) -> Vec<Mode> {
-        self.0.modes.clone()
+        self.0.current_modes()
     }
 }
 
@@ -328,7 +345,7 @@ impl PlaneHw for Plane {
             let d = u.visible.dst;
             let sized = self
                 .0
-                .modes
+                .current_modes()
                 .iter()
                 .any(|m| (u32::from(m.hdisplay), u32::from(m.vdisplay)) == (d.w, d.h));
             if (d.x, d.y) != (0, 0) || !sized {

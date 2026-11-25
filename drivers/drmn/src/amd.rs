@@ -69,7 +69,7 @@ pub(crate) struct Amd {
     /// tried, 1 running, 2 done, 3 failed (a reboot clears it).
     gfx_state: core::sync::atomic::AtomicU8,
     /// The unit of the graphics card made for it, or -1.
-    dri_unit: core::sync::atomic::AtomicI32,
+    pub(crate) dri_unit: core::sync::atomic::AtomicI32,
     /// The graphics card, once registered.
     kms: SpinLock<Option<(Arc<amd_kms::AmdKms>, Arc<drm::Card>)>>,
     /// The interrupts.
@@ -110,7 +110,15 @@ pub(crate) struct Amd {
     /// jobs).
     render: SpinLock<Option<Weak<crate::render::Render>>>,
     /// What the monitor's EDID said, if it was read (stage R3.5).
-    sink: SpinLock<Option<edid::Edid>>,
+    pub(crate) sink: SpinLock<Option<edid::Edid>>,
+    /// A monitor is connected (the hot-plug line, debounced).
+    pub(crate) connected: core::sync::atomic::AtomicBool,
+    /// The code of the mode now running (16 = the firmware's 1080p60).
+    pub(crate) current_vic: core::sync::atomic::AtomicU8,
+    /// The next mode set takes the full way off and on even at the pixel
+    /// clock already running (a monitor plugged in again needs the link
+    /// trained again).
+    pub(crate) relink: core::sync::atomic::AtomicBool,
 }
 
 /// Where the GART's page table is in video memory (BAR0 offset): past the
@@ -165,6 +173,9 @@ impl Amd {
             gfx: SpinLock::new(None),
             sdma: SpinLock::new(None),
             sink: SpinLock::new(None),
+            connected: core::sync::atomic::AtomicBool::new(true),
+            current_vic: core::sync::atomic::AtomicU8::new(16),
+            relink: core::sync::atomic::AtomicBool::new(false),
             reset_busy: core::sync::atomic::AtomicBool::new(false),
             skip_asic_init: core::sync::atomic::AtomicBool::new(false),
             render: SpinLock::new(None),
@@ -175,7 +186,7 @@ impl Amd {
         bus::manager().log(format_args!("{}: {args}", self.name));
     }
 
-    fn gpu(&self) -> Result<Arc<Aperture>, abi::errno::Errno> {
+    pub(crate) fn gpu(&self) -> Result<Arc<Aperture>, abi::errno::Errno> {
         self.gpu.upgrade().ok_or(abi::errno::Errno::ENXIO)
     }
 
@@ -311,6 +322,9 @@ impl Amd {
             ));
         }
         *self.kms.lock() = Some((card, node));
+        if let Some(me) = self.me.upgrade() {
+            crate::hotplug::start(&me);
+        }
     }
 
     /// Takes the card away. The firmware's picture is shown again unless
@@ -782,6 +796,9 @@ impl Amd {
                 format!("{vic}{star}")
             })
             .collect();
+        if !self.connected() {
+            return format!("no monitor connected (modes if one is: {})", list.join(" "));
+        }
         match self.sink.lock().as_ref() {
             Some(e) => format!(
                 "{:?}: modes {} (of {} timings; * preferred)",
@@ -896,7 +913,7 @@ impl Amd {
                 return Err(Errno::ENOTSUP);
             }
         };
-        let clock_change = target_clock != clock;
+        let clock_change = target_clock != clock || self.relink.swap(false, Ordering::AcqRel);
         self.log(format_args!(
             "mode: code {vic}: {}x{} total {}x{} at {} kHz (running {} kHz); the writes:",
             mode.hdisplay, mode.vdisplay, mode.htotal, mode.vtotal, target_clock, clock
@@ -1033,7 +1050,28 @@ impl Amd {
         if !apply {
             return Err(Errno::EIO);
         }
+        self.current_vic.store(code, Ordering::Release);
         Ok(())
+    }
+
+    /// Takes the link down and up again at the mode running: a monitor that
+    /// was plugged in again shows noise until the transmitter is trained
+    /// again (the way off and on of a clock change, without a change of
+    /// clock). May sleep on `s` to load the display firmware.
+    pub(crate) fn relink_now(&self, s: &sched::Sleepable) -> Result<(), abi::errno::Errno> {
+        use core::sync::atomic::Ordering;
+        if self.modeset_busy.swap(true, Ordering::AcqRel) {
+            return Err(abi::errno::Errno::EBUSY);
+        }
+        if !self.dmcub_up.load(Ordering::Acquire) {
+            self.dmcub_load(s);
+        }
+        self.relink.store(true, Ordering::Release);
+        let vic = i32::from(self.current_vic.load(Ordering::Acquire));
+        let r = self.set_mode_by_code(vic, false);
+        self.relink.store(false, Ordering::Release);
+        self.modeset_busy.store(false, Ordering::Release);
+        r
     }
 
     /// Puts the encoder's front end back as it was before the last clock

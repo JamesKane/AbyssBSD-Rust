@@ -759,10 +759,26 @@ Mesa's `radeonsi` on a render node, and runs Sway with hardware rendering. The N
   (`Amd::read_sink`, `sink.rs`) and offers those modes of its table of seven CTA-861 modes (codes 16, 31, 4, 19,
   3, 18, 1: 1080p60/50, 720p60/50, 480p, 576p, 640x480) that the EDID lists, the native one preferred when the
   card can set it, else 1080p60; no usable EDID gives the whole table. The matching includes the pixel clock
-  (1080p25 has the totals of 1080p50). `dev.drmn.<unit>.sink` shows the result. The connector reports connected
-  whatever the hot-plug line says; the list is read once at attach. The plane takes a size equal to one of the
+  (1080p25 has the totals of 1080p50). `dev.drmn.<unit>.sink` shows the result. The plane takes a size equal to one of the
   modes' at the corner and copies exactly that size into the surface, whose pitch stays 1920 pixels; a mode-set
   commit calls `Display::set_mode` and turning the controller off sets the firmware's mode again.
+- **Hot-plug** (`drivers/drmn/src/hotplug.rs`, `lib/amdgpu/src/hpd.rs`; 08 section 4.3). A kernel thread
+  (`amd-hpd`) reads the line's sense (`HPD0_DC_HPD_INT_STATUS` `0x14f50` bit 1; `0x12` with the Dell connected)
+  every 250 ms and needs four agreeing reads (one second) to call a change. **Unplugged:** the EDID is
+  forgotten and `Connector::detect` says disconnected (`Display::connected`). **Plugged in:** the EDID is read
+  again, so the offered modes follow the new monitor (the connector and the controller's check ask the display
+  for the current list each time), and **the link is trained again**: `Amd::relink_now` runs the way off and on of
+  a clock change (transmitter off, pixel clock, stream setup, front end reconnected, transmitter on) at the
+  mode running (`current_vic`), loading the display firmware first if it is not up. Without that, a replugged
+  monitor shows the right text through green noise, as photographed on the X870E. A line that reads
+  disconnected when the watcher starts (not wired) is left alone and the connector stays connected. User space
+  is told with a device control notification, `!system=DRM subsystem=card<N> type=HOTPLUG
+  connector=HDMI-A-1 status=<connected|disconnected>`; **that string is a guess**: FreeBSD's linuxkpi makes
+  `kobject_uevent_env` do nothing, so what drm-kmod's userland (libudev-devd, wlroots) listens for is not
+  recorded here (DESKTOP.md lists it as to be recorded). Polling, not the hot-plug interrupt (08 section 2.5,
+  source 9, enable `INT_CONTROL` bit 16): the interrupt control register's offset is not in the specification.
+  Verified on the X870E: unplug and replug of the HDMI cable, twice (disconnect and connect logged, EDID read,
+  link retrained, the console normal afterwards).
 - **Verified:** `tests/graphics/kmsflip.c` (raw ioctls) sets each mode and flips between two patterns; Sway 1.12
   with the pixman renderer, `foot` and glmark2 run on it (`tests/graphics/accept-x86_64-amd-display.png`); a
   ten-minute Sway soak ran 42,048 frames with no overflow.
@@ -963,8 +979,8 @@ reboot (always set `BootNext` first so the board does not boot Fedora).
 
 - Synchronisation-object and sync-file descriptors (need a descriptor kind with a wake-up for `poll`), and the
   dma-buf fence ioctls.
-- Connector hot-plug detection (the X870E is not behind a KVM switch, so the hot-plug sense at
-  `0x14f50` bit 1 could drive `Connector::detect`), re-reading the EDID later, and the notice to user space.
+- Hot-plug by interrupt (needs the line's interrupt control offset from the specification); the notice user
+  space listens for (§16.2); a compositor that survives a replug (Sway was not running in the test).
 - Compute and graphics preemption verification; the wave-kill soft recovery; the DMA reset's freeze step.
 - Scanning out clients' buffers in place (a GART-mapped scan-out path) instead of copying.
 - Sound over HDMI; the Navi 22 (Z690-A) bring-up; the half-speed-after-reset cause (§16.8).
