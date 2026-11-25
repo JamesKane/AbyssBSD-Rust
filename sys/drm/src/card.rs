@@ -371,6 +371,19 @@ impl Drop for Open {
             k.release_file(self.id);
         }
         self.card.driver().file_closed(self.id);
+        // The last file on the card's own node: the console comes back.
+        if !self.render && !self.card.is_revoked() {
+            let others = self
+                .card
+                .files
+                .lock()
+                .iter()
+                .filter_map(alloc::sync::Weak::upgrade)
+                .any(|f| !f.render);
+            if !others {
+                self.card.driver().last_close();
+            }
+        }
     }
 }
 

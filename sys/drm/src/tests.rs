@@ -2441,6 +2441,8 @@ fn a_panic_tells_every_card_to_show_the_console() {
 struct Render {
     closed: Arc<Mutex<Vec<u64>>>,
     seen_files: Arc<Mutex<Vec<u64>>>,
+    /// How many times the card's own node was left empty.
+    last_closes: Arc<Mutex<u32>>,
 }
 
 impl DrmDriver for Render {
@@ -2483,6 +2485,9 @@ impl DrmDriver for Render {
     fn file_closed(&self, file: u64) {
         self.closed.lock().unwrap().push(file);
     }
+    fn last_close(&self) {
+        *self.last_closes.lock().unwrap() += 1;
+    }
     fn render(&self) -> bool {
         true
     }
@@ -2500,6 +2505,7 @@ fn a_drivers_own_request_gets_the_file_and_its_handles_and_hears_when_the_file_c
     let c = crate::register(Arc::new(Render {
         closed: Arc::clone(&closed),
         seen_files: Arc::clone(&seen),
+        last_closes: Arc::default(),
     }))
     .unwrap();
     let a = open(&c);
@@ -2546,6 +2552,7 @@ fn a_render_file_takes_rendering_requests_and_no_mode_setting_or_mastership() {
     let c = crate::register(Arc::new(Render {
         closed,
         seen_files: Arc::default(),
+        last_closes: Arc::default(),
     }))
     .unwrap();
     let r = c.open_render().unwrap();
@@ -2614,4 +2621,27 @@ fn a_synchronisation_object_is_made_signalled_waited_for_and_reset() {
     d[..4].copy_from_slice(&h.to_le_bytes());
     call(&f, req(0xc0, 8), &mut d).unwrap();
     assert_eq!(wait(0, 6_000_000_000), Err(Errno::ENOENT));
+}
+
+#[test]
+fn the_console_comes_back_when_the_last_file_on_the_cards_own_node_closes() {
+    setup();
+    let lasts = Arc::new(Mutex::new(0u32));
+    let c = crate::register(Arc::new(Render {
+        closed: Arc::default(),
+        seen_files: Arc::default(),
+        last_closes: Arc::clone(&lasts),
+    }))
+    .unwrap();
+    let a = open(&c);
+    let b = open(&c);
+    let r = c.open_render().unwrap();
+    // One of two closes: not the last. A render file never counts.
+    drop(a);
+    assert_eq!(*lasts.lock().unwrap(), 0);
+    drop(r);
+    assert_eq!(*lasts.lock().unwrap(), 0);
+    drop(b);
+    assert_eq!(*lasts.lock().unwrap(), 1);
+    c.unregister(&s());
 }

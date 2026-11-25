@@ -514,6 +514,12 @@ impl DrmDriver for AmdKms {
         }
     }
 
+    fn last_close(&self) {
+        // Nobody is driving the display: the console's surface is shown
+        // again, not the last picture of the program that quit.
+        self.screen.restore();
+    }
+
     fn file_closed(&self, file: u64) {
         if let Some(r) = self.render.get() {
             r.file_closed(file);

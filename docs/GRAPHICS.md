@@ -1383,3 +1383,7 @@ A job's ring fence now interrupts (`RELEASE_MEM` with the interrupt select; `CP_
 **Compute rings** (06 section 8.1): eight kernel queues on the first micro engine (pipe `n mod 4`, queue `n div 4`, doorbell dword `6 + 2n`) mapped in one submission on the KIQ (`SET_RESOURCES` mask `0x03030303`, eight `MAP_QUEUES`); each answers a test write at start. Four are offered (IP type compute, rings 0 to 3). The job is the graphics frame without the parser-only items: a micro-engine wait on the previous fence, the address-space switch on the ring's own invalidation engine (`4 + n`), buffers with the valid bit, the fences.
 
 Board run: a command buffer on each of the three engines writes to a buffer mapped in the client's address space (`tests/graphics/amdrender.c`: graphics, DMA write and copy, compute rings 0 and 3); glmark2 and Sway with the jellyfish run as before, no fault. Mesa does not use the extra engines by default; the interface is there for what asks (compute work, DMA copies). Open: the other four compute queues, user queues, preemption and reset.
+
+### 16.30 The console comes back when the last client quits (2026-11-25)
+
+Closing a file used to remove only its buffers, so the picture of a compositor that quit stayed on the display, frozen. The core now tells the driver (`DrmDriver::last_close`) when the last file on the card's own node closes (render-node files do not count), and the Radeon card shows the console's surface again. Board run: Sway with the jellyfish started and stopped; the console was back on the monitor.

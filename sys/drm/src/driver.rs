@@ -225,6 +225,11 @@ pub trait DrmDriver: Send + Sync {
         self.ioctl(nr, arg)
     }
 
+    /// The last file on the card's own node closed (a compositor or a test
+    /// program quit): the driver puts the console back on the display. The
+    /// render node's files do not count.
+    fn last_close(&self) {}
+
     /// A file of this card closed (its last reference went): the driver
     /// frees what it kept for `file`.
     fn file_closed(&self, file: u64) {
