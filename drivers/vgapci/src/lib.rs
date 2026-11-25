@@ -181,6 +181,21 @@ impl Aperture {
         true
     }
 
+    /// Writes the 64-bit doorbell at byte `offset` of the doorbell aperture
+    /// with one 8-byte store (the graphics and compute queues take their
+    /// 64-bit write pointers so); `false` (and no write) if there is none
+    /// or the offset is not 8-byte aligned or is outside it.
+    pub fn doorbell_write64(&self, offset: usize, value: u64) -> bool {
+        let Some((map, len)) = self.doorbells.as_ref() else {
+            return false;
+        };
+        if !offset.is_multiple_of(8) || offset.checked_add(8).is_none_or(|e| e > *len) {
+            return false;
+        }
+        map.write64(offset, value);
+        true
+    }
+
     /// The size of the doorbell aperture, if there is one.
     #[must_use]
     pub fn doorbell_len(&self) -> Option<usize> {

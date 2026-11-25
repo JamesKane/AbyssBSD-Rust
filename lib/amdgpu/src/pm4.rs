@@ -315,6 +315,23 @@ impl Packets {
         )
     }
 
+    /// Marks every type-3 packet of the stream as a compute packet (the
+    /// shader-type bit of its header), for a ring the compute micro engine
+    /// reads (the KIQ). Type-2 fillers are left.
+    pub fn mark_compute(&mut self) -> &mut Self {
+        let mut at = 0;
+        while at < self.0.len() {
+            let h = self.0[at];
+            if h >> 30 == 3 {
+                self.0[at] = h | 2;
+                at += ((h >> 16) & 0x3fff) as usize + 2;
+            } else {
+                at += 1;
+            }
+        }
+        self
+    }
+
     /// `COPY_DATA` of the register `reg` into memory at `address`: source 0
     /// (register), destination 5 (memory), the write confirmed.
     pub fn copy_reg_to_mem(&mut self, reg: u32, address: u64) -> &mut Self {
@@ -474,6 +491,22 @@ mod tests {
         q.event_write(0x2c, 0).copy_reg_to_mem(0x2040, 0x5000);
         assert_eq!(q.0[1], 0x2c);
         assert_eq!(q.0[3..], [(5 << 8) | (1 << 20), 0x2040, 0, 0x5000, 0]);
+    }
+
+    #[test]
+    fn a_stream_is_marked_compute_packet_by_packet() {
+        let mut p = Packets::new();
+        p.write_data_mem(0x1000, &[1, 2]).pfp_sync_me();
+        p.0.push(FILLER);
+        p.nop(2);
+        p.mark_compute();
+        assert_eq!(p.0[0] & 2, 2);
+        // The second packet's header is where the first one ends.
+        assert_eq!(p.0[6] & 2, 2);
+        assert_eq!(p.0[8], FILLER);
+        assert_eq!(p.0[9] & 2, 2);
+        // The bodies are untouched.
+        assert_eq!(p.0[1], (5 << 8) | (1 << 20));
     }
 
     #[test]

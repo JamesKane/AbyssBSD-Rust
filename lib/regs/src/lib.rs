@@ -180,6 +180,13 @@ impl Mmio<Bytes> {
         // SAFETY: as for `read8`.
         unsafe { self.ptr::<u32>(offset).write_volatile(v) }
     }
+
+    /// Writes the 64-bit register at `offset` with one 8-byte store (a
+    /// doorbell whose value the device takes whole).
+    pub fn write64(&self, offset: usize, v: u64) {
+        // SAFETY: as for `read8`.
+        unsafe { self.ptr::<u64>(offset).write_volatile(v) }
+    }
 }
 
 /// A block of 32-bit registers by byte offset: what a driver's hardware
