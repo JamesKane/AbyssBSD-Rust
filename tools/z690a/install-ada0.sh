@@ -30,6 +30,10 @@
 #                         DHCP on every interface, sshd with root let in by key
 #                         only, and ~/.ssh/id_ed25519.pub (or $SSH_PUB) as root's
 #                         authorized_keys. Safe to run again.
+#   --back                from the running AbyssBSD (ssh as root): BootNext to
+#                         FreeBSD's entry, then reboot. The firmware's default
+#                         is the Windows Boot Manager on nda0, not FreeBSD, so
+#                         a plain reboot from AbyssBSD lands in Windows.
 #   --boot-once           BootNext to the AbyssBSD entry. It does not reboot.
 #   --status              what is there: the partitions, the boot entries.
 # Add --dry-run to --install to see its preflight and plan only.
@@ -46,7 +50,7 @@ wipe=
 dry=0
 while [ $# -gt 0 ]; do
 	case $1 in
-	--prepare | --install | --entry | --update-kernel | --board-files | --boot-once | --status) mode=${1#--} ;;
+	--prepare | --install | --entry | --update-kernel | --board-files | --boot-once | --back | --back | --status) mode=${1#--} ;;
 	--wipe) wipe=$2; shift ;;
 	--dry-run) dry=1 ;;
 	-h | --help) sed -n '2,/^set -eu/p' "$0" | sed 's/^# \{0,1\}//; /^set -eu/d'; exit 0 ;;
@@ -214,6 +218,19 @@ doas -n ls -la /mnt/abyssroot-z690a/root/.ssh
 doas -n umount /mnt/abyssroot-z690a
 EOF
 	say "the root has DHCP, sshd, and your key for root"
+	;;
+
+back)
+	kh=${KNOWN_HOSTS:-$HOME/.ssh/known_hosts.z690a}
+	ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$kh" "root@$server" 'sh -s' << 'EOF'
+set -eu
+num=$(efibootmgr -v | sed -n 's/^[+ ]*Boot\([0-9A-Fa-f]*\)[* ] FreeBSD .*/\1/p' | head -1)
+[ -n "$num" ] || { echo "no FreeBSD boot entry" >&2; exit 1; }
+efibootmgr -n -b "$num"
+efibootmgr | grep BootNext
+echo "BootNext is Boot$num: rebooting"
+shutdown -r now
+EOF
 	;;
 
 boot-once)
