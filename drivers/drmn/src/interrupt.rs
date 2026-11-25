@@ -41,6 +41,9 @@ const SOURCE_FRAME_START_0: u8 = 0x3c;
 /// (a fence with the interrupt bit; 06 section 11.1).
 const CLIENT_GRBM_CP: u8 = 0x14;
 const SOURCE_EOP: u8 = 181;
+/// The system DMA engine's client and its trap source (07 section 6).
+const CLIENT_SDMA0: u8 = amdgpu::sdma::IH_CLIENT;
+const SOURCE_SDMA_TRAP: u8 = amdgpu::sdma::IH_SOURCE_TRAP;
 
 /// The interrupts of one GPU, and what they were.
 pub(crate) struct Irq {
@@ -274,7 +277,9 @@ impl Irq {
                 self.entries.fetch_add(1, Ordering::Relaxed);
                 if e.client == CLIENT_DISPLAY && e.source == SOURCE_FRAME_START_0 {
                     frame = true;
-                } else if e.client == CLIENT_GRBM_CP && e.source == SOURCE_EOP {
+                } else if (e.client == CLIENT_GRBM_CP && e.source == SOURCE_EOP)
+                    || (e.client == CLIENT_SDMA0 && e.source == SOURCE_SDMA_TRAP)
+                {
                     eop = true;
                     self.eops.fetch_add(1, Ordering::Relaxed);
                 } else {

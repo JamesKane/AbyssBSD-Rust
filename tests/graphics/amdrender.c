@@ -87,5 +87,25 @@ int main(int argc, char **argv)
 	if (ioctl(fd, CMD(0x09, struct wait), &w) < 0) { perror("WAIT_CS"); return 1; }
 	printf("job %llu: wait status %llu, data word %#x (want 0x600dcafe)\n",
 	       (unsigned long long)seq, (unsigned long long)w.handle, ((volatile uint32_t *)map[1])[0]);
-	return ((volatile uint32_t *)map[1])[0] == 0x600dcafe ? 0 : 2;
+	int bad = ((volatile uint32_t *)map[1])[0] != 0x600dcafe;
+
+	/* The system DMA engine (ip type 2): a write, then a copy of what it wrote. */
+	uint32_t *d = (uint32_t *)((char *)map[0] + 0x100);
+	uint64_t src = va_data + 8, dst = va_data + 16;
+	uint32_t pk[16] = { 2, (uint32_t)src, (uint32_t)(src >> 32), 0, 0xd00dfeed,
+		1, 3, 0, (uint32_t)src, (uint32_t)(src >> 32), (uint32_t)dst, (uint32_t)(dst >> 32),
+		0, 0, 0, 0 };
+	for (int i = 0; i < 16; i++) d[i] = pk[i];
+	struct ib dib = { .va = va_ib + 0x100, .bytes = 16 * 4, .ip = 2 };
+	struct chunk dck = { .id = 1, .len = sizeof dib / 4, .data = (uintptr_t)&dib };
+	uint64_t dchunks[1] = { (uintptr_t)&dck };
+	struct cs dcs = { .ctx = ctx, .nchunks = 1, .chunks = (uintptr_t)dchunks };
+	if (ioctl(fd, CMD(0x04, struct cs), &dcs) < 0) { perror("CS (DMA)"); return 1; }
+	struct wait dw = { .handle = *(uint64_t *)&dcs, .timeout = 2000000000ull, .ip = 2, .ctx = ctx };
+	if (ioctl(fd, CMD(0x09, struct wait), &dw) < 0) { perror("WAIT_CS (DMA)"); return 1; }
+	volatile uint32_t *dp = (volatile uint32_t *)map[1];
+	printf("dma job %llu: wait status %llu, written %#x, copied %#x (want 0xd00dfeed twice)\n",
+	       (unsigned long long)*(uint64_t *)&dcs, (unsigned long long)dw.handle, dp[2], dp[4]);
+	bad |= dp[2] != 0xd00dfeed || dp[4] != 0xd00dfeed;
+	return bad ? 2 : 0;
 }

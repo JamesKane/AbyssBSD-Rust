@@ -55,11 +55,30 @@ const KERNEL_VA: u64 = VA_MAX - (4 << 20);
 /// space, so the packet runs from a buffer there, not in the ring (whose
 /// packets use the kernel's).
 const FENCE_IB_VA: u64 = VA_MAX - (1 << 20);
-/// Pages of those a file has (a job's page is its number modulo this).
-const FENCE_IB_PAGES: u64 = 16;
-const FENCE_IB_PAGES_U32: u32 = 16;
-/// Where they are in video memory: 64 KiB for each file, from here.
+/// Pages of those a file has: a set for each engine (a job's page in its set
+/// is its number modulo `FENCE_IB_SLOTS`).
+const FENCE_IB_PAGES: u64 = 32;
+const FENCE_IB_SLOTS: u64 = 16;
+const FENCE_IB_SLOTS_U32: u32 = 16;
+/// Where they are in video memory: 128 KiB for each file, from here.
 const FENCE_IB_AT: u64 = 192 << 20;
+
+/// The engines a job runs on, each with its own ring and sequence numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Engine {
+    Gfx,
+    Dma,
+}
+
+impl Engine {
+    fn from_ip(ip: u32) -> Option<Self> {
+        match ip {
+            uapi::ip::GFX => Some(Self::Gfx),
+            uapi::ip::DMA => Some(Self::Dma),
+            _ => None,
+        }
+    }
+}
 
 /// The address as the engine's packets carry it: the high half of the 48-bit
 /// space (bit 47 set) has the top 16 bits set too; the hardware refuses an
@@ -126,12 +145,14 @@ pub(crate) struct Render {
     state: PreemptLock<State>,
     /// The last job's sequence number.
     seq: AtomicU32,
+    /// The same for the DMA engine's jobs.
+    dma_seq: AtomicU32,
     /// The context of the last job (a job from another one loads the
     /// context's state).
     last_ctx: AtomicU32,
     /// Where waiters for a job sleep; the fence interrupt wakes it.
     queue: Arc<sched::WaitQueue>,
-    device: Device,
+    vram_bytes: u64,
 }
 
 impl core::fmt::Debug for Render {
@@ -145,6 +166,7 @@ impl Render {
         Arc::new(Self {
             amd,
             seq: AtomicU32::new(0),
+            dma_seq: AtomicU32::new(0),
             last_ctx: AtomicU32::new(0),
             queue: Arc::new(sched::WaitQueue::new()),
             state: PreemptLock::new(State {
@@ -155,7 +177,7 @@ impl Render {
                     bytes: 0,
                 },
             }),
-            device: Device::raphael(vram_bytes, GTT_BYTES).graphics_only(),
+            vram_bytes,
         })
     }
 
@@ -167,11 +189,11 @@ impl Render {
     /// Sleeps until job `seq` has finished or `ns` nanoseconds have passed
     /// (the fence interrupt ends it early; without interrupts it is a poll
     /// at this period).
-    fn sleep_for(&self, s: &sched::Sleepable, amd: &Amd, seq: u32, ns: u64) {
+    fn sleep_for(&self, s: &sched::Sleepable, amd: &Amd, engine: Engine, seq: u32, ns: u64) {
         let _ = bus::manager().wait_timeout(
             s,
             &self.queue,
-            &mut || self.done(amd, seq).unwrap_or(true),
+            &mut || self.done(amd, engine, seq).unwrap_or(true),
             ns,
         );
     }
@@ -225,7 +247,15 @@ impl Render {
         let gpu = amd.gpu_arc()?;
         let bytes = self.state.lock().count.bytes;
         let live = LiveState { gpu, bytes };
-        let answer = info::answer(&self.device, &live, &req).map_err(|_| Errno::EINVAL)?;
+        // The graphics ring always; the DMA engine when it started; compute
+        // is not driven yet.
+        let device = Device::raphael(self.vram_bytes, GTT_BYTES);
+        let device = if amd.sdma_ready() {
+            device.without_compute()
+        } else {
+            device.graphics_only()
+        };
+        let answer = info::answer(&device, &live, &req).map_err(|_| Errno::EINVAL)?;
         let out = uapi::truncated(&answer, req.return_size);
         cx.copy_out(req.return_pointer, out)?;
         Ok(0)
@@ -363,6 +393,7 @@ impl Render {
         // The chunks, read from the caller's memory before any lock.
         let ctx_id = r.ctx_id;
         let mut ibs = Vec::new();
+        let mut engine: Option<Engine> = None;
         let mut fence: Option<(u32, u32)> = None;
         let mut out_syncobjs: Vec<u32> = Vec::new();
         for i in 0..u64::from(r.num_chunks) {
@@ -389,15 +420,12 @@ impl Render {
                 uapi::chunk::IB => {
                     let mut ib = uapi::IbChunk::decode(&data).map_err(|_| Errno::EINVAL)?;
                     ib.va_start = canonical(ib.va_start).ok_or(Errno::EINVAL)?;
-                    if ib.ip_type != uapi::ip::GFX || ib.ip_instance != 0 || ib.ring != 0 {
-                        if let Ok(amd) = self.amd() {
-                            amd.log(format_args!(
-                                "render: IB for ip {} instance {} ring {}",
-                                ib.ip_type, ib.ip_instance, ib.ring
-                            ));
-                        }
+                    // One engine a submission.
+                    let this = Engine::from_ip(ib.ip_type).ok_or(Errno::EINVAL)?;
+                    if ib.ip_instance != 0 || ib.ring != 0 || engine.is_some_and(|e| e != this) {
                         return Err(Errno::EINVAL);
                     }
+                    engine = Some(this);
                     ibs.push(ib);
                 }
                 uapi::chunk::FENCE if len >= 8 => {
@@ -421,11 +449,15 @@ impl Render {
                 _ => {}
             }
         }
+        let engine = engine.ok_or(Errno::EINVAL)?;
         if ibs.is_empty() {
             return Err(Errno::EINVAL);
         }
         let user_fence_gem = fence.and_then(|(h, o)| cx.gem(h).map(|g| (g, u64::from(o))));
         let amd = self.amd()?;
+        if engine == Engine::Dma && !amd.sdma_ready() {
+            return Err(Errno::ENODEV);
+        }
         let gpu = amd.gpu_arc()?;
         // The address space's root and the user fence's address, under the
         // state lock; the job itself under the ring's.
@@ -438,7 +470,7 @@ impl Render {
             let vmid = u32::try_from(fs.slot).unwrap_or(0) + 1;
             let root = fs.space.tables().address(fs.space.root()).0;
             if !fs.fence_pages {
-                let at = phys + FENCE_IB_AT + ((fs.slot as u64) << 16);
+                let at = phys + FENCE_IB_AT + ((fs.slot as u64) << 17);
                 fs.space
                     .map(
                         FENCE_IB_VA,
@@ -487,70 +519,136 @@ impl Render {
             };
             Ok((vmid, fs.slot, root, user_fence))
         })?;
-        let seq = loop {
-            let mut g = amd.gfx_lock();
-            let gfx = g.as_mut().ok_or(Errno::ENXIO)?;
-            let seq = self.seq.load(Ordering::Acquire).wrapping_add(1).max(1);
-            // The page for this job's fence packet is free once the job that
-            // used it before has finished.
-            let page = u64::from(seq) % FENCE_IB_PAGES;
-            let before = seq.wrapping_sub(FENCE_IB_PAGES_U32);
-            if user_fence.is_some() && gfx.finished(&gpu).wrapping_sub(before) >= 0x8000_0000 {
-                drop(g);
-                if sched::current().is_interrupted() {
-                    return Err(Errno::EINTR);
+        let seq = match engine {
+            Engine::Gfx => loop {
+                let mut g = amd.gfx_lock();
+                let gfx = g.as_mut().ok_or(Errno::ENXIO)?;
+                let seq = self.seq.load(Ordering::Acquire).wrapping_add(1).max(1);
+                // The page for this job's fence packet is free once the job that
+                // used it before has finished.
+                let page = u64::from(seq) % FENCE_IB_SLOTS;
+                let before = seq.wrapping_sub(FENCE_IB_SLOTS_U32);
+                if user_fence.is_some() && gfx.finished(&gpu).wrapping_sub(before) >= 0x8000_0000 {
+                    drop(g);
+                    if sched::current().is_interrupted() {
+                        return Err(Errno::EINTR);
+                    }
+                    bus::manager().sleep_ms(cx.sleepable(), 1);
+                    continue;
                 }
-                bus::manager().sleep_ms(cx.sleepable(), 1);
-                continue;
-            }
-            // The reference's frame (06 section 10.4): the previous job's
-            // fence, the address space, the state loads (all of them when the
-            // context changed), the frame, its fences, the switch.
-            let mut p = Packets::new();
-            p.wait_mem(
-                3,
-                gfx.seq_address(),
-                self.seq.load(Ordering::Acquire),
-                0xffff_ffff,
-                4,
-                true,
-            );
-            p.0.extend(amdgpu::gmc::ring_vm_flush(vmid, root, false, 0).0);
-            let switched = self.last_ctx.swap(ctx_id, Ordering::AcqRel) != ctx_id;
-            p.context_control(if switched { 0x0101_8003 } else { 0 });
-            p.frame_control(false);
-            for ib in &ibs {
-                p.indirect_buffer(extended(ib.va_start), ib.ib_bytes / 4, vmid, false);
-            }
-            p.frame_control(true);
-            if let Some(va) = user_fence {
-                let mut f = Packets::new();
-                f.fence(extended(va), u64::from(seq), true, false);
-                let off = FENCE_IB_AT + ((slot as u64) << 16) + page * 4096;
-                for (i, d) in f.0.iter().enumerate() {
-                    gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
-                }
-                let _ = gpu.vram_read32(usize::try_from(off).unwrap_or(0));
-                p.indirect_buffer(
-                    extended(FENCE_IB_VA + page * 4096),
-                    u32::try_from(f.0.len()).unwrap_or(0),
-                    vmid,
-                    false,
+                // The reference's frame (06 section 10.4): the previous job's
+                // fence, the address space, the state loads (all of them when the
+                // context changed), the frame, its fences, the switch.
+                let mut p = Packets::new();
+                p.wait_mem(
+                    3,
+                    gfx.seq_address(),
+                    self.seq.load(Ordering::Acquire),
+                    0xffff_ffff,
+                    4,
+                    true,
                 );
-            }
-            p.fence(gfx.seq_address(), u64::from(seq), false, true);
-            p.switch_buffer();
-            // The reference pads every commit to 256 dwords.
-            p.pad(256);
-            gfx.run(&gpu, &p.0, RING_WAIT_MS)?;
-            self.seq.store(seq, Ordering::Release);
-            break seq;
+                p.0.extend(amdgpu::gmc::ring_vm_flush(vmid, root, false, 0).0);
+                let switched = self.last_ctx.swap(ctx_id, Ordering::AcqRel) != ctx_id;
+                p.context_control(if switched { 0x0101_8003 } else { 0 });
+                p.frame_control(false);
+                for ib in &ibs {
+                    p.indirect_buffer(extended(ib.va_start), ib.ib_bytes / 4, vmid, false);
+                }
+                p.frame_control(true);
+                if let Some(va) = user_fence {
+                    let mut f = Packets::new();
+                    f.fence(extended(va), u64::from(seq), true, false);
+                    let off = FENCE_IB_AT + ((slot as u64) << 17) + page * 4096;
+                    for (i, d) in f.0.iter().enumerate() {
+                        gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
+                    }
+                    let _ = gpu.vram_read32(usize::try_from(off).unwrap_or(0));
+                    p.indirect_buffer(
+                        extended(FENCE_IB_VA + page * 4096),
+                        u32::try_from(f.0.len()).unwrap_or(0),
+                        vmid,
+                        false,
+                    );
+                }
+                p.fence(gfx.seq_address(), u64::from(seq), false, true);
+                p.switch_buffer();
+                // The reference pads every commit to 256 dwords.
+                p.pad(256);
+                gfx.run(&gpu, &p.0, RING_WAIT_MS)?;
+                self.seq.store(seq, Ordering::Release);
+                break seq;
+            },
+            Engine::Dma => loop {
+                let mut g = amd.sdma_lock();
+                let sdma = g.as_mut().ok_or(Errno::ENXIO)?;
+                let seq = self.dma_seq.load(Ordering::Acquire).wrapping_add(1).max(1);
+                // The page for this job's fence packets, in the DMA set.
+                let page = FENCE_IB_SLOTS + u64::from(seq) % FENCE_IB_SLOTS;
+                let before = seq.wrapping_sub(FENCE_IB_SLOTS_U32);
+                if user_fence.is_some() && sdma.finished(&gpu).wrapping_sub(before) >= 0x8000_0000 {
+                    drop(g);
+                    if sched::current().is_interrupted() {
+                        return Err(Errno::EINTR);
+                    }
+                    bus::manager().sleep_ms(cx.sleepable(), 1);
+                    continue;
+                }
+                // The frame of 07 section 7.5: the previous job's fence, the
+                // address space, the buffers, the fences.
+                let start = sdma.position();
+                let mut p = amdgpu::sdma::Packets::new();
+                p.poll_mem(
+                    sdma.seq_address(),
+                    self.dma_seq.load(Ordering::Acquire),
+                    0xffff_ffff,
+                    4,
+                    0xfff,
+                );
+                let [(lo_reg, hi_reg), _, _] = amdgpu::gmc::Hub::Gfx.context_table(vmid as usize);
+                p.vm_flush(
+                    vmid,
+                    u32::try_from(lo_reg / 4).unwrap_or(0),
+                    u32::try_from(hi_reg / 4).unwrap_or(0),
+                    amdgpu::vm::pde(root, false),
+                    amdgpu::gmc::invalidate_request(vmid),
+                    amdgpu::sdma::INVALIDATION_ENGINE,
+                );
+                for ib in &ibs {
+                    p.pad_for_indirect(start);
+                    p.indirect(extended(ib.va_start), ib.ib_bytes / 4, vmid);
+                }
+                if let Some(va) = user_fence {
+                    // As for the graphics ring: the client's fence word is
+                    // written by a buffer run in the job's address space.
+                    let mut f = amdgpu::sdma::Packets::new();
+                    f.fence64(extended(va), u64::from(seq));
+                    f.pad8();
+                    let off = FENCE_IB_AT + ((slot as u64) << 17) + page * 4096;
+                    for (i, d) in f.0.iter().enumerate() {
+                        gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
+                    }
+                    let _ = gpu.vram_read32(usize::try_from(off).unwrap_or(0));
+                    p.pad_for_indirect(start);
+                    p.indirect(
+                        extended(FENCE_IB_VA + page * 4096),
+                        u32::try_from(f.0.len()).unwrap_or(0),
+                        vmid,
+                    );
+                }
+                p.fence(sdma.seq_address(), seq);
+                p.trap(0);
+                sdma.run(&gpu, &p.0, RING_WAIT_MS)?;
+                self.dma_seq.store(seq, Ordering::Release);
+                break seq;
+            },
         };
         for h in out_syncobjs {
             let slot = cx.syncobj(h).ok_or(Errno::ENOENT)?;
             *slot.lock() = Some(Arc::new(JobFence {
                 amd: self.amd.clone(),
                 queue: Arc::clone(&self.queue),
+                engine,
                 seq,
             }));
         }
@@ -558,26 +656,30 @@ impl Render {
         Ok(0)
     }
 
-    fn state_seq(&self) -> u32 {
-        self.seq.load(Ordering::Acquire)
+    /// The last job's number on `engine`.
+    fn last_seq(&self, engine: Engine) -> u32 {
+        match engine {
+            Engine::Gfx => self.seq.load(Ordering::Acquire),
+            Engine::Dma => self.dma_seq.load(Ordering::Acquire),
+        }
     }
 
-    /// Whether job `seq` has finished (the fence word has reached it).
-    fn done(&self, amd: &Amd, seq: u32) -> Result<bool, Errno> {
+    /// Whether job `seq` of `engine` has finished (its fence word has
+    /// reached it).
+    fn done(&self, amd: &Amd, engine: Engine, seq: u32) -> Result<bool, Errno> {
         let gpu = amd.gpu_arc()?;
-        let g = amd.gfx_lock();
-        let gfx = g.as_ref().ok_or(Errno::ENXIO)?;
-        Ok(gfx.finished(&gpu).wrapping_sub(seq) < 0x8000_0000)
+        Ok(finished_at(amd, &gpu, engine, seq))
     }
 
     fn wait_cs(&self, cx: &IoctlCx<'_>, arg: &mut [u8]) -> Result<usize, Errno> {
         let r = uapi::WaitCs::decode(arg).map_err(|_| Errno::EINVAL)?;
         let amd = self.amd()?;
         let seq = u32::try_from(r.handle & 0xffff_ffff).map_err(|_| Errno::EINVAL)?;
+        let engine = Engine::from_ip(r.ip_type).ok_or(Errno::EINVAL)?;
         let start = sched::now_ns();
         let mut timed_out = false;
         loop {
-            if self.done(&amd, seq)? {
+            if self.done(&amd, engine, seq)? {
                 break;
             }
             if sched::now_ns().saturating_sub(start) >= r.timeout_ns {
@@ -591,7 +693,7 @@ impl Render {
             let left = r
                 .timeout_ns
                 .saturating_sub(sched::now_ns().saturating_sub(start));
-            self.sleep_for(cx.sleepable(), &amd, seq, left.min(50_000_000));
+            self.sleep_for(cx.sleepable(), &amd, engine, seq, left.min(50_000_000));
         }
         uapi::WaitCs::answer(arg, timed_out);
         Ok(0)
@@ -696,19 +798,22 @@ impl RenderApi for Render {
             cmd::WAIT_CS => self.wait_cs(cx, arg),
             cmd::GEM_WAIT_IDLE => {
                 let (_, timeout) = uapi::gem_wait_idle(arg).map_err(|_| Errno::EINVAL)?;
-                let seq = self.state_seq();
                 let start = sched::now_ns();
                 let mut busy = false;
-                while seq != 0 && !self.done(&amd, seq)? {
-                    if sched::now_ns().saturating_sub(start) >= timeout {
-                        busy = true;
-                        break;
+                // Every job on every engine.
+                for engine in [Engine::Gfx, Engine::Dma] {
+                    let seq = self.last_seq(engine);
+                    while seq != 0 && !self.done(&amd, engine, seq)? {
+                        if sched::now_ns().saturating_sub(start) >= timeout {
+                            busy = true;
+                            break;
+                        }
+                        if sched::current().is_interrupted() {
+                            return Err(Errno::EINTR);
+                        }
+                        let left = timeout.saturating_sub(sched::now_ns().saturating_sub(start));
+                        self.sleep_for(cx.sleepable(), &amd, engine, seq, left.min(50_000_000));
                     }
-                    if sched::current().is_interrupted() {
-                        return Err(Errno::EINTR);
-                    }
-                    let left = timeout.saturating_sub(sched::now_ns().saturating_sub(start));
-                    self.sleep_for(cx.sleepable(), &amd, seq, left.min(50_000_000));
                 }
                 uapi::gem_wait_idle_answer(arg, busy);
                 Ok(0)
@@ -761,6 +866,7 @@ impl RenderApi for Render {
 struct JobFence {
     amd: Weak<Amd>,
     queue: Arc<sched::WaitQueue>,
+    engine: Engine,
     seq: u32,
 }
 
@@ -772,13 +878,25 @@ impl drm::Fence for JobFence {
         let Ok(gpu) = amd.gpu_arc() else {
             return true;
         };
-        let g = amd.gfx_lock();
-        g.as_ref()
-            .is_none_or(|gfx| gfx.finished(&gpu).wrapping_sub(self.seq) < 0x8000_0000)
+        finished_at(&amd, &gpu, self.engine, self.seq)
     }
 
     fn wait(&self, s: &sched::Sleepable, ns: u64) -> bool {
         bus::manager().wait_timeout(s, &self.queue, &mut || self.signaled(), ns)
+    }
+}
+
+/// Whether job `seq` of `engine` has finished: its fence word has reached it.
+fn finished_at(amd: &Amd, gpu: &Arc<Aperture>, engine: Engine, seq: u32) -> bool {
+    match engine {
+        Engine::Gfx => amd
+            .gfx_lock()
+            .as_ref()
+            .is_none_or(|g| g.finished(gpu).wrapping_sub(seq) < 0x8000_0000),
+        Engine::Dma => amd
+            .sdma_lock()
+            .as_ref()
+            .is_none_or(|d| d.finished(gpu).wrapping_sub(seq) < 0x8000_0000),
     }
 }
 

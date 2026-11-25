@@ -17,6 +17,10 @@ pub const RSMU_DATA: usize = 0x54;
 /// `GDC0_BIF_IH_DOORBELL_RANGE`'s byte address through the index/data pair
 /// (dword `0x500ef2`, 05 section 10.3).
 pub const IH_RANGE_RSMU: u32 = 0x50_0ef2 * 4;
+/// `GDC0_BIF_SDMA0_DOORBELL_RANGE` through the same pair (dword `0x500ef0`,
+/// 05 section 10.3), and engine 0's doorbell as a dword index (slot `0x100`).
+pub const SDMA0_RANGE_RSMU: u32 = 0x50_0ef0 * 4;
+pub const SDMA0_DOORBELL_DWORD: u32 = 0x200;
 /// The interrupt handler's doorbell, as a dword index (slot `0x178`, 05
 /// section 10.2).
 pub const IH_DOORBELL_DWORD: u32 = 0x2f0;
@@ -68,6 +72,21 @@ pub fn program_ih_range<W: Window + ?Sized>(w: &W) {
     enable_aperture(w);
     let old = w.read32(RSMU_INDEX);
     rsmu_write(w, IH_RANGE_RSMU, range_value(IH_DOORBELL_DWORD, 2));
+    w.write32(RSMU_INDEX, old);
+}
+
+/// Points the bus interface's engine 0 range at its doorbells (20 dwords from
+/// the ring's) and enables the aperture.
+pub fn program_sdma0_range<W: Window + ?Sized>(w: &W) {
+    enable_aperture(w);
+    let old = w.read32(RSMU_INDEX);
+    // Only the offset (11:2) and size (20:16) fields change.
+    let keep = rsmu_read(w, SDMA0_RANGE_RSMU) & !(0x3ff << 2) & !(0x1f << 16);
+    rsmu_write(
+        w,
+        SDMA0_RANGE_RSMU,
+        keep | range_value(SDMA0_DOORBELL_DWORD, 20),
+    );
     w.write32(RSMU_INDEX, old);
 }
 

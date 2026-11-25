@@ -628,3 +628,167 @@ pub(crate) fn vm_test(
     fault(gpu, log);
     ok
 }
+
+// The system DMA engine's memory (video memory offsets): its ring, the words
+// it reports through, and the fence word of its jobs.
+const SDMA_AT: u64 = 174 << 20;
+const SDMA_RING_BYTES: u32 = 64 * 1024;
+const SDMA_REPORT_AT: u64 = SDMA_AT + 0x1_0000;
+const SDMA_POLL_AT: u64 = SDMA_AT + 0x1_0100;
+const SDMA_SEQ_AT: u64 = SDMA_AT + 0x1_0200;
+const SDMA_TEST_AT: u64 = SDMA_AT + 0x1_0300;
+
+/// System DMA engine 0's ring: pointers are 64-bit byte offsets.
+#[derive(Debug)]
+pub(crate) struct Sdma {
+    base: u64,
+    /// The write pointer in dwords, a count that never wraps.
+    wptr: u64,
+}
+
+impl Sdma {
+    /// The GPU address of the fence word of its jobs.
+    pub(crate) fn seq_address(&self) -> u64 {
+        self.base + SDMA_SEQ_AT
+    }
+
+    /// The sequence number of the last job it finished.
+    pub(crate) fn finished(&self, gpu: &Arc<Aperture>) -> u32 {
+        let mem = crate::psp::vram_memory(gpu, self.base);
+        mem.invalidate();
+        mem.read32(self.base + SDMA_SEQ_AT)
+    }
+
+    /// The ring position the next packet goes at, in dwords.
+    pub(crate) fn position(&self) -> u64 {
+        self.wptr % u64::from(SDMA_RING_BYTES / 4)
+    }
+
+    /// Writes `packets` and rings the doorbell, waiting up to `ms` for room.
+    pub(crate) fn run(
+        &mut self,
+        gpu: &Arc<Aperture>,
+        packets: &[u32],
+        ms: u32,
+    ) -> Result<(), abi::errno::Errno> {
+        let mem = crate::psp::vram_memory(gpu, self.base);
+        let size = SDMA_RING_BYTES / 4;
+        let need = u32::try_from(packets.len()).map_err(|_| abi::errno::Errno::E2BIG)?;
+        if need + 8 >= size {
+            return Err(abi::errno::Errno::E2BIG);
+        }
+        for _ in 0..=ms {
+            mem.invalidate();
+            // The engine reports its read pointer in bytes.
+            let rptr = (mem.read32(self.base + SDMA_REPORT_AT) / 4) % size;
+            let used = (u32::try_from(self.position()).unwrap_or(0) + size - rptr) % size;
+            if size - used > need + 8 {
+                self.submit(gpu, &mem, packets);
+                return Ok(());
+            }
+            bus::manager().delay_us(1000);
+        }
+        Err(abi::errno::Errno::EAGAIN)
+    }
+
+    fn submit(&mut self, gpu: &Arc<Aperture>, mem: &dyn Memory, packets: &[u32]) {
+        let size = u64::from(SDMA_RING_BYTES / 4);
+        for d in packets {
+            let at = SDMA_AT + 4 * (self.wptr % size);
+            gpu.vram_write32(usize::try_from(at).unwrap_or(0), *d);
+            self.wptr += 1;
+        }
+        mem.flush();
+        // The poll word, then the doorbell, both the pointer in bytes.
+        let bytes = self.wptr * 4;
+        let poll = usize::try_from(SDMA_POLL_AT).unwrap_or(0);
+        gpu.vram_write32(poll, (bytes & 0xffff_ffff) as u32);
+        gpu.vram_write32(poll + 4, (bytes >> 32) as u32);
+        mem.flush();
+        gpu.doorbell_write64(amdgpu::sdma::DOORBELL_BYTE, bytes);
+    }
+
+    /// Where the engine is: its report, our pointer and the fence word.
+    pub(crate) fn report(&self, gpu: &Arc<Aperture>, log: &dyn Fn(core::fmt::Arguments<'_>)) {
+        let mem = crate::psp::vram_memory(gpu, self.base);
+        mem.invalidate();
+        let w = Bar5(gpu);
+        log(format_args!(
+            "SDMA: write pointer {} dwords, read pointer {} (reported), {} (register), last finished job {}, STATUS {:#x}",
+            self.wptr,
+            mem.read32(self.base + SDMA_REPORT_AT) / 4,
+            w.read32(amdgpu::sdma::GFX_RB_RPTR) / 4,
+            mem.read32(self.base + SDMA_SEQ_AT),
+            w.read32(amdgpu::sdma::STATUS_REG)
+        ));
+    }
+}
+
+/// Starts system DMA engine 0 and tests it: a word written, then a fence
+/// (07 section 4). Its firmware has been loaded by the security processor.
+///
+/// # Errors
+///
+/// [`Stopped::Stalled`] if the test packets are not read.
+pub(crate) fn start_sdma(
+    gpu: &Arc<Aperture>,
+    log: &dyn Fn(core::fmt::Arguments<'_>),
+) -> Result<Sdma, Stopped> {
+    let w = Bar5(gpu);
+    let base = u64::from(w.read32(amdgpu::flip::FB_LOCATION_BASE) & 0xffff) << 24;
+    let mem = crate::psp::vram_memory(gpu, base);
+    for at in (0..0x1_1000u64).step_by(4) {
+        gpu.vram_write32(usize::try_from(SDMA_AT + at).unwrap_or(0), 0);
+    }
+    let _ = gpu.vram_read32(0);
+    amdgpu::flip::hdp_flush(&w);
+    // The doorbell range, then the engine.
+    amdgpu::doorbell::program_sdma0_range(&w);
+    let ring = amdgpu::sdma::Ring {
+        base: base + SDMA_AT,
+        bytes: SDMA_RING_BYTES,
+        rptr_report: base + SDMA_REPORT_AT,
+        wptr_poll: base + SDMA_POLL_AT,
+    };
+    amdgpu::sdma::start(&w, &ring, &|us| bus::manager().delay_us(u64::from(us)));
+    let mut s = Sdma { base, wptr: 0 };
+    // The test: a word, then a fence.
+    let mut p = amdgpu::sdma::Packets::new();
+    p.write_linear(base + SDMA_TEST_AT, &[0x5d4a_0001]);
+    p.fence(s.seq_address(), 1);
+    s.submit(gpu, &mem, &p.0);
+    let mut word = 0;
+    let mut fence = 0;
+    for _ in 0..200 {
+        mem.invalidate();
+        word = mem.read32(base + SDMA_TEST_AT);
+        fence = mem.read32(base + SDMA_SEQ_AT);
+        if word == 0x5d4a_0001 && fence == 1 {
+            break;
+        }
+        bus::manager().delay_us(1000);
+    }
+    log(format_args!(
+        "SDMA: ring test: word {word:#010x} ({}), fence {fence} ({}); STATUS {:#x}, F32_CNTL {:#x}",
+        if word == 0x5d4a_0001 {
+            "seen"
+        } else {
+            "NOT seen"
+        },
+        if fence == 1 { "seen" } else { "NOT seen" },
+        w.read32(amdgpu::sdma::STATUS_REG),
+        w.read32(amdgpu::sdma::F32_CNTL),
+    ));
+    s.report(gpu, log);
+    if word != 0x5d4a_0001 || fence != 1 {
+        return Err(Stopped::Stalled(
+            "SDMA",
+            mem.read32(base + SDMA_REPORT_AT),
+            0,
+        ));
+    }
+    // The jobs' numbers start at 1: the test's fence word goes back to 0.
+    gpu.vram_write32(usize::try_from(SDMA_SEQ_AT).unwrap_or(0), 0);
+    let _ = gpu.vram_read32(0);
+    Ok(s)
+}

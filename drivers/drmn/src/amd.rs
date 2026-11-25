@@ -95,6 +95,8 @@ pub(crate) struct Amd {
     modeset_busy: core::sync::atomic::AtomicBool,
     /// The graphics ring, once started (stage R4).
     gfx: SpinLock<Option<crate::gcring::Gfx>>,
+    /// System DMA engine 0, once started.
+    sdma: SpinLock<Option<crate::gcring::Sdma>>,
 }
 
 /// Where the GART's page table is in video memory (BAR0 offset): past the
@@ -147,6 +149,7 @@ impl Amd {
             me,
             modeset_busy: core::sync::atomic::AtomicBool::new(false),
             gfx: SpinLock::new(None),
+            sdma: SpinLock::new(None),
         }
     }
 
@@ -829,6 +832,9 @@ impl Amd {
         g.as_ref()
             .ok_or(abi::errno::Errno::ENXIO)?
             .hang_report(&gpu, &log);
+        if let Some(d) = self.sdma.lock().as_ref() {
+            d.report(&gpu, &log);
+        }
         Ok(())
     }
 
@@ -893,6 +899,11 @@ impl Amd {
         match crate::gcring::start(&gpu, &log) {
             Ok(g) => {
                 *self.gfx.lock() = Some(g);
+                // The system DMA engine too; the graphics ring works without.
+                match crate::gcring::start_sdma(&gpu, &log) {
+                    Ok(d) => *self.sdma.lock() = Some(d),
+                    Err(e) => self.log(format_args!("SDMA: not started: {e:?}")),
+                }
                 true
             }
             Err(e) => {
@@ -900,6 +911,16 @@ impl Amd {
                 false
             }
         }
+    }
+
+    /// Whether system DMA engine 0 has been started.
+    pub(crate) fn sdma_ready(&self) -> bool {
+        self.sdma.lock().is_some()
+    }
+
+    /// The started system DMA engine, locked.
+    pub(crate) fn sdma_lock(&self) -> sync::SpinGuard<'_, Option<crate::gcring::Sdma>> {
+        self.sdma.lock()
     }
 
     /// Whether the graphics ring has been started.

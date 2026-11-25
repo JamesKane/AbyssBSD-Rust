@@ -148,6 +148,14 @@ impl Device {
         }
     }
 
+    /// The device as a driver that runs the graphics ring and the DMA engine
+    /// reports it: compute answers as absent.
+    #[must_use]
+    pub fn without_compute(mut self) -> Self {
+        self.ips.retain(|i| i.kind != ip::COMPUTE);
+        self
+    }
+
     /// The device as a driver that runs only the graphics ring reports it:
     /// the compute and DMA engines answer as absent (no rings, count 0), so
     /// clients keep all their work on the graphics ring.
