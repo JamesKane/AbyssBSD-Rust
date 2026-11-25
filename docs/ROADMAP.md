@@ -471,17 +471,16 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
 **Open:**
 - **Performance** (the exit's gate: every suite within 2% of FreeBSD on the board, per core class,
   P7's over `rge`). Last reports, ten AbyssBSD runs, each on a fresh boot, against the three
-  golden FreeBSD runs (`tests/perf/board/golden/`), AbyssBSD's kernel at `8c3a7ae`: `p4`, `p5`, `p6`
-  (`2026-11-25-8c3a7ae-gate10-p456.txt`, overall 0.55 to 0.57) and `p2`
-  (`2026-11-25-8c3a7ae-gate10-p2.txt`, 0.58 to 0.63) pass every component on every core class. `p2`'s
+  golden FreeBSD runs (`tests/perf/board/golden/`): `p4`, `p5`, `p6`
+  (`2026-11-25-8c3a7ae-gate10-p456.txt`, overall 0.55 to 0.57), `p2`
+  (`2026-11-25-8c3a7ae-gate10-p2.txt`, 0.58 to 0.63) and `p7` over `rge`
+  (`2026-11-25-77c4e93-gate10-p7.txt`, 0.43 to 0.49) pass every component on every core class. `p2`'s
   `mtx` on the little cores read 1.058 at three runs and is 1.006 at ten: the PMU counts
   (`abyss.bench=mtxpmu`) show the same 84 instructions an operation at two threads on every kernel,
   and at four threads the mutex is unfair (two of the four workers take nearly every operation, which
-  two varies), so its time is a coin. To do:
-  - `p7`'s ten runs, on the kernel with the TCP fix (`77c4e93`): at `8c3a7ae` the seventh run
-    died in `tcp.connect.lo` when a SYN met a connection that had just ended (a reset, so
-    `ECONNREFUSED` to a live listener, about one loopback run in twenty-five); 150 runs after the fix
-    had none;
+  two varies), so its time is a coin. The ten-run gate also found a TCP defect, fixed in `77c4e93`:
+  a SYN that met a connection which had just ended got a reset (`ECONNREFUSED` to a live listener,
+  about one loopback run in twenty-five; 150 runs after the fix had none). To do:
   - the SMMU's stage 6 (IOMMU.md §10: sync once per unmap, range invalidation, `rge` and `vtnet`
     transmit bounce, the low-memory check), each after its audit against FreeBSD's design;
   - benchmarks behind inside passing components: `p7` `tcp.rr.lo.p50` (1.40 on the big cores),
@@ -497,9 +496,13 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
     knote's filter is still its own allocation;
   - the kernel's profiler drops samples taken in user mode (`prof.rs`: `USER` and `OTHER` are the
     same bit).
-- **The board does not always come back from a reset** (three times in some forty): the system
-  shuts down, issues the reset (`PSCI SYSTEM_RESET` on AbyssBSD's console), and no loader starts;
-  a power cycle recovers. Seen from both kernels, so the firmware's reset path is the suspect.
+- **The board does not always come back from a reset** (three times in some forty, and once more
+  in about a hundred reboots on 2026-11-25, on a reboot of AbyssBSD into itself through `BootNext`):
+  the system shuts down (`shutdown: reboot by root` and `syslogd` exiting are the last lines logged),
+  and no loader starts; a power cycle recovers, and `BootNext` is still set then. Seen from both
+  kernels, so the firmware's reset path is the suspect. No serial capture was running, and the
+  loader left no `PREVLOG.TXT`; the next failure needs the FTDI adapter on `/dev/ttyUSB0`
+  capturing from the start.
 - **Hangs seen once, not reproduced:** a held key on `vt`; `aarch64-el2` (INTx) in
   `tests/user/cam`, once in three runs in QEMU.
 - **`devinfo` against the board's FreeBSD** (tests/corpus/opi6p/freebsd/devinfo-rv.txt): the RX8900,
