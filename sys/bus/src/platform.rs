@@ -57,6 +57,12 @@ pub trait Platform: Sync {
     /// Busy-waits for `us` microseconds (FreeBSD's `DELAY`): the short,
     /// polled waits register protocols need, too short to sleep for.
     fn delay_us(&self, us: u64);
+    /// The bytes of the first valid ACPI table with signature `sig`, if the
+    /// firmware gave one (a driver reads the video BIOS table this way).
+    fn acpi_table(&self, sig: [u8; 4]) -> Option<alloc::vec::Vec<u8>> {
+        let _ = sig;
+        None
+    }
     /// A console line (attach messages, diagnostics).
     fn log(&self, args: core::fmt::Arguments<'_>);
 }

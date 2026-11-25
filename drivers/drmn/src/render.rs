@@ -300,6 +300,31 @@ impl Render {
         Arc::clone(&self.queue)
     }
 
+    /// After a chip reset built the rings again: every job up to the last of
+    /// each engine is completed (its fence word is written), every context
+    /// reads that a reset happened, and waiters wake.
+    pub(crate) fn after_reset(&self, amd: &Amd) {
+        let Ok(gpu) = amd.gpu_arc() else {
+            return;
+        };
+        if let Some(g) = amd.gfx_lock().as_ref() {
+            g.complete_gfx(&gpu, self.last_seq(Engine::Gfx));
+            for q in 0..COMPUTE_QUEUES {
+                g.complete_compute(
+                    &gpu,
+                    q,
+                    self.last_seq(Engine::Compute(u8::try_from(q).unwrap_or(0))),
+                );
+            }
+        }
+        if let Some(d) = amd.sdma_lock().as_ref() {
+            d.complete(&gpu, self.last_seq(Engine::Dma));
+        }
+        self.resets.fetch_add(1, Ordering::AcqRel);
+        *self.watch.lock() = [None; ENGINES];
+        self.queue.wake_all();
+    }
+
     /// Whether `engine` has a job that has made no progress for two seconds;
     /// if so the ring is reset (10 section 4: the queue's own reset) and the
     /// jobs it held are completed. Returns whether it reset one. Called by

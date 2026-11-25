@@ -5,3 +5,4 @@
 .idea/
 .vscode/
 /.claude/worktrees/
+/tests/corpus/x870e/vbios.bin

@@ -125,6 +125,10 @@ impl Platform for KernelPlatform {
         crate::time::wait_timeout(s, q, cond, ns)
     }
 
+    fn acpi_table(&self, sig: [u8; 4]) -> Option<alloc::vec::Vec<u8>> {
+        crate::acpi::find(sig).map(|t| t.bytes().to_vec())
+    }
+
     fn delay_us(&self, us: u64) {
         let ticks = u128::from(us) * u128::from(crate::time::frequency()) / 1_000_000;
         let start = crate::time::counter();

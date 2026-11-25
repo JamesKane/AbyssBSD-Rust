@@ -23,6 +23,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod atom;
 pub mod ddc;
 pub mod discovery;
 pub mod display;
@@ -46,6 +47,8 @@ pub mod pm4;
 pub mod psp;
 pub mod regs;
 pub mod sdma;
+pub mod smu;
 pub mod timing;
 pub mod uapi;
+pub mod vbios;
 pub mod vm;

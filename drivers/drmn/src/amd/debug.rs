@@ -12,6 +12,86 @@ use super::{Amd, Bar5};
 use amdgpu::{display, regs};
 
 impl Amd {
+    /// Resets the whole chip and builds everything again (see `reset.rs`),
+    /// on a kernel thread: the log says how it went. A hazard for the
+    /// display.
+    pub(crate) fn chip_reset_trigger(&self) -> Result<(), abi::errno::Errno> {
+        let me = self.me.upgrade().ok_or(abi::errno::Errno::ENXIO)?;
+        sched::spawn("amd-reset", sched::Priority::KERNEL, move |s| {
+            let r = me.chip_reset(s);
+            me.log(format_args!("chip reset: finished: {r:?}"));
+        })
+        .map(|_| ())
+        .map_err(|_| abi::errno::Errno::EAGAIN)
+    }
+
+    /// Runs the video BIOS's ASIC-init table on the running chip (the table
+    /// is for a chip that was just reset): left as a way to test the
+    /// interpreter on hardware; it writes a few registers.
+    pub(crate) fn asic_init_trigger(&self) -> Result<(), abi::errno::Errno> {
+        self.asic_init()
+    }
+
+    /// Asks the power management firmware two harmless questions (its
+    /// version and its driver-interface version), and logs whether it is
+    /// running: the check of the mailbox's address (04 section 1).
+    pub(crate) fn smu_probe(&self) -> Result<(), abi::errno::Errno> {
+        use amdgpu::smu;
+        let gpu = self.gpu()?;
+        let w = Bar5(&gpu);
+        let pause = |us: u32| bus::manager().delay_us(u64::from(us));
+        self.log(format_args!(
+            "SMU: firmware flags {:#x} (running: {})",
+            smu::read(&w, smu::FIRMWARE_FLAGS),
+            smu::running(&w)
+        ));
+        let mut ok = true;
+        for (name, m) in [
+            ("version", smu::message::GET_VERSION),
+            (
+                "driver interface",
+                smu::message::GET_DRIVER_INTERFACE_VERSION,
+            ),
+        ] {
+            match smu::send(&w, m, 0, 2_000_000, &pause) {
+                Ok(v) => {
+                    let (program, major, minor, debug) = smu::version_fields(v);
+                    self.log(format_args!(
+                        "SMU: {name} {v:#x} (as a version: {program}.{major}.{minor}.{debug})"
+                    ));
+                }
+                Err(e) => {
+                    ok = false;
+                    self.log(format_args!("SMU: {name}: {e:?}"));
+                }
+            }
+        }
+        if ok {
+            Ok(())
+        } else {
+            Err(abi::errno::Errno::EIO)
+        }
+    }
+
+    /// Logs the platform's video BIOS in hex, 64 bytes a line (to keep a
+    /// copy for the interpreter's tests; reads only).
+    pub(crate) fn vbios_dump(&self) -> Result<(), abi::errno::Errno> {
+        let Some(image) = self.vbios_image() else {
+            self.log(format_args!("VBIOS: no image"));
+            return Err(abi::errno::Errno::ENXIO);
+        };
+        self.log(format_args!("VBIOS: {} bytes", image.len()));
+        for (i, line) in image.chunks(64).enumerate() {
+            let mut text = alloc::string::String::new();
+            for b in line {
+                use core::fmt::Write as _;
+                let _ = write!(text, "{b:02x}");
+            }
+            self.log(format_args!("VBIOS: {:05x}: {text}", i * 64));
+        }
+        Ok(())
+    }
+
     /// Preempts the DMA engine's queue and lets it run again (07 section 8),
     /// and logs whether its fence appeared.
     pub(crate) fn sdma_preempt(&self) -> Result<(), abi::errno::Errno> {
@@ -806,6 +886,26 @@ pub(super) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             "sdma_preempt",
             "Write 1 to preempt the DMA engine's queue and let it run again, and log whether its fence was written",
             Amd::sdma_preempt,
+        ),
+        (
+            "chip_reset",
+            "Write 1 to reset the whole chip through the power firmware and build everything again (on a kernel thread; see the log). The display may go",
+            Amd::chip_reset_trigger,
+        ),
+        (
+            "asic_init",
+            "Write 1 to run the video BIOS's initialisation table on the running chip (it writes a few registers)",
+            Amd::asic_init_trigger,
+        ),
+        (
+            "smu_probe",
+            "Write 1 to ask the power management firmware for its version and log it (harmless messages; checks the mailbox's address)",
+            Amd::smu_probe,
+        ),
+        (
+            "vbios_dump",
+            "Write 1 to log the platform's video BIOS in hex (reads only)",
+            Amd::vbios_dump,
         ),
         (
             "gc_preempt",

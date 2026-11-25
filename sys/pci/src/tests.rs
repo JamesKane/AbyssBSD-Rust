@@ -871,3 +871,73 @@ fn bridge_windows() {
     // The probe put back what it wrote.
     assert_eq!(*sky1.regs.borrow().get(&0x1c).unwrap(), 0);
 }
+
+#[test]
+fn a_functions_configuration_space_is_saved_and_put_back_after_a_reset() {
+    use crate::bus::{PciBusData, PciChild};
+    use alloc::sync::Arc;
+
+    let cfg: &'static Shared = alloc::boxed::Box::leak(alloc::boxed::Box::new(Shared(
+        std::sync::Mutex::new([0; 1024]),
+    )));
+    let addr = PciAddress {
+        domain: 0,
+        bus: 0,
+        slot: 4,
+        function: 0,
+    };
+    let function = Function {
+        addr,
+        header: header::read(
+            &{
+                let f = Fake::default();
+                f.add(0, 4, 0, device(0x1002, 0x164e, 0x03_00_00, 0));
+                f
+            },
+            addr,
+        )
+        .unwrap(),
+        bars: Vec::new(),
+        bad_bars: Vec::new(),
+        maps: Vec::new(),
+        caps: Vec::new(),
+        ext_caps: Vec::new(),
+        bridge: None,
+        depth: 0,
+    };
+    let child = PciChild {
+        vpd: sync::Once::new(),
+        cfg,
+        function,
+        bus: Arc::new(PciBusData {
+            cfg,
+            adr_paths: Vec::new(),
+            intx: Vec::new(),
+            depth: 0,
+            upstream: crate::requester::Upstream::Host,
+        }),
+    };
+    {
+        let mut c = cfg.0.lock().unwrap();
+        // Memory decoding and bus mastering on, status bits set.
+        c[1] = 0x0210_0006;
+        // A base address register, the message-signalled interrupt's
+        // address and data, an extended capability's body.
+        c[4] = 0xe000_000c;
+        c[0x68 / 4] = 0xfee0_0000;
+        c[0x6c / 4] = 0x0000_4041;
+        c[0x108 / 4] = 0x1234_5678;
+    }
+    let saved = child.save_state();
+    assert_eq!(saved.dword(0x10), Some(0xe000_000c));
+    // The reset clears everything.
+    cfg.0.lock().unwrap().fill(0);
+    child.restore_state(&saved);
+    let c = cfg.0.lock().unwrap();
+    assert_eq!(c[4], 0xe000_000c, "the base address register");
+    assert_eq!(c[0x68 / 4], 0xfee0_0000, "the interrupt's address");
+    assert_eq!(c[0x6c / 4], 0x0000_4041, "its data");
+    assert_eq!(c[0x108 / 4], 0x1234_5678, "an extended capability");
+    // The command register is back, without the status half.
+    assert_eq!(c[1], 0x0000_0006);
+}

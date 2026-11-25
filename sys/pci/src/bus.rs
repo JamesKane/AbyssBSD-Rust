@@ -72,6 +72,23 @@ impl core::fmt::Debug for PciChild {
     }
 }
 
+/// How many dwords a function's configuration space has (4 KiB).
+const STATE_DWORDS: usize = 1024;
+
+/// A function's configuration space as it was: see [`PciChild::save_state`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigState {
+    dwords: Vec<u32>,
+}
+
+impl ConfigState {
+    /// The saved dword at byte offset `offset`.
+    #[must_use]
+    pub fn dword(&self, offset: u16) -> Option<u32> {
+        self.dwords.get(usize::from(offset) / 4).copied()
+    }
+}
+
 /// A write to a field the bus owns, or outside configuration space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Protected;
@@ -141,6 +158,46 @@ impl PciChild {
         self.writable(offset, 4)?;
         self.cfg.write32(self.function.addr, offset, v);
         Ok(())
+    }
+
+    /// The function's whole configuration space, to put back after a reset
+    /// that clears it (a graphics chip reset): the header, the capabilities
+    /// (the message-signalled interrupt's address and data among them) and
+    /// the extended ones.
+    #[must_use]
+    pub fn save_state(&self) -> ConfigState {
+        let a = self.function.addr;
+        ConfigState {
+            dwords: (0..STATE_DWORDS)
+                .map(|i| self.cfg.read32(a, u16::try_from(i * 4).unwrap_or(0)))
+                .collect(),
+        }
+    }
+
+    /// Writes a saved configuration space back: the registers from the
+    /// base address registers up (the capabilities and the extended
+    /// capabilities in the order they were found, which keeps a
+    /// capability's header ahead of its body), then the command register
+    /// last, so the function decodes and masters the bus only once the rest
+    /// is in place. The status bits that clear when written are not written.
+    pub fn restore_state(&self, saved: &ConfigState) {
+        let a = self.function.addr;
+        let at = |i: usize| u16::try_from(i * 4).unwrap_or(0);
+        // The base address registers, the expansion ROM, the interrupt line:
+        // 0x10 to 0x3c.
+        for i in 4..16 {
+            if let Some(v) = saved.dwords.get(i) {
+                self.cfg.write32(a, at(i), *v);
+            }
+        }
+        // Everything after the header.
+        for i in 16..saved.dwords.len() {
+            self.cfg.write32(a, at(i), saved.dwords[i]);
+        }
+        // The command register (the status half left clear).
+        if let Some(v) = saved.dwords.get(1) {
+            self.cfg.write32(a, 0x04, v & 0xffff);
+        }
     }
 
     /// Sets and clears command bits, the change in effect on return

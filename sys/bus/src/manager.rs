@@ -480,6 +480,12 @@ impl Manager {
         self.platform.wait_timeout(s, q, cond, ns)
     }
 
+    /// The bytes of the ACPI table with signature `sig` (see
+    /// [`Platform::acpi_table`]).
+    pub fn acpi_table(&self, sig: [u8; 4]) -> Option<alloc::vec::Vec<u8>> {
+        self.platform.acpi_table(sig)
+    }
+
     /// Busy-waits for `us` microseconds (FreeBSD's `DELAY`): a register
     /// protocol's short polled wait, in any context.
     pub fn delay_us(&self, us: u64) {

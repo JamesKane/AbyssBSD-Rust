@@ -27,6 +27,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
 mod debug;
+mod reset;
 
 use amdgpu::discovery::{Discovery, hw};
 use amdgpu::{display, regs};
@@ -100,6 +101,11 @@ pub(crate) struct Amd {
     gfx: SpinLock<Option<crate::gcring::Gfx>>,
     /// System DMA engine 0, once started.
     sdma: SpinLock<Option<crate::gcring::Sdma>>,
+    /// A chip reset is running.
+    reset_busy: core::sync::atomic::AtomicBool,
+    /// The render interface, once the card has one (a reset completes its
+    /// jobs).
+    render: SpinLock<Option<Weak<crate::render::Render>>>,
     /// What the monitor's EDID said, if it was read (stage R3.5).
     sink: SpinLock<Option<edid::Edid>>,
 }
@@ -156,6 +162,8 @@ impl Amd {
             gfx: SpinLock::new(None),
             sdma: SpinLock::new(None),
             sink: SpinLock::new(None),
+            reset_busy: core::sync::atomic::AtomicBool::new(false),
+            render: SpinLock::new(None),
         }
     }
 
@@ -259,6 +267,7 @@ impl Amd {
         };
         let render = crate::render::Render::new(self.me.clone(), 512 << 20);
         // A fence's interrupt wakes whoever waits for a job.
+        *self.render.lock() = Some(Arc::downgrade(&render));
         let queue = render.queue();
         let _ = self.irq.set_on_eop(Box::new(move || {
             queue.wake_all();
@@ -462,6 +471,24 @@ impl Amd {
             }
             Err(e) => self.log(format_args!("PSP: stopped: {e:?}")),
         }
+    }
+
+    /// The device's video BIOS: the image its `VFCT` table holds (01 section
+    /// 5.2). A chip reset's re-initialisation runs the image's command
+    /// tables. `None` without the table or a block for this device.
+    pub(crate) fn vbios_image(&self) -> Option<Vec<u8>> {
+        let gpu = self.gpu().ok()?;
+        let vfct = bus::manager().acpi_table(*b"VFCT")?;
+        let a = gpu.pci().function.addr;
+        let ident = gpu.pci().function.header.ident;
+        amdgpu::vbios::vfct_image(
+            &vfct,
+            ident.vendor,
+            ident.device,
+            u32::from(a.slot),
+            u32::from(a.function),
+        )
+        .ok()
     }
 
     /// The aperture, for the render interface.

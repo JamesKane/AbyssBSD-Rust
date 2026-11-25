@@ -209,6 +209,49 @@ impl Irq {
         Ok(())
     }
 
+    /// Frame starts seen.
+    pub(crate) fn frames(&self) -> u64 {
+        self.frames.load(Ordering::Relaxed)
+    }
+
+    /// Makes the ring again after a chip reset cleared the handler's
+    /// registers: the vector's sink stays, the ring and the frame-start event
+    /// and (if it was in use) the doorbell are programmed afresh.
+    ///
+    /// # Errors
+    ///
+    /// `ENXIO` with no aperture, `EINVAL` for a ring the hardware does not
+    /// take.
+    pub(crate) fn restart(&self) -> Result<(), abi::errno::Errno> {
+        use abi::errno::Errno;
+        let gpu = self.gpu.upgrade().ok_or(Errno::ENXIO)?;
+        let w = Bar5(&gpu);
+        let base = u64::from(w.read32(flip::FB_LOCATION_BASE) & 0xffff) << 24;
+        for at in (0..RING_BYTES as usize + 16).step_by(4) {
+            gpu.vram_write32(RING_AT + at, 0);
+        }
+        self.rptr.store(0, Ordering::Release);
+        let ring = ih::Ring {
+            address: base + RING_AT as u64,
+            bytes: RING_BYTES,
+            writeback: base + WRITEBACK_AT as u64,
+            snoop: false,
+        };
+        self.active.store(true, Ordering::Release);
+        if ih::bring_up(&w, &ring, true).is_err() {
+            self.active.store(false, Ordering::Release);
+            return Err(Errno::EINVAL);
+        }
+        w.write32(
+            OTG0_GLOBAL_SYNC_STATUS,
+            (w.read32(OTG0_GLOBAL_SYNC_STATUS) & FRAME_START_ENABLE) | FRAME_START_ENABLE,
+        );
+        if self.doorbell.swap(false, Ordering::AcqRel) {
+            let _ = self.use_doorbell();
+        }
+        Ok(())
+    }
+
     /// Turns the display's frame-start event back on after the timing
     /// generator was stopped and started (a mode change), if the handler runs.
     pub(crate) fn rearm_frame_start(&self) {
