@@ -55,6 +55,17 @@ pub mod cmd {
     pub const SETUP_TMR: u32 = 0x05;
     /// Load an engine's firmware.
     pub const LOAD_IP_FW: u32 = 0x06;
+    /// Tell the security processor every graphics image has been delivered,
+    /// so the RLC brings the engines up from the trusted memory region
+    /// (command `0x21`, no arguments).
+    #[must_use]
+    pub fn start_rlc_autoload() -> Self {
+        Self {
+            id: cmd::START_RLC_AUTOLOAD,
+            args: [0; 8],
+        }
+    }
+
     /// Destroy the trusted memory region.
     pub const DESTROY_TMR: u32 = 0x07;
     /// Load the table of contents.
@@ -521,6 +532,10 @@ mod tests {
         assert_eq!(u32::from_le_bytes(t[0x30..0x34].try_into().unwrap()), 0x18);
         let f = Command::load_ip_firmware(0xf4_0b00_0000, 4096, 9).buffer();
         assert_eq!(u32::from_le_bytes(f[0x28..0x2c].try_into().unwrap()), 9);
+        // Start RLC autoload: command 0x21, no arguments.
+        let a = Command::start_rlc_autoload().buffer();
+        assert_eq!(u32::from_le_bytes(a[8..12].try_into().unwrap()), 0x21);
+        assert!(a[0x1c..0x3c].iter().all(|b| *b == 0));
         let fr = frame(0xf4_0a00_1000, 0xf4_0a00_2000, 7);
         assert_eq!(
             u32::from_le_bytes(fr[0..4].try_into().unwrap()),
