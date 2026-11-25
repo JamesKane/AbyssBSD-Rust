@@ -114,8 +114,16 @@ impl vfs::devices::Registry for TestDevfs {
         n.push((p, mode, gid));
         Some(1)
     }
-    fn alias(&self, _: &[u8], _: &[u8]) -> bool {
-        false
+    fn alias(&self, path: &[u8], target: &[u8]) -> bool {
+        let p = String::from_utf8(path.to_vec()).unwrap();
+        let t = String::from_utf8(target.to_vec()).unwrap();
+        let t = String::from(t.trim_start_matches("../"));
+        let mut n = NODES.lock().unwrap();
+        let Some((_, mode, gid)) = n.iter().find(|(q, ..)| *q == t).cloned() else {
+            return false;
+        };
+        n.push((p, mode, gid));
+        true
     }
     fn destroy(&self, _: &Sleepable, path: &[u8]) {
         let p = String::from_utf8(path.to_vec()).unwrap();
@@ -297,14 +305,24 @@ fn read_u64(b: &[u8], at: usize) -> u64 {
 #[test]
 fn registers_a_card_node_and_frees_the_unit() {
     let c = card(false, false);
-    let name = std::format!("dri/card{}", c.unit());
-    {
+    // The device is drm/<unit>; dri/card<unit> is the name clients open.
+    let names = [
+        std::format!("drm/{}", c.unit()),
+        std::format!("dri/card{}", c.unit()),
+    ];
+    for name in &names {
         let n = NODES.lock().unwrap();
-        let (_, mode, gid) = n.iter().find(|(p, ..)| *p == name).unwrap();
+        let (_, mode, gid) = n.iter().find(|(p, ..)| p == name).unwrap();
         assert_eq!((*mode, *gid), (0o660, 44));
     }
     c.unregister(&s());
-    assert!(NODES.lock().unwrap().iter().all(|(p, ..)| *p != name));
+    assert!(
+        NODES
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(p, ..)| !names.contains(p))
+    );
 }
 
 #[test]
@@ -335,7 +353,7 @@ fn caps() {
     assert_eq!(get(DRM_CAP_TIMESTAMP_MONOTONIC), Ok(1));
     assert_eq!(get(DRM_CAP_CURSOR_WIDTH), Ok(64));
     assert_eq!(get(DRM_CAP_ADDFB2_MODIFIERS), Ok(1));
-    assert_eq!(get(DRM_CAP_SYNCOBJ), Ok(0));
+    assert_eq!(get(DRM_CAP_SYNCOBJ), Ok(1));
     assert_eq!(get(0x1000), Ok(7));
     assert_eq!(get(0x7777), Err(Errno::EINVAL));
     c.unregister(&s());
@@ -2554,4 +2572,46 @@ fn a_render_file_takes_rendering_requests_and_no_mode_setting_or_mastership() {
     let m = open(&c);
     assert!(!m.is_render());
     assert!(card(false, false).open_render().is_err());
+}
+
+#[test]
+fn a_synchronisation_object_is_made_signalled_waited_for_and_reset() {
+    let c = card(true, true);
+    let f = open(&c);
+    let req = |nr: u32, size: u32| 0xc000_0000u32 | (size << 16) | (0x64 << 8) | nr;
+    // Made unsignalled: no fence in it yet.
+    let mut create = [0u8; 8];
+    call(&f, req(0xbf, 8), &mut create).unwrap();
+    let h = u32::from_le_bytes(create[..4].try_into().unwrap());
+    assert_eq!(h, 1);
+    put(0x9000, &h.to_le_bytes());
+    let wait = |flags: u32, timeout: u64| {
+        let mut w = [0u8; 40];
+        w[..8].copy_from_slice(&(BASE + 0x9000).to_le_bytes());
+        w[8..16].copy_from_slice(&timeout.to_le_bytes());
+        w[16..20].copy_from_slice(&1u32.to_le_bytes());
+        w[20..24].copy_from_slice(&flags.to_le_bytes());
+        call(&f, req(0xc3, 40), &mut w)
+    };
+    // Nothing to wait for without "wait for submit".
+    assert_eq!(wait(0, 6_000_000_000), Err(Errno::EINVAL));
+    // With it, the time passes (the test's clock is fixed at 5 s).
+    assert_eq!(wait(2, 4_000_000_000), Err(Errno::ETIMEDOUT));
+    let mut arr = [0u8; 16];
+    arr[..8].copy_from_slice(&(BASE + 0x9000).to_le_bytes());
+    arr[8..12].copy_from_slice(&1u32.to_le_bytes());
+    call(&f, req(0xc5, 16), &mut arr).unwrap();
+    assert_eq!(wait(0, 6_000_000_000), Ok(0));
+    call(&f, req(0xc4, 16), &mut arr).unwrap();
+    assert_eq!(wait(0, 6_000_000_000), Err(Errno::EINVAL));
+    // Made signalled; a handle that is not there; destroyed.
+    let mut s = [0u8; 8];
+    s[4] = 1;
+    call(&f, req(0xbf, 8), &mut s).unwrap();
+    let mut d = [0u8; 8];
+    d[..4].copy_from_slice(&99u32.to_le_bytes());
+    assert_eq!(call(&f, req(0xc0, 8), &mut d), Err(Errno::EINVAL));
+    d[..4].copy_from_slice(&h.to_le_bytes());
+    call(&f, req(0xc0, 8), &mut d).unwrap();
+    assert_eq!(wait(0, 6_000_000_000), Err(Errno::ENOENT));
 }

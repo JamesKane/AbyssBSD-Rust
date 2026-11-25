@@ -148,6 +148,15 @@ impl Device {
         }
     }
 
+    /// The device as a driver that runs only the graphics ring reports it:
+    /// the compute and DMA engines answer as absent (no rings, count 0), so
+    /// clients keep all their work on the graphics ring.
+    #[must_use]
+    pub fn graphics_only(mut self) -> Self {
+        self.ips.retain(|i| i.kind == ip::GFX);
+        self
+    }
+
     fn heaps(&self, live: &dyn Live) -> (Heap, Heap, Heap) {
         let usable = self.vram.saturating_sub(PAGE_TABLE_RESERVE);
         let visible = self.vram_visible.min(usable);
@@ -253,12 +262,12 @@ pub fn answer(dev: &Device, live: &dyn Live, req: &InfoRequest) -> Result<Vec<u8
             .encode()
         }
         query::HW_IP_COUNT => {
-            let count = dev
-                .ips
-                .iter()
-                .find(|i| i.kind == req.arg0)
-                .map(|i| i.count)
-                .ok_or(Error::Invalid)?;
+            let count = match dev.ips.iter().find(|i| i.kind == req.arg0) {
+                Some(i) => i.count,
+                // An engine type that exists but is not there counts 0.
+                None if req.arg0 <= 6 => 0,
+                None => return Err(Error::Invalid),
+            };
             le32(count)
         }
         query::TIMESTAMP => le64(live.timestamp()),
@@ -422,6 +431,27 @@ mod tests {
             1
         );
         assert_eq!(ask(query::HW_IP_COUNT, 7, 0, 0, 4), Err(Error::Invalid));
+    }
+
+    #[test]
+    fn a_graphics_only_device_has_no_compute_or_dma() {
+        let dev = Device::raphael(512 << 20, 16 << 30).graphics_only();
+        let ask = |q: u32, t: u32| {
+            let req = InfoRequest {
+                return_pointer: 0x1000,
+                return_size: if q == query::HW_IP_COUNT { 4 } else { 40 },
+                query: q,
+                arg0: t,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+            };
+            answer(&dev, &Fake, &req).unwrap()
+        };
+        assert_eq!(u32_at(&ask(query::HW_IP_COUNT, ip::GFX), 0), 1);
+        assert_eq!(u32_at(&ask(query::HW_IP_COUNT, ip::COMPUTE), 0), 0);
+        assert_eq!(u32_at(&ask(query::HW_IP_COUNT, ip::DMA), 0), 0);
+        assert!(ask(query::HW_IP_INFO, ip::DMA).iter().all(|b| *b == 0));
     }
 
     #[test]

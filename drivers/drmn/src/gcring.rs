@@ -62,12 +62,16 @@ struct Ring {
     bytes: u32,
     /// The doorbell's byte offset in BAR2.
     doorbell: usize,
-    /// The write pointer, in dwords.
-    wptr: u32,
+    /// The write pointer, in dwords: a count that never wraps (the queue's
+    /// 64-bit pointers); the ring offset is the count modulo the size.
+    wptr: u64,
     /// Whether the packets are compute packets.
     compute: bool,
     /// Where it reports its read pointer.
     report: u64,
+    /// Where the queue polls for the write pointer (a video memory offset):
+    /// the new value goes there before the doorbell is rung.
+    poll: u64,
 }
 
 /// The started graphics block.
@@ -108,12 +112,18 @@ impl Ring {
             p.mark_compute();
         }
         for d in &p.0 {
-            let at = self.at + 4 * u64::from(self.wptr);
+            let at = self.at + 4 * (self.wptr % u64::from(dwords));
             gpu.vram_write32(usize::try_from(at).unwrap_or(0), *d);
-            self.wptr = (self.wptr + 1) % dwords;
+            self.wptr += 1;
         }
         mem.flush();
-        gpu.doorbell_write64(self.doorbell, u64::from(self.wptr));
+        // The poll word first: the processor may read the pointer from it as
+        // well as from the doorbell.
+        let poll = usize::try_from(self.poll).unwrap_or(0);
+        gpu.vram_write32(poll, (self.wptr & 0xffff_ffff) as u32);
+        gpu.vram_write32(poll + 4, (self.wptr >> 32) as u32);
+        mem.flush();
+        gpu.doorbell_write64(self.doorbell, self.wptr);
     }
 
     /// Waits until the ring has reported reading everything written.
@@ -128,12 +138,17 @@ impl Ring {
         for _ in 0..ms {
             mem.invalidate();
             rptr = mem.read32(base + self.report);
-            if rptr == self.wptr {
+            if u64::from(rptr) % u64::from(self.bytes / 4) == self.wptr % u64::from(self.bytes / 4)
+            {
                 return Ok(());
             }
             bus::manager().delay_us(1000);
         }
-        Err(Stopped::Stalled(name, rptr, self.wptr))
+        Err(Stopped::Stalled(
+            name,
+            rptr,
+            (self.wptr & 0xffff_ffff) as u32,
+        ))
     }
 }
 
@@ -223,6 +238,7 @@ pub(crate) fn start(
         wptr: 0,
         compute: true,
         report: KIQ_REPORT_AT,
+        poll: KIQ_WPTR_POLL_AT,
     };
     // The KIQ test: a write of a word to memory through it.
     let mut p = Packets::new();
@@ -252,7 +268,7 @@ pub(crate) fn start(
         return Err(Stopped::Stalled(
             "KIQ",
             mem.read32(base + KIQ_REPORT_AT),
-            kiq_ring.wptr,
+            (kiq_ring.wptr & 0xffff_ffff) as u32,
         ));
     }
 
@@ -302,6 +318,7 @@ pub(crate) fn start(
         wptr: 0,
         compute: false,
         report: GFX_REPORT_AT,
+        poll: GFX_WPTR_POLL_AT,
     };
     let mut p = csb;
     p.extend(gc::set_base_packets());
@@ -326,6 +343,29 @@ pub(crate) fn start(
 const SEQ_AT: u64 = GFX_REPORT_AT + 0x400;
 
 impl Gfx {
+    /// Logs where the ring is and the dwords around its read pointer (a
+    /// diagnostic for a stuck engine; reads only).
+    pub(crate) fn hang_report(&self, gpu: &Arc<Aperture>, log: &dyn Fn(core::fmt::Arguments<'_>)) {
+        let mem = crate::psp::vram_memory(gpu, self.base);
+        mem.invalidate();
+        let size = self.gfx.bytes / 4;
+        // The live pointer (the report word is written lazily).
+        let rptr = Bar5(gpu).read32(gc::CP_RB0_RPTR) % size;
+        log(format_args!(
+            "GC: ring: write pointer {}, read pointer {rptr}, last finished job {}",
+            self.gfx.wptr % u64::from(size),
+            self.finished(gpu)
+        ));
+        let from = rptr.saturating_sub(24);
+        for i in from..(rptr + 12).min(size) {
+            log(format_args!(
+                "GC:   ring[{i}] = {:#010x}{}",
+                mem.read32(self.base + self.gfx.at + 4 * u64::from(i)),
+                if i == rptr { "   <- read pointer" } else { "" }
+            ));
+        }
+    }
+
     /// The GPU address of the fence word.
     pub(crate) fn seq_address(&self) -> u64 {
         self.base + SEQ_AT
@@ -355,7 +395,8 @@ impl Gfx {
         for _ in 0..=ms {
             mem.invalidate();
             let rptr = mem.read32(self.base + self.gfx.report) % size;
-            let used = (self.gfx.wptr + size - rptr) % size;
+            let at = u32::try_from(self.gfx.wptr % u64::from(size)).unwrap_or(0);
+            let used = (at + size - rptr) % size;
             if size - used > need + 1 {
                 self.gfx.submit(gpu, &mem, packets);
                 return Ok(());

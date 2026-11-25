@@ -332,6 +332,9 @@ pub(crate) fn dispatch(
     if file.render && !render_allowed(n) {
         return Err(Errno::ENOTTY);
     }
+    if let Some(r) = crate::syncobj::dispatch(file, n, arg) {
+        return r;
+    }
     if (DRM_COMMAND_BASE..DRM_COMMAND_END).contains(&n) {
         return file
             .card
@@ -460,7 +463,8 @@ fn get_cap(f: &Open, a: &mut DrmGetCap) -> Result<usize, Errno> {
         DRM_CAP_ASYNC_PAGE_FLIP | DRM_CAP_PAGE_FLIP_TARGET => 0,
         DRM_CAP_CURSOR_WIDTH | DRM_CAP_CURSOR_HEIGHT => 64,
         DRM_CAP_ADDFB2_MODIFIERS | DRM_CAP_CRTC_IN_VBLANK_EVENT => u64::from(d.has_kms()),
-        DRM_CAP_SYNCOBJ | DRM_CAP_SYNCOBJ_TIMELINE | DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP => 0,
+        DRM_CAP_SYNCOBJ => 1,
+        DRM_CAP_SYNCOBJ_TIMELINE | DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP => 0,
         other => d.cap(other).ok_or(Errno::EINVAL)?,
     };
     Ok(0)

@@ -115,6 +115,13 @@ impl IoctlCx<'_> {
         Ok((handle, gem))
     }
 
+    /// The synchronisation object `handle` names in this file: its slot
+    /// holds the fence of the last submission put there.
+    #[must_use]
+    pub fn syncobj(&self, handle: u32) -> Option<crate::syncobj::Slot> {
+        self.file.syncobjs.lock().get(handle)
+    }
+
     /// Drops `handle` from this file.
     pub fn close_handle(&self, handle: u32) -> Option<Arc<Gem>> {
         self.file.handles.lock().remove(handle)

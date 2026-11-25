@@ -120,7 +120,9 @@ pub mod ctx_op {
     pub const ALLOC: u32 = 1;
     pub const FREE: u32 = 2;
     pub const QUERY: u32 = 3;
-    pub const QUERY2: u32 = 7;
+    pub const QUERY2: u32 = 4;
+    pub const GET_STABLE_PSTATE: u32 = 5;
+    pub const SET_STABLE_PSTATE: u32 = 6;
 }
 
 /// `DRM_AMDGPU_CTX` (16 bytes in and out).

@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use abi::errno::Errno;
 use amd_kms::Render as RenderApi;
 use amdgpu::info::{self, Device, Live};
-use amdgpu::pm4::acquire;
+use amdgpu::pm4::Packets;
 use amdgpu::uapi::{self, InfoRequest, cmd};
 use amdgpu::vm::{Flags, MemoryType, Space, Tables};
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -46,6 +46,41 @@ const GTT_BYTES: u64 = 16 << 30;
 /// The kernel's own VA reservation at the bottom of every space.
 const VA_MIN: u64 = 0x10000;
 const VA_MAX: u64 = 1 << 48;
+/// The start of the top 4 MiB of the address space, which the device
+/// information leaves to the kernel.
+const KERNEL_VA: u64 = VA_MAX - (4 << 20);
+/// The top 1 MiB of it: the pages of small buffers the kernel writes for a
+/// job (the packet that writes a client's fence word), mapped from video
+/// memory. The engine writes a client's fence word with the job's own address
+/// space, so the packet runs from a buffer there, not in the ring (whose
+/// packets use the kernel's).
+const FENCE_IB_VA: u64 = VA_MAX - (1 << 20);
+/// Pages of those a file has (a job's page is its number modulo this).
+const FENCE_IB_PAGES: u64 = 16;
+const FENCE_IB_PAGES_U32: u32 = 16;
+/// Where they are in video memory: 64 KiB for each file, from here.
+const FENCE_IB_AT: u64 = 192 << 20;
+
+/// The address as the engine's packets carry it: the high half of the 48-bit
+/// space (bit 47 set) has the top 16 bits set too; the hardware refuses an
+/// address that does not repeat bit 47 there.
+fn extended(va: u64) -> u64 {
+    if va & (1 << 47) != 0 {
+        va | (0xffff << 48)
+    } else {
+        va
+    }
+}
+
+/// The 48-bit address a client's address means: the translation uses the
+/// low 48 bits, and the top 16 must repeat bit 47 (the high half of the space
+/// is written with them set).
+fn canonical(va: u64) -> Option<u64> {
+    match va >> 47 {
+        0 | 0x1_ffff => Some(va & (VA_MAX - 1)),
+        _ => None,
+    }
+}
 
 /// A buffer mapped into a file's address space.
 struct Mapping {
@@ -64,6 +99,11 @@ struct FileState {
     lists: Vec<u32>,
     /// The metadata a client keeps with a buffer, by handle.
     metadata: BTreeMap<u32, Vec<u8>>,
+    /// Where the next buffer the kernel maps for itself (a fence word) goes,
+    /// in the top 4 MiB the device information reserves.
+    kernel_next: u64,
+    /// Whether its fence-packet pages are mapped.
+    fence_pages: bool,
 }
 
 /// Numbers the interface hands out and counts.
@@ -86,6 +126,9 @@ pub(crate) struct Render {
     state: PreemptLock<State>,
     /// The last job's sequence number.
     seq: AtomicU32,
+    /// The context of the last job (a job from another one loads the
+    /// context's state).
+    last_ctx: AtomicU32,
     device: Device,
 }
 
@@ -100,6 +143,7 @@ impl Render {
         Arc::new(Self {
             amd,
             seq: AtomicU32::new(0),
+            last_ctx: AtomicU32::new(0),
             state: PreemptLock::new(State {
                 files: BTreeMap::new(),
                 slots: [false; VMIDS],
@@ -108,7 +152,7 @@ impl Render {
                     bytes: 0,
                 },
             }),
-            device: Device::raphael(vram_bytes, GTT_BYTES),
+            device: Device::raphael(vram_bytes, GTT_BYTES).graphics_only(),
         })
     }
 
@@ -146,6 +190,8 @@ impl Render {
                     contexts: Vec::new(),
                     lists: Vec::new(),
                     metadata: BTreeMap::new(),
+                    kernel_next: KERNEL_VA,
+                    fence_pages: false,
                 },
             );
         }
@@ -188,6 +234,8 @@ impl Render {
         if r.va_address % page != 0 || r.map_size % page != 0 || r.map_size == 0 {
             return Err(Errno::EINVAL);
         }
+        let mut r = r;
+        r.va_address = canonical(r.va_address).ok_or(Errno::EINVAL)?;
         let end = r.va_address.checked_add(r.map_size).ok_or(Errno::EINVAL)?;
         if r.va_address < VA_MIN || end > VA_MAX {
             return Err(Errno::EINVAL);
@@ -254,20 +302,63 @@ impl Render {
         }
     }
 
+    /// A submission; a refusal is logged with what was asked.
     fn cs(&self, cx: &IoctlCx<'_>, arg: &mut [u8]) -> Result<usize, Errno> {
+        let asked = uapi::CsRequest::decode(arg).ok();
+        let r = self.cs_run(cx, arg);
+        if let (Err(e), Some(q), Ok(amd)) = (&r, asked, self.amd()) {
+            amd.log(format_args!(
+                "render: submission refused ({e:?}): context {}, {} chunks, flags {:#x}",
+                q.ctx_id, q.num_chunks, q.flags
+            ));
+            for i in 0..u64::from(q.num_chunks.min(8)) {
+                let mut p = [0u8; 8];
+                let mut h = [0u8; 16];
+                if cx.copy_in(&mut p, q.chunks + 8 * i).is_ok()
+                    && cx.copy_in(&mut h, u64::from_le_bytes(p)).is_ok()
+                {
+                    let mut body = [0u8; 40];
+                    let n = (u32::from_le_bytes([h[4], h[5], h[6], h[7]]) as usize * 4).min(40);
+                    let _ = cx.copy_in(
+                        &mut body[..n],
+                        u64::from_le_bytes(h[8..16].try_into().unwrap_or([0; 8])),
+                    );
+                    amd.log(format_args!(
+                        "render:   chunk {i}: id {:#x} length {} dwords, data {:02x?}",
+                        u32::from_le_bytes([h[0], h[1], h[2], h[3]]),
+                        n / 4,
+                        &body[..n]
+                    ));
+                }
+            }
+        }
+        r
+    }
+
+    fn cs_run(&self, cx: &IoctlCx<'_>, arg: &mut [u8]) -> Result<usize, Errno> {
         let r = uapi::CsRequest::decode(arg).map_err(|_| Errno::EINVAL)?;
         if r.num_chunks == 0 || r.num_chunks > 64 {
             return Err(Errno::EINVAL);
         }
         // The chunks, read from the caller's memory before any lock.
+        let ctx_id = r.ctx_id;
         let mut ibs = Vec::new();
         let mut fence: Option<(u32, u32)> = None;
+        let mut out_syncobjs: Vec<u32> = Vec::new();
         for i in 0..u64::from(r.num_chunks) {
             let mut p = [0u8; 8];
             cx.copy_in(&mut p, r.chunks + 8 * i)?;
             let mut h = [0u8; 16];
             cx.copy_in(&mut h, u64::from_le_bytes(p))?;
             let c = uapi::Chunk::decode(&h).map_err(|_| Errno::EINVAL)?;
+            // The lists of buffers and the like are not needed: only the
+            // chunks read below are fetched.
+            if !matches!(
+                c.id,
+                uapi::chunk::IB | uapi::chunk::FENCE | uapi::chunk::SYNCOBJ_OUT
+            ) {
+                continue;
+            }
             let len = usize::try_from(c.length_dw).map_err(|_| Errno::EINVAL)? * 4;
             if len > 4096 {
                 return Err(Errno::EINVAL);
@@ -276,8 +367,15 @@ impl Render {
             cx.copy_in(&mut data, c.data)?;
             match c.id {
                 uapi::chunk::IB => {
-                    let ib = uapi::IbChunk::decode(&data).map_err(|_| Errno::EINVAL)?;
+                    let mut ib = uapi::IbChunk::decode(&data).map_err(|_| Errno::EINVAL)?;
+                    ib.va_start = canonical(ib.va_start).ok_or(Errno::EINVAL)?;
                     if ib.ip_type != uapi::ip::GFX || ib.ip_instance != 0 || ib.ring != 0 {
+                        if let Ok(amd) = self.amd() {
+                            amd.log(format_args!(
+                                "render: IB for ip {} instance {} ring {}",
+                                ib.ip_type, ib.ip_instance, ib.ring
+                            ));
+                        }
                         return Err(Errno::EINVAL);
                     }
                     ibs.push(ib);
@@ -287,8 +385,18 @@ impl Render {
                     let offset = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
                     fence = Some((handle, offset));
                 }
-                // Dependencies and synchronisation objects: every job is on
-                // one ring, in order; the buffer handles list is not needed
+                // The synchronisation objects to give this job's fence to.
+                uapi::chunk::SYNCOBJ_OUT => {
+                    out_syncobjs.extend(
+                        data.as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|c| u32::from_le_bytes(*c)),
+                    );
+                }
+                // Dependencies and synchronisation objects waited on: every
+                // job is on one ring, in order, and the fences of other
+                // owners are finished; the buffer handles list is not needed
                 // (every mapping stays resident).
                 _ => {}
             }
@@ -301,41 +409,173 @@ impl Render {
         let gpu = amd.gpu_arc()?;
         // The address space's root and the user fence's address, under the
         // state lock; the job itself under the ring's.
-        let (vmid, root, user_fence) = self.with_file(&amd, cx.file_id(), |fs, _| {
+        let fence_frames = match &user_fence_gem {
+            Some((gem, _)) => Some(gem.frames()?),
+            None => None,
+        };
+        let phys = amd.vram_phys()?;
+        let (vmid, slot, root, user_fence) = self.with_file(&amd, cx.file_id(), |fs, _| {
             let vmid = u32::try_from(fs.slot).unwrap_or(0) + 1;
             let root = fs.space.tables().address(fs.space.root()).0;
-            let user_fence = match &user_fence_gem {
-                Some((gem, off)) => Some(
-                    fs.maps
-                        .iter()
-                        .find(|m| Arc::ptr_eq(&m.gem, gem))
-                        .map(|m| m.va + off)
-                        .ok_or(Errno::EINVAL)?,
-                ),
-                None => None,
+            if !fs.fence_pages {
+                let at = phys + FENCE_IB_AT + ((fs.slot as u64) << 16);
+                fs.space
+                    .map(
+                        FENCE_IB_VA,
+                        FENCE_IB_PAGES,
+                        Flags {
+                            executable: true,
+                            ..Flags::VRAM_RW
+                        },
+                        |n| at + n * 4096,
+                    )
+                    .map_err(|_| Errno::ENOMEM)?;
+                fs.fence_pages = true;
+            }
+            // A fence word's buffer is named by handle, not by address: it is
+            // mapped here, once, if the client did not map it itself.
+            let user_fence = match (&user_fence_gem, &fence_frames) {
+                (Some((gem, off)), Some(frames)) => {
+                    let found = fs.maps.iter().find(|m| Arc::ptr_eq(&m.gem, gem));
+                    let va = match found {
+                        Some(m) => m.va,
+                        None => {
+                            let pages = frames.len() as u64;
+                            let va = fs.kernel_next;
+                            if va + pages * 4096 > FENCE_IB_VA {
+                                return Err(Errno::ENOMEM);
+                            }
+                            fs.space
+                                .map(va, pages, Flags::SYSTEM_RW, |n| {
+                                    frames
+                                        .get(usize::try_from(n).unwrap_or(0))
+                                        .map_or(0, |p| p.0 * 4096)
+                                })
+                                .map_err(|_| Errno::ENOMEM)?;
+                            fs.kernel_next += pages * 4096;
+                            fs.maps.push(Mapping {
+                                va,
+                                pages,
+                                gem: Arc::clone(gem),
+                            });
+                            va
+                        }
+                    };
+                    Some(va + off)
+                }
+                _ => None,
             };
-            Ok((vmid, root, user_fence))
+            Ok((vmid, fs.slot, root, user_fence))
         })?;
-        let seq = {
+        // The first submissions' buffers are logged (the first dwords), to
+        // see what a client asks of the engine.
+        static TRACED: AtomicU32 = AtomicU32::new(0);
+        if TRACED.fetch_add(1, Ordering::Relaxed) < 3 {
+            let _ = self.with_file(&amd, cx.file_id(), |fs, _| {
+                for ib in &ibs {
+                    let Some(m) = fs
+                        .maps
+                        .iter()
+                        .find(|m| ib.va_start >= m.va && ib.va_start < m.va + m.pages * 4096)
+                    else {
+                        amd.log(format_args!(
+                            "render: IB at {:#x} is not mapped",
+                            ib.va_start
+                        ));
+                        continue;
+                    };
+                    let off = ib.va_start - m.va;
+                    let mut words = Vec::new();
+                    let n = (ib.ib_bytes as usize / 4).min(160);
+                    let _ = m.gem.with_page(off / 4096, &mut |page| {
+                        let at = (off % 4096) as usize;
+                        for i in 0..n {
+                            let b = at + 4 * i;
+                            if b + 4 > page.len() {
+                                break;
+                            }
+                            words.push(u32::from_le_bytes([
+                                page[b],
+                                page[b + 1],
+                                page[b + 2],
+                                page[b + 3],
+                            ]));
+                        }
+                    });
+                    amd.log(format_args!(
+                        "render: IB at {:#x}, {} bytes: {:08x?}",
+                        ib.va_start, ib.ib_bytes, words
+                    ));
+                }
+                Ok(())
+            });
+        }
+        let seq = loop {
             let mut g = amd.gfx_lock();
             let gfx = g.as_mut().ok_or(Errno::ENXIO)?;
             let seq = self.seq.load(Ordering::Acquire).wrapping_add(1).max(1);
-            let mut p = amdgpu::gmc::ring_vm_flush(vmid, root, false, 0);
-            p.acquire_mem(acquire::FULL, false);
-            p.context_control(0);
+            // The page for this job's fence packet is free once the job that
+            // used it before has finished.
+            let page = u64::from(seq) % FENCE_IB_PAGES;
+            let before = seq.wrapping_sub(FENCE_IB_PAGES_U32);
+            if user_fence.is_some() && gfx.finished(&gpu).wrapping_sub(before) >= 0x8000_0000 {
+                drop(g);
+                if sched::current().is_interrupted() {
+                    return Err(Errno::EINTR);
+                }
+                bus::manager().sleep_ms(cx.sleepable(), 1);
+                continue;
+            }
+            // The reference's frame (06 section 10.4): the previous job's
+            // fence, the address space, the state loads (all of them when the
+            // context changed), the frame, its fences, the switch.
+            let mut p = Packets::new();
+            p.wait_mem(
+                3,
+                gfx.seq_address(),
+                self.seq.load(Ordering::Acquire),
+                0xffff_ffff,
+                4,
+                true,
+            );
+            p.0.extend(amdgpu::gmc::ring_vm_flush(vmid, root, false, 0).0);
+            let switched = self.last_ctx.swap(ctx_id, Ordering::AcqRel) != ctx_id;
+            p.context_control(if switched { 0x0101_8003 } else { 0 });
             p.frame_control(false);
             for ib in &ibs {
-                p.indirect_buffer(ib.va_start, ib.ib_bytes / 4, vmid, false);
+                p.indirect_buffer(extended(ib.va_start), ib.ib_bytes / 4, vmid, false);
             }
             p.frame_control(true);
             if let Some(va) = user_fence {
-                p.fence(va, u64::from(seq), true, false);
+                let mut f = Packets::new();
+                f.fence(extended(va), u64::from(seq), true, false);
+                let off = FENCE_IB_AT + ((slot as u64) << 16) + page * 4096;
+                for (i, d) in f.0.iter().enumerate() {
+                    gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
+                }
+                let _ = gpu.vram_read32(usize::try_from(off).unwrap_or(0));
+                p.indirect_buffer(
+                    extended(FENCE_IB_VA + page * 4096),
+                    u32::try_from(f.0.len()).unwrap_or(0),
+                    vmid,
+                    false,
+                );
             }
             p.fence(gfx.seq_address(), u64::from(seq), false, false);
+            p.switch_buffer();
+            // The reference pads every commit to 256 dwords.
+            p.pad(256);
             gfx.run(&gpu, &p.0, RING_WAIT_MS)?;
             self.seq.store(seq, Ordering::Release);
-            seq
+            break seq;
         };
+        for h in out_syncobjs {
+            let slot = cx.syncobj(h).ok_or(Errno::ENOENT)?;
+            *slot.lock() = Some(Arc::new(JobFence {
+                amd: self.amd.clone(),
+                seq,
+            }));
+        }
         uapi::CsRequest::answer(arg, u64::from(seq));
         Ok(0)
     }
@@ -357,7 +597,6 @@ impl Render {
         let amd = self.amd()?;
         let seq = u32::try_from(r.handle & 0xffff_ffff).map_err(|_| Errno::EINVAL)?;
         let start = sched::now_ns();
-        let _ = cx;
         let mut timed_out = false;
         loop {
             if self.done(&amd, seq)? {
@@ -367,7 +606,11 @@ impl Render {
                 timed_out = true;
                 break;
             }
-            bus::manager().delay_us(50);
+            // A signal ends the wait (a client may wait without limit).
+            if sched::current().is_interrupted() {
+                return Err(Errno::EINTR);
+            }
+            bus::manager().sleep_ms(cx.sleepable(), 1);
         }
         uapi::WaitCs::answer(arg, timed_out);
         Ok(0)
@@ -403,10 +646,8 @@ impl Render {
 impl RenderApi for Render {
     fn ioctl(&self, cx: &IoctlCx<'_>, nr: u8, arg: &mut [u8]) -> Result<usize, Errno> {
         let amd = self.amd()?;
-        // The graphics ring must be started (`gc_fw` and `gc_ring`).
-        if !amd.gfx_ready() {
-            return Err(Errno::ENXIO);
-        }
+        // The graphics block starts with the first request.
+        amd.ensure_gfx(cx.sleepable())?;
         match nr - abi::drm::DRM_COMMAND_BASE {
             cmd::INFO => self.info(&amd, cx, arg),
             cmd::GEM_CREATE => self.gem_create(cx, arg),
@@ -437,7 +678,10 @@ impl RenderApi for Render {
                     }
                     // Query: no reset ever happened; the stable power state
                     // and the rest are not supported.
-                    uapi::ctx_op::QUERY | uapi::ctx_op::QUERY2 => uapi::Ctx::answer(arg, 0, 0),
+                    uapi::ctx_op::QUERY
+                    | uapi::ctx_op::QUERY2
+                    | uapi::ctx_op::GET_STABLE_PSTATE
+                    | uapi::ctx_op::SET_STABLE_PSTATE => uapi::Ctx::answer(arg, 0, 0),
                     _ => return Err(Errno::EINVAL),
                 }
                 Ok(0)
@@ -479,7 +723,10 @@ impl RenderApi for Render {
                         busy = true;
                         break;
                     }
-                    bus::manager().delay_us(50);
+                    if sched::current().is_interrupted() {
+                        return Err(Errno::EINTR);
+                    }
+                    bus::manager().sleep_ms(cx.sleepable(), 1);
                 }
                 uapi::gem_wait_idle_answer(arg, busy);
                 Ok(0)
@@ -499,6 +746,26 @@ impl RenderApi for Render {
         if let Some(fs) = st.files.remove(&file) {
             st.slots[fs.slot] = false;
         }
+    }
+}
+
+/// The completion of a job: the ring's fence word reaching its number.
+struct JobFence {
+    amd: Weak<Amd>,
+    seq: u32,
+}
+
+impl drm::Fence for JobFence {
+    fn signaled(&self) -> bool {
+        let Some(amd) = self.amd.upgrade() else {
+            return true;
+        };
+        let Ok(gpu) = amd.gpu_arc() else {
+            return true;
+        };
+        let g = amd.gfx_lock();
+        g.as_ref()
+            .is_none_or(|gfx| gfx.finished(&gpu).wrapping_sub(self.seq) < 0x8000_0000)
     }
 }
 

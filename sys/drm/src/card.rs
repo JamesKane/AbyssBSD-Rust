@@ -90,17 +90,25 @@ pub fn register(driver: Arc<dyn DrmDriver>) -> Result<Arc<Card>, Errno> {
         magics: SpinLock::new(alloc::collections::BTreeMap::new()),
         next_magic: AtomicU32::new(1),
     });
-    let path = format!("dri/card{unit}");
+    // The device is "drm/<minor>" (what `devname(3)` gives, and what the
+    // graphics library reads the minor from); "dri/card<N>" and
+    // "dri/renderD<M>" are the names clients open.
+    let path = format!("drm/{unit}");
     let node = Arc::new(Node(Arc::clone(&card)));
     if vfs::devices::make_dev(path.as_bytes(), CARD_MODE, 0, GID_VIDEO, node).is_none() {
         UNITS.lock().remove(&unit);
         return Err(Errno::ENXIO);
     }
+    let alias = format!("dri/card{unit}");
+    let _ = vfs::devices::make_dev_alias(alias.as_bytes(), format!("../{path}").as_bytes());
     let _ = card.path.set(path);
     if card.driver.render() {
-        let rpath = format!("dri/renderD{}", 128 + unit);
+        let rpath = format!("drm/{}", 128 + unit);
         let rnode = Arc::new(RenderNode(Arc::clone(&card)));
         if vfs::devices::make_dev(rpath.as_bytes(), CARD_MODE, 0, GID_VIDEO, rnode).is_some() {
+            let ralias = format!("dri/renderD{}", 128 + unit);
+            let _ =
+                vfs::devices::make_dev_alias(ralias.as_bytes(), format!("../{rpath}").as_bytes());
             let _ = card.render_path.set(rpath);
         }
     }
@@ -160,10 +168,12 @@ impl Card {
         if self.revoked.swap(true, Ordering::AcqRel) {
             return;
         }
+        vfs::devices::destroy_dev(s, format!("dri/card{}", self.unit).as_bytes());
         if let Some(p) = self.path.get() {
             vfs::devices::destroy_dev(s, p.as_bytes());
         }
         if let Some(p) = self.render_path.get() {
+            vfs::devices::destroy_dev(s, format!("dri/renderD{}", 128 + self.unit).as_bytes());
             vfs::devices::destroy_dev(s, p.as_bytes());
         }
         let files: Vec<_> = self.files.lock().drain(..).collect();
@@ -221,6 +231,7 @@ impl Card {
             card: Arc::clone(self),
             id,
             render,
+            syncobjs: SpinLock::new(crate::syncobj::Table::default()),
             handles: SpinLock::new(HandleTable::new()),
             events: SpinLock::new(Events::default()),
             wait: WaitQueue::new(),
@@ -332,6 +343,7 @@ pub struct Open {
     pub(crate) id: u64,
     /// Whether it is on the render node.
     pub(crate) render: bool,
+    pub(crate) syncobjs: SpinLock<crate::syncobj::Table>,
     pub(crate) handles: SpinLock<HandleTable>,
     events: SpinLock<Events>,
     wait: WaitQueue,
@@ -463,7 +475,7 @@ impl Open {
     /// say-so: it is the master, or was authenticated.
     #[must_use]
     pub fn is_authenticated(&self) -> bool {
-        self.authenticated.load(Ordering::Acquire) || self.is_master()
+        self.render || self.authenticated.load(Ordering::Acquire) || self.is_master()
     }
 
     fn hangup(&self) {

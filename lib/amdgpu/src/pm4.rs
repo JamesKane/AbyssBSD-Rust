@@ -320,6 +320,12 @@ impl Packets {
         self.packet(op::PFP_SYNC_ME, false, &[0])
     }
 
+    /// `SWITCH_BUFFER`: the end of a frame on the graphics ring (it
+    /// separates the constant engine's frame from the draw engine's).
+    pub fn switch_buffer(&mut self) -> &mut Self {
+        self.packet(op::SWITCH_BUFFER, false, &[0])
+    }
+
     /// `FRAME_CONTROL`: start (`false`) or end (`true`) of a frame, not
     /// secure.
     pub fn frame_control(&mut self, end: bool) -> &mut Self {

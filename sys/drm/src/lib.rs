@@ -29,6 +29,7 @@ pub mod gem;
 mod ioctl;
 pub mod kms;
 mod kms_ioctl;
+pub mod syncobj;
 #[cfg(test)]
 mod tests;
 mod vblank;
@@ -37,6 +38,7 @@ pub use build::{KmsBuilder, in_formats_blob};
 pub use card::{Card, Open, panic_restore, register, retire_firmware_cards};
 pub use dmabuf::DmaBuf;
 pub use driver::{DriverInfo, DrmDriver, DumbLimits, IoctlCx};
+pub use syncobj::{Done, Fence};
 
 use abi::errno::Errno;
 use sync::Once;

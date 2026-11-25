@@ -61,6 +61,11 @@ pub(crate) struct Amd {
     table: SpinLock<Option<Discovery>>,
     /// Whether the host-data-path flush has been set up.
     hdp_ready: core::sync::atomic::AtomicBool,
+    /// The graphics block's start-up on first use of the render node: 0 not
+    /// tried, 1 running, 2 done, 3 failed (a reboot clears it).
+    gfx_state: core::sync::atomic::AtomicU8,
+    /// The unit of the graphics card made for it, or -1.
+    dri_unit: core::sync::atomic::AtomicI32,
     /// The graphics card, once registered.
     kms: SpinLock<Option<(Arc<amd_kms::AmdKms>, Arc<drm::Card>)>>,
     /// The interrupts.
@@ -127,6 +132,8 @@ impl Amd {
             name,
             table: SpinLock::new(None),
             hdp_ready: core::sync::atomic::AtomicBool::new(false),
+            gfx_state: core::sync::atomic::AtomicU8::new(0),
+            dri_unit: core::sync::atomic::AtomicI32::new(-1),
             irq: Arc::new(crate::interrupt::Irq::new(gpu.clone())),
             gpu,
             kms: SpinLock::new(None),
@@ -143,7 +150,7 @@ impl Amd {
         }
     }
 
-    fn log(&self, args: core::fmt::Arguments<'_>) {
+    pub(crate) fn log(&self, args: core::fmt::Arguments<'_>) {
         bus::manager().log(format_args!("{}: {args}", self.name));
     }
 
@@ -479,6 +486,10 @@ impl Amd {
                 return;
             }
         };
+        self.dri_unit.store(
+            i32::try_from(node.unit()).unwrap_or(-1),
+            core::sync::atomic::Ordering::Release,
+        );
         self.log(format_args!(
             "graphics card dri/card{} over the firmware's display",
             node.unit()
@@ -804,6 +815,17 @@ impl Amd {
         if ok { Ok(()) } else { Err(Errno::EIO) }
     }
 
+    /// Logs the graphics ring's position and the packets around it.
+    pub(crate) fn gc_hang(&self) -> Result<(), abi::errno::Errno> {
+        let gpu = self.gpu()?;
+        let log = |args: core::fmt::Arguments<'_>| self.log(args);
+        let g = self.gfx.lock();
+        g.as_ref()
+            .ok_or(abi::errno::Errno::ENXIO)?
+            .hang_report(&gpu, &log);
+        Ok(())
+    }
+
     /// The aperture, for the render interface.
     pub(crate) fn gpu_arc(&self) -> Result<Arc<Aperture>, abi::errno::Errno> {
         self.gpu()
@@ -821,6 +843,57 @@ impl Amd {
     /// The started graphics block, locked.
     pub(crate) fn gfx_lock(&self) -> sync::SpinGuard<'_, Option<crate::gcring::Gfx>> {
         self.gfx.lock()
+    }
+
+    /// Starts the graphics block for a client of the render node, once: the
+    /// security processor, the engines' firmware, the ring (stages R3 and
+    /// R4.1 to R4.4). Another caller waits for the first.
+    ///
+    /// # Errors
+    ///
+    /// `ENXIO` if a step failed (the log says which).
+    pub(crate) fn ensure_gfx(&self, s: &sched::Sleepable) -> Result<(), abi::errno::Errno> {
+        use core::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+        if self.gfx_ready() {
+            return Ok(());
+        }
+        if self
+            .gfx_state
+            .compare_exchange(0, 1, AcqRel, Acquire)
+            .is_ok()
+        {
+            let ok = self.start_gfx(s);
+            self.gfx_state.store(if ok { 2 } else { 3 }, Release);
+        }
+        while self.gfx_state.load(Acquire) == 1 {
+            sched::yield_now();
+        }
+        if self.gfx_ready() {
+            Ok(())
+        } else {
+            Err(abi::errno::Errno::ENXIO)
+        }
+    }
+
+    fn start_gfx(&self, s: &sched::Sleepable) -> bool {
+        let Ok(gpu) = self.gpu() else {
+            return false;
+        };
+        let log = |args: core::fmt::Arguments<'_>| self.log(args);
+        use amdgpu::regs::Window;
+        if Bar5(&gpu).read32(crate::gcload::BOOTLOAD_STATUS) >> 31 == 0 {
+            self.gc_load(s);
+        }
+        match crate::gcring::start(&gpu, &log) {
+            Ok(g) => {
+                *self.gfx.lock() = Some(g);
+                true
+            }
+            Err(e) => {
+                self.log(format_args!("GC: ring not started: {e:?}"));
+                false
+            }
+        }
     }
 
     /// Whether the graphics ring has been started.
@@ -1521,8 +1594,64 @@ impl Amd {
     }
 }
 
+/// `hw.dri.<unit>.busid` and `.modesetting`: where the graphics library finds
+/// which device a node belongs to (it reads the device's identity through the
+/// bus address, `pci:<domain>:<bus>:<device>.<function>`).
+fn publish_dri(t: &mut sysctl::Tree, a: &Arc<Amd>) {
+    let unit = a.dri_unit.load(core::sync::atomic::Ordering::Acquire);
+    if unit < 0 {
+        return;
+    }
+    let Ok(gpu) = a.gpu() else {
+        return;
+    };
+    let addr = gpu.pci().function.addr;
+    let busid = alloc::format!(
+        "pci:{:04x}:{:02x}:{:02x}.{}",
+        addr.domain,
+        addr.bus,
+        addr.slot,
+        addr.function
+    );
+    let root = t.root();
+    let hw = match t.child(root, "hw") {
+        Some(h) => h,
+        None => return,
+    };
+    let dri = match t.child(hw, "dri") {
+        Some(d) => d,
+        None => match t.add_node(hw, sysctl::Number::Auto, "dri", "Direct rendering devices") {
+            Ok(d) => d,
+            Err(_) => return,
+        },
+    };
+    let Ok(n) = t.add_node(
+        dri,
+        sysctl::Number::Auto,
+        &alloc::format!("{unit}"),
+        "A graphics card",
+    ) else {
+        return;
+    };
+    let _ = t.add_value(
+        n,
+        sysctl::Number::Auto,
+        "busid",
+        "The device's bus address",
+        sysctl::Value::Str(Box::new(move |out| out.push_str(&busid))),
+    );
+    let _ = t.add_value(
+        n,
+        sysctl::Number::Auto,
+        "modesetting",
+        "Whether the card sets display modes",
+        sysctl::Value::Int(Box::new(|| 1)),
+    );
+}
+
 /// The sysctls for `a`, under `node`.
 pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) {
+    publish_dri(t, a);
     let r = Arc::clone(a);
     let _ = t.add_value(
         node,
@@ -1632,6 +1761,11 @@ pub(crate) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             "gc_ring",
             "Write 1 to start graphics ring 0 and run the ring test (after gc_fw); again, only the test",
             Amd::gc_ring,
+        ),
+        (
+            "gc_hang",
+            "Write 1 to log the graphics ring's pointers and the packets around its read pointer (reads only)",
+            Amd::gc_hang,
         ),
         (
             "gc_fault",
