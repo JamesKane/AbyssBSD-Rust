@@ -1190,3 +1190,26 @@ the zone, and then the display microcontroller's load as one experiment. The fil
   trying first. Next: the transmitter off/on pair, whose layout for this firmware (the 1.7 one) the wall agent is asked to
   give byte by byte.
 
+### 16.18 R3.4 modes, step 3: 720p60 through the reference's way off and on (2026-11-24)
+
+- **Code.** The byte-exact firmware commands of 08 section 3.4.1 (`dmcub::transmitter_disable`, `transmitter_enable`,
+  `encoder_stream_setup`, `set_pixel_clock`; tests compare their dwords with the specification's) and the reference's
+  sequence in `Amd::set_mode`: packets stopped, plane blanked, transmitter off, generator stopped, new pixel clock,
+  timing and request registers, generator started (plane still blanked), encoder in HDMI mode, encoder stream setup,
+  stream controls, AVI info frame, packet controls, transmitter on, **the encoder's front end reconnected**, unblank.
+  Every firmware command waits for its read pointer.
+- **Result on the X870E.** `mode=4` (720p60 at 74.25 MHz): all four commands taken, 59.998 Hz measured, the encoder's
+  FIFO calibrated again (`DIG_FIFO_STATUS` `0x22099000`, bit 29), **a stable 1280x720 picture** (the user's report).
+- **Two findings the specification did not have** (reported to its author):
+  1. **The transmitter-off command, and then the transmitter-on command, each clear the encoder's front-end connection:**
+     `DIG_FE_CNTL` `0x01000000` -> 0 and `DIG_BE_CNTL` bit 8 (the back end's front-end select) 1 -> 0. A sequence
+     that sent the commands and skipped the reference's step 12 (connect the back end to front end 0, source the
+     timing generator) left the monitor with no signal while every other register looked right. Reconnecting the front end
+     once, before the transmitter-on command, was not enough; **it has to be done after it** (the driver does both).
+  2. A write to `DIG_FE_CNTL` reads back 0 at once and takes its value only after the generator runs again
+     (the log shows 0 straight after the write and `0x01000000` at the end).
+- **The first attempt** (clock command alone, section 16.17) and the second (commands but no reconnect) both lost the
+  signal; a reboot cleared them (the UEFI retrains the link).
+- **Not done:** the way back (code 16 through the baseline restore), the other lower-clock modes (720p50, 480p, 640x480,
+  576p), SCDC, and the reconnection being done by the driver as a clean library step rather than from `set_mode`.
+
