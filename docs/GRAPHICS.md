@@ -1213,3 +1213,26 @@ the zone, and then the display microcontroller's load as one experiment. The fil
 - **Not done:** the way back (code 16 through the baseline restore), the other lower-clock modes (720p50, 480p, 640x480,
   576p), SCDC, and the reconnection being done by the driver as a clean library step rather than from `set_mode`.
 
+### 16.19 R3.4 modes, step 4: every mode of the specification's table on the X870E (2026-11-24)
+
+With the sequence of section 16.18 (and the plain stop, reprogram, start when the pixel clock does not change), each mode
+below ran on the X870E's DELL ST2421L through `dev.drmn.1.mode=<CTA code>`, with the encoder's FIFO calibrated afterwards
+and the user's report of a stable picture:
+
+| Code | Mode | Pixel clock | Path | Measured refresh | Picture |
+|---|---|---|---|---|---|
+| 16 | 1920x1080 at 60 Hz | 148.5 MHz | the firmware's own values put back, with the clock change from any other | 59.998 Hz | normal (also after each of the others) |
+| 31 | 1920x1080 at 50 Hz | 148.5 MHz | no clock change: one timing register, the update offset, the line delivery field | 50.332 Hz | normal |
+| 4 | 1280x720 at 60 Hz | 74.25 MHz | clock change | 59.998 Hz | stable |
+| 19 | 1280x720 at 50 Hz | 74.25 MHz | clock change | 49.998 Hz | stable |
+| 3 | 720x480 at 59.94 Hz (16:9) | 27 MHz | clock change | 59.998 Hz | stable |
+| 18 | 720x576 at 50 Hz (16:9) | 27 MHz | no clock change; size change | 50.332 Hz | stable |
+| 1 | 640x480 at 59.94 Hz | 25.175 MHz | clock change (251,750 x 100 Hz; symbol 2517 x 10 kHz) | 59.998 Hz | stable |
+
+(The refresh column is frames counted in a 3 s window, so it is good to about 0.33 Hz.) 1080p60 was returned to from 640x480,
+and from 720p60, with a normal picture each time. The audio was not part of this (deferred with the audio design).
+
+- **Not done:** the KMS card still offers only the firmware's mode (a client cannot choose one); the pitch and the surface for
+  a smaller mode (the plane scans the top-left part of the 1080p surface, which is what the user saw); SCDC (the monitor is
+  HDMI 1.4); modes above 148.5 MHz and interlaced modes; and the in-driver recovery of a lost signal (a reboot still is it).
+
