@@ -44,7 +44,7 @@ The fix is FreeBSD's INTx handling (`nvme_ctrlr_shared_handler`): under INTx the
 masks the controller (`INTMS`) while it reaps and unmasks it (`INTMC`) after; a polled admin
 command holds the same mask until its completion is taken, so an admin completion never holds the
 input the I/O queue shares. Before it, 5 of 16 runs hung; after it, 10 of 10 passed on a build
-that still had the debugging (see the roadmap for the runs on the committed code). `cam` keeps a
+that still had the debugging, and 12 of 12 on the committed code (5ca6bf3). `cam` keeps a
 200-identify burst as coverage of polled admin commands under INTx, not as a reproducer.
 
 Not covered (FreeBSD services the admin queue in the shared handler, which covers both): an admin
