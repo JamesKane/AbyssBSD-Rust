@@ -26,6 +26,10 @@ const CREATE_SIGNALED: u32 = 1;
 const WAIT_ALL: u32 = 1;
 const WAIT_FOR_SUBMIT: u32 = 2;
 const WAIT_AVAILABLE: u32 = 4;
+/// `HANDLE_TO_FD`: the descriptor is a sync file of the fence now in the
+/// slot. `FD_TO_HANDLE`: the descriptor is a sync file whose fence goes in
+/// the slot.
+const SYNC_FILE_FLAG: u32 = 1;
 /// Most handles one request may name.
 const MAX_HANDLES: u32 = 4096;
 
@@ -40,6 +44,14 @@ pub trait Fence: Send + Sync {
         let _ = (s, ns);
         sched::yield_now();
         self.signaled()
+    }
+
+    /// Asks to have `w` woken, from thread context, once it may have
+    /// finished (a waiter then looks again, so a wake that is early or
+    /// repeated is harmless). The default says nothing: a fence that can
+    /// not announce itself leaves a sync file's waiters asleep.
+    fn register(&self, w: &alloc::sync::Arc<dyn vfs::event::Wake>) {
+        let _ = w;
     }
 }
 
@@ -131,8 +143,8 @@ pub(crate) fn dispatch(
     Some(match n {
         CREATE => create(f, a),
         DESTROY => destroy(f, a),
-        // Descriptors for them are not built.
-        HANDLE_TO_FD | FD_TO_HANDLE => Err(Errno::EOPNOTSUPP),
+        HANDLE_TO_FD => handle_to_fd(f, s, a),
+        FD_TO_HANDLE => fd_to_handle(f, s, a),
         WAIT => wait(f, s, a),
         RESET => reset(f, a),
         SIGNAL => signal(f, a),
@@ -151,6 +163,59 @@ fn create(f: &Open, a: &mut [u8]) -> Result<usize, Errno> {
     });
     let h = f.syncobjs.lock().insert(fence)?;
     a[..4].copy_from_slice(&h.to_le_bytes());
+    Ok(0)
+}
+
+/// `SYNCOBJ_HANDLE_TO_FD`: a descriptor for the fence a handle holds. Only
+/// the sync file form is built (`EXPORT_SYNC_FILE`); a descriptor for the
+/// syncobj itself is not.
+fn handle_to_fd(f: &Open, s: &sched::Sleepable, a: &mut [u8]) -> Result<usize, Errno> {
+    let handle = u32_at(a, 0)?;
+    let flags = u32_at(a, 4)?;
+    if flags & !SYNC_FILE_FLAG != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & SYNC_FILE_FLAG == 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    let env = crate::env().ok_or(Errno::ENXIO)?;
+    let slot = f.syncobjs.lock().get(handle).ok_or(Errno::ENOENT)?;
+    // An empty slot has no fence to export.
+    let fence = slot.lock().clone().ok_or(Errno::EINVAL)?;
+    let file = crate::SyncFile::new(alloc::vec![fence]);
+    let fd = (env.export_syncfile)(s, file, true)?;
+    a.get_mut(8..12)
+        .ok_or(Errno::EINVAL)?
+        .copy_from_slice(&fd.to_le_bytes());
+    Ok(0)
+}
+
+/// `SYNCOBJ_FD_TO_HANDLE`: a sync file's fence goes in the slot a handle
+/// names, or in a new syncobj if the handle is 0.
+fn fd_to_handle(f: &Open, s: &sched::Sleepable, a: &mut [u8]) -> Result<usize, Errno> {
+    let handle = u32_at(a, 0)?;
+    let flags = u32_at(a, 4)?;
+    let fd = i32::from_le_bytes(
+        a.get(8..12)
+            .ok_or(Errno::EINVAL)?
+            .try_into()
+            .map_err(|_| Errno::EINVAL)?,
+    );
+    if flags & !SYNC_FILE_FLAG != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & SYNC_FILE_FLAG == 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    let env = crate::env().ok_or(Errno::ENXIO)?;
+    let fence = (env.import_syncfile)(s, fd)?.fence();
+    if handle != 0 {
+        let slot = f.syncobjs.lock().get(handle).ok_or(Errno::ENOENT)?;
+        *slot.lock() = Some(fence);
+    } else {
+        let h = f.syncobjs.lock().insert(Some(fence))?;
+        a[..4].copy_from_slice(&h.to_le_bytes());
+    }
     Ok(0)
 }
 

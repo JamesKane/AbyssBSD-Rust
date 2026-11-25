@@ -42,5 +42,7 @@ pub(crate) fn init() {
         ticker: || alloc::boxed::Box::new(FrameTimer(crate::softclock::Callout::new())),
         export_dmabuf: crate::syscall::dmabuf::export,
         import_dmabuf: crate::syscall::dmabuf::import,
+        export_syncfile: crate::syscall::dmabuf::export_syncfile,
+        import_syncfile: crate::syscall::dmabuf::import_syncfile,
     });
 }

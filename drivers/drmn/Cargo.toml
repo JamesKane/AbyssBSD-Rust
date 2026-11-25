@@ -18,6 +18,7 @@ sched = { path = "../../sys/sched" }
 nvgpu = { path = "../../lib/nvgpu" }
 sync = { path = "../../sys/sync" }
 sysctl = { path = "../../sys/sysctl" }
+vfs = { path = "../../sys/vfs" }
 vgapci = { path = "../vgapci" }
 vm = { path = "../../sys/vm" }
 

@@ -925,7 +925,7 @@ Mesa's `radeonsi` on a render node, and runs Sway with hardware rendering. The N
 The card has a render node (`dri/renderD<128+N>`, device `drm/<128+N>`; `drivers/drmn/src/render.rs`) that takes
 rendering requests only: amdgpu interface 3.64 with `INFO`, `GEM_CREATE/MMAP/VA/OP/METADATA/WAIT_IDLE`, contexts,
 buffer lists, `CS` (IB, fence and syncobj-out chunks), `WAIT_CS`, and synchronisation objects in `sys/drm`
-(create, destroy, wait, reset, signal; no descriptors or timelines yet). Mesa's `radeonsi` (ACO) initialises
+(create, destroy, wait, reset, signal, and sync file export and import, §16.12; no syncobj descriptors or timelines yet). Mesa's `radeonsi` (ACO) initialises
 through it and `glmark2-es2-gbm --off-screen` completes the whole suite on the Radeon 610M (score about 11,900
 at the first run, terrain about 430 FPS); Sway's `gles2` renderer and its clients (jellyfish about 7,400 FPS)
 draw on it, with the compositor importing every client's shared buffer
@@ -989,8 +989,9 @@ reboot (always set `BootNext` first so the board does not boot Fedora).
 
 ### 16.10 Not built
 
-- Synchronisation-object and sync-file descriptors (need a descriptor kind with a wake-up for `poll`), and the
-  dma-buf fence ioctls.
+- Descriptors for synchronisation objects themselves (`HANDLE_TO_FD` and `FD_TO_HANDLE` without the sync file
+  flag), timeline objects (`TIMELINE_WAIT`, `TRANSFER`, `QUERY`), `SYNCOBJ_EVENTFD`, and the dma-buf fence
+  ioctls (`EXPORT_SYNC_FILE` and `IMPORT_SYNC_FILE` on a dma-buf).
 - Hot-plug by interrupt (needs the line's interrupt control offset from the specification); the hot-plug
   event for the other connector types (only HDMI-A-1 is watched).
 - Compute and graphics preemption verification; the wave-kill soft recovery; the DMA reset's freeze step.
@@ -1018,3 +1019,25 @@ reference: FreeBSD 15.1 `hdac.c` (`hdac_stream_start`) and `hdaa.c` (`hdaa_audio
 the position moves and the buffer wraps. `dev.drmn.<unit>.afmt_probe` logs the display's audio registers (reads
 only) to run during a tone. This is the driver a `PcmHw` will wrap (docs/AUDIO.md §7.2, row 4); the sound
 engine, `/dev/dsp` and mixer are not built.
+
+### 16.12 Sync files
+
+A **sync file** is a descriptor that holds fences and becomes readable once every one has finished
+(`sys/drm/src/sync_file.rs`; `FileKind::SyncFile` in the kernel, `DTYPE` 18, `KF_TYPE_SYNCFILE`). It answers
+`poll` (`POLLIN`) and `kqueue` (`EVFILT_READ`, data 1 when finished), has no `read` or `write`, and takes the
+two `linux/sync_file.h` requests: `SYNC_IOC_MERGE` (a third descriptor for the fences of two, a fence held by
+both counted once) and `SYNC_IOC_FILE_INFO` (the name, the status, the number of fences, and, on a second call
+with room, one 72-byte record each). `SYNCOBJ_HANDLE_TO_FD` with `EXPORT_SYNC_FILE` gives one for the fence in a
+syncobj (an empty one is `EINVAL`); `FD_TO_HANDLE` with `IMPORT_SYNC_FILE` puts a sync file's fence in the
+named syncobj, or a new one for handle 0.
+
+The wake-up is a new `Fence::register(&Arc<dyn Wake>)`: a fence that can say when it may have finished takes the
+waker and wakes it from thread context; the sync file looks again and either tells its pollers and knotes or
+asks again. The Radeon's `JobFence` hands the waker to the `Render`, whose thread `amd-fence` (started on the
+first one, gone after a second idle) sleeps until the fence interrupt bumps a counter, with a 50 ms timeout as
+the fallback, wakes the wakers, and looks for a hung ring (`hang_check`) on every engine, so a job that never
+finishes is reset even when only a sync file waits for it. Tests: `sys/drm` host tests (five: poll and wake,
+merge, export and import, merge and info requests), and `tests/graphics/amdsync.c` on the X870E: a 3,000-packet
+job's sync file is pending at once and readable within 2 s, kqueue reports it, two merge into one with two
+fences that becomes readable and describes itself with status 1, an import is waited for as a syncobj, and
+the refusals (a plain syncobj descriptor, an empty syncobj, a bad descriptor) are the errors above.

@@ -130,6 +130,13 @@ impl Engine {
         }
     }
 
+    /// Every engine the interface offers.
+    fn all() -> impl Iterator<Item = Self> {
+        [Self::Gfx, Self::Dma]
+            .into_iter()
+            .chain((0..COMPUTE_RINGS).filter_map(|r| u8::try_from(r).ok().map(Self::Compute)))
+    }
+
     /// The engine's place in the tables of per-engine state: graphics, DMA,
     /// then the compute queues.
     fn index(self) -> usize {
@@ -248,6 +255,13 @@ pub(crate) struct Render {
     last_ctx: AtomicU32,
     /// Where waiters for a job sleep; the fence interrupt wakes it.
     queue: Arc<sched::WaitQueue>,
+    /// Counts the fence interrupts' wakes (the notifier thread sleeps until
+    /// it moves).
+    kick: Arc<AtomicU32>,
+    /// Sync files waiting for a job to finish, and whether the thread that
+    /// wakes them is running.
+    fence_wakers: SpinLock<Vec<Arc<dyn vfs::event::Wake>>>,
+    notifier_running: core::sync::atomic::AtomicBool,
     /// Itself, for the fences it hands out.
     me: Weak<Render>,
     /// For each engine, the number of the last job seen finished and when it
@@ -282,6 +296,9 @@ impl Render {
             comp_seq: [const { AtomicU32::new(0) }; COMPUTE_QUEUES],
             last_ctx: AtomicU32::new(0),
             queue: Arc::new(sched::WaitQueue::new()),
+            kick: Arc::new(AtomicU32::new(0)),
+            fence_wakers: SpinLock::new(Vec::new()),
+            notifier_running: core::sync::atomic::AtomicBool::new(false),
             state: PreemptLock::new(State {
                 files: BTreeMap::new(),
                 slots: [false; VMIDS],
@@ -293,6 +310,71 @@ impl Render {
             }),
             vram_bytes,
         })
+    }
+
+    /// The counter the fence interrupt bumps.
+    pub(crate) fn kick(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.kick)
+    }
+
+    /// Takes `w` to be woken when a job may have finished (a sync file
+    /// waits this way), and starts the thread that does it if it is not
+    /// running. A job's fence interrupt wakes the thread at once; every 50
+    /// ms it also wakes them anyway and looks for a hung ring, so a lost
+    /// interrupt costs latency, not a wait for ever.
+    fn add_waker(&self, w: &Arc<dyn vfs::event::Wake>) {
+        use core::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+        self.fence_wakers.lock().push(Arc::clone(w));
+        if self.notifier_running.swap(true, AcqRel) {
+            return;
+        }
+        let me = self.me.clone();
+        let queue = Arc::clone(&self.queue);
+        let kick = Arc::clone(&self.kick);
+        let spawned = sched::spawn("amd-fence", sched::Priority::KERNEL, move |s| {
+            let mut seen = kick.load(Acquire);
+            let mut idle = 0u32;
+            loop {
+                let _ = bus::manager().wait_timeout(
+                    s,
+                    &queue,
+                    &mut || kick.load(Acquire) != seen,
+                    50_000_000,
+                );
+                seen = kick.load(Acquire);
+                let Some(r) = me.upgrade() else {
+                    return;
+                };
+                let woken: Vec<_> = core::mem::take(&mut *r.fence_wakers.lock());
+                if woken.is_empty() {
+                    idle += 1;
+                    if idle >= 20 {
+                        // Idle for a second: stop, unless one came in as we
+                        // decided to.
+                        r.notifier_running.store(false, Release);
+                        if r.fence_wakers.lock().is_empty() || r.notifier_running.swap(true, AcqRel)
+                        {
+                            return;
+                        }
+                        idle = 0;
+                    }
+                    continue;
+                }
+                idle = 0;
+                if let Some(amd) = r.amd.upgrade() {
+                    // A job that never finishes is found here too.
+                    for e in Engine::all() {
+                        r.hang_check(&amd, e);
+                    }
+                }
+                for w in woken {
+                    w.wake();
+                }
+            }
+        });
+        if spawned.is_err() {
+            self.notifier_running.store(false, Release);
+        }
     }
 
     /// The queue the fence interrupt wakes.
@@ -1253,6 +1335,12 @@ impl drm::Fence for JobFence {
             r.hang_check(&amd, self.engine);
         }
         bus::manager().wait_timeout(s, &self.queue, &mut || self.signaled(), ns)
+    }
+
+    fn register(&self, w: &Arc<dyn vfs::event::Wake>) {
+        if let Some(r) = self.render.upgrade() {
+            r.add_waker(w);
+        }
     }
 }
 

@@ -284,7 +284,9 @@ impl Amd {
         // A fence's interrupt wakes whoever waits for a job.
         *self.render.lock() = Some(Arc::downgrade(&render));
         let queue = render.queue();
+        let kick = render.kick();
         let _ = self.irq.set_on_eop(Box::new(move || {
+            kick.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
             queue.wake_all();
         }));
         card.set_render(render);

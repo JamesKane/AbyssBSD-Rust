@@ -914,6 +914,8 @@ pub const KF_TYPE_JAILDESC: i32 = 16;
 /// A dma-buf (`DTYPE_DMABUF`, 17): an AbyssBSD addition, so not in
 /// FreeBSD's `sys/user.h` and not checked against it.
 pub const KF_TYPE_DMABUF: i32 = 17;
+/// A sync file (an AbyssBSD addition, as the dma-buf is).
+pub const KF_TYPE_SYNCFILE: i32 = 18;
 pub const KF_TYPE_UNKNOWN: i32 = 255;
 
 /// `kf_file_type` / `kf_vnode_type` (`KF_VTYPE_*`).
