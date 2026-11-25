@@ -501,11 +501,8 @@ graphics (M-G); sound, the MAC framework, ACPI sleep, buttons, the battery, the 
   kernels, so the firmware's reset path is the suspect. No serial capture was running, and the
   loader left no `PREVLOG.TXT`; the next failure needs the FTDI adapter on `/dev/ttyUSB0`
   capturing from the start.
-- **Hangs seen once, not reproduced:** a held key on `vt` (an up-arrow's key repeat, 2026-11-10,
-  before the SMMU; on 2026-11-25 the console took holds of up to 3.7 s and 44 repeats at a login
-  prompt with no stall, the heartbeat's longest gap 1.01 s, but no 20-second up-arrow hold at a shell
-  with history, which is the case still to try); `aarch64-el2` (INTx) in `tests/user/cam`, once in
-  three runs in QEMU.
+- **Hang seen once, not reproduced:** `aarch64-el2` (INTx) in `tests/user/cam`, once in three runs in
+  QEMU. (The held key on `vt` is closed, and recorded in compat-deviations.)
 - **`devinfo` against the board's FreeBSD** (tests/corpus/opi6p/freebsd/devinfo-rv.txt): the RX8900,
   the PD controllers, `hcons` and `hsctrl` attach on the board with FreeBSD's names. What FreeBSD
   has that AbyssBSD's tree does not is in compat-deviations (Device tree). The media keys deliver
