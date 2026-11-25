@@ -12,6 +12,9 @@ hda = { path = "../../lib/hda" }
 pci = { path = "../../sys/pci" }
 regs = { path = "../../lib/regs" }
 sched = { path = "../../sys/sched" }
+sync = { path = "../../sys/sync" }
+sysctl = { path = "../../sys/sysctl" }
+abi = { path = "../../lib/abi" }
 vm = { path = "../../sys/vm" }
 
 [lints]

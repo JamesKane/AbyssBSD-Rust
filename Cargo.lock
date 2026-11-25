@@ -544,12 +544,15 @@ version = "0.0.0"
 name = "hda-driver"
 version = "0.0.0"
 dependencies = [
+ "abi",
  "bus",
  "devtree",
  "hda",
  "pci",
  "regs",
  "sched",
+ "sync",
+ "sysctl",
  "vm",
 ]
 
@@ -764,6 +767,7 @@ dependencies = [
  "gpt",
  "guid",
  "hal",
+ "hda-driver",
  "hid",
  "hidbus",
  "idregs",

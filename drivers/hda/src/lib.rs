@@ -14,6 +14,8 @@ extern crate alloc;
 mod codec;
 mod controller;
 mod names;
+mod tone;
 
-pub use codec::{HDAA, HDACC};
+pub use codec::{HDAA, HDACC, tone_test};
 pub use controller::HDAC;
+pub use tone::Report;

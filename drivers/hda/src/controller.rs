@@ -19,12 +19,13 @@ use bus::{
 };
 use devtree::ids::PciId;
 use hda::reg::{self, Caps};
+use hda::stream;
 use hda::verb;
 use pci::bus::PciChild;
 use regs::Bytes;
 use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
-use vm::dma::{DmaCoherent, DmaConstraints};
+use vm::dma::{DmaCoherent, DmaConstraints, DmaTag};
 
 use crate::names;
 
@@ -54,6 +55,10 @@ pub(crate) struct Controller {
     mmio: bus::MmioGrant<Bytes>,
     caps: Caps,
     rings: Mutex<Rings>,
+    /// For the stream buffers.
+    tag: DmaTag,
+    /// The one output stream is in use.
+    busy: core::sync::atomic::AtomicBool,
 }
 
 impl core::fmt::Debug for Controller {
@@ -150,6 +155,157 @@ impl Controller {
     }
 }
 
+/// A playing output stream: its buffer and descriptor list in DMA memory,
+/// and which descriptor and stream number it runs on. Dropping it stops
+/// the stream.
+pub(crate) struct Playback {
+    ctlr: Arc<Controller>,
+    /// The stream descriptor's byte offset.
+    sd: usize,
+    /// The stream number the converters listen for.
+    pub(crate) tag: u8,
+    /// The buffer's length in bytes.
+    pub(crate) bytes: usize,
+    _bdl: DmaCoherent<u32>,
+    _data: DmaCoherent<u8>,
+}
+
+impl Playback {
+    /// The link position: bytes the DMA engine has taken from the buffer.
+    pub(crate) fn position(&self) -> u32 {
+        self.ctlr.mmio.read32(self.sd + stream::SD_LPIB)
+    }
+
+    /// The stream's status register.
+    pub(crate) fn status(&self) -> u8 {
+        self.ctlr.mmio.read8(self.sd + stream::SD_STS)
+    }
+
+    /// The stream's control register (low byte).
+    pub(crate) fn control(&self) -> u8 {
+        self.ctlr.mmio.read8(self.sd + stream::SD_CTL0)
+    }
+}
+
+impl Drop for Playback {
+    fn drop(&mut self) {
+        let m = &*self.ctlr.mmio;
+        let ctl = m.read8(self.sd + stream::SD_CTL0);
+        m.write8(
+            self.sd + stream::SD_CTL0,
+            ctl & !(stream::CTL_RUN | stream::CTL_IOCE),
+        );
+        self.ctlr
+            .busy
+            .store(false, core::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Controller {
+    /// Resets stream descriptor `sd` (`hdac_stream_reset`).
+    fn stream_reset(&self, sd: usize) -> bool {
+        let m = &*self.mmio;
+        let at = sd + stream::SD_CTL0;
+        m.write8(at, m.read8(at) | stream::CTL_SRST);
+        let mut ok = false;
+        for _ in 0..1000 {
+            if m.read8(at) & stream::CTL_SRST != 0 {
+                ok = true;
+                break;
+            }
+            delay_us(10);
+        }
+        if !ok {
+            return false;
+        }
+        m.write8(at, m.read8(at) & !stream::CTL_SRST);
+        for _ in 0..1000 {
+            if m.read8(at) & stream::CTL_SRST == 0 {
+                return true;
+            }
+            delay_us(10);
+        }
+        false
+    }
+
+    /// Starts output stream 0 playing `data` (linear PCM in format
+    /// `format`) round and round, in two halves of one buffer descriptor
+    /// list, polled: no interrupt is enabled (`hdac_stream_start` without
+    /// the interrupt control). `data` is a whole number of 128-byte units.
+    pub(crate) fn play(
+        self: &Arc<Self>,
+        data: &[u8],
+        format: u16,
+    ) -> Result<Playback, &'static str> {
+        use core::sync::atomic::Ordering;
+        if data.is_empty() || !data.len().is_multiple_of(256) {
+            return Err("the buffer is not a whole number of 256-byte units");
+        }
+        let index = stream::output_index(self.caps, 0).ok_or("no output stream")?;
+        if self.busy.swap(true, Ordering::AcqRel) {
+            return Err("the output stream is in use");
+        }
+        let built = (|| {
+            let bdl = self
+                .tag
+                .coherent::<u32>(8)
+                .map_err(|_| "no memory for the buffer descriptor list")?;
+            let buf = self
+                .tag
+                .coherent::<u8>(data.len())
+                .map_err(|_| "no memory for the buffer")?;
+            buf.copy_from_slice(0, data);
+            Ok::<_, &'static str>((bdl, buf))
+        })();
+        let (bdl, buf) = match built {
+            Ok(b) => b,
+            Err(e) => {
+                self.busy.store(false, Ordering::Release);
+                return Err(e);
+            }
+        };
+        let sd = stream::descriptor(index);
+        let half = data.len() / 2;
+        let at = buf.bus_addr();
+        for (i, base) in [at, at + half as u64].into_iter().enumerate() {
+            let e = stream::bdle(base, u32::try_from(half).unwrap_or(0), false);
+            for (k, w) in e.into_iter().enumerate() {
+                bdl.write(i * 4 + k, w.to_le());
+            }
+        }
+        if !self.stream_reset(sd) {
+            self.busy.store(false, Ordering::Release);
+            return Err("the stream will not reset");
+        }
+        let tag = 1u8;
+        let m = &*self.mmio;
+        m.write32(sd + stream::SD_CBL, u32::try_from(data.len()).unwrap_or(0));
+        m.write16(sd + stream::SD_LVI, 1);
+        let b = bdl.bus_addr();
+        m.write32(sd + stream::SD_BDPL, low(b));
+        m.write32(sd + stream::SD_BDPU, low(b >> 32));
+        // The stream number, output direction, no striping.
+        m.write8(sd + stream::SD_CTL2, tag << stream::CTL2_STREAM_SHIFT);
+        m.write16(sd + stream::SD_FMT, format);
+        m.write8(
+            sd + stream::SD_STS,
+            stream::STS_DESE | stream::STS_FIFOE | stream::STS_BCIS,
+        );
+        m.write8(
+            sd + stream::SD_CTL0,
+            m.read8(sd + stream::SD_CTL0) | stream::CTL_RUN,
+        );
+        Ok(Playback {
+            ctlr: Arc::clone(self),
+            sd,
+            tag,
+            bytes: data.len(),
+            _bdl: bdl,
+            _data: buf,
+        })
+    }
+}
+
 /// How a codec's driver reaches its controller, and who the codec is.
 #[derive(Debug)]
 pub(crate) struct Link {
@@ -166,6 +322,11 @@ impl Link {
     /// Sends `verb` to this codec.
     pub(crate) fn command(&self, s: &Sleepable, verb: u32) -> Option<u32> {
         self.ctlr.upgrade()?.command(s, self.cad, verb)
+    }
+
+    /// The controller, if it is still there.
+    pub(crate) fn controller(&self) -> Option<Arc<Controller>> {
+        self.ctlr.upgrade()
     }
 }
 
@@ -221,6 +382,8 @@ impl Driver for Hdac {
         let ctlr = Controller {
             mmio,
             caps,
+            tag,
+            busy: core::sync::atomic::AtomicBool::new(false),
             rings: Mutex::new(
                 &RING_LOCK,
                 Rings {

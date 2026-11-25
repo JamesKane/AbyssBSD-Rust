@@ -4815,6 +4815,14 @@ ktest! {
         let name = codec.strip_suffix(" HDA CODEC").unwrap_or(&codec);
         assert_eq!(group, alloc::format!("{name} Audio Function Group"));
         kprintln!("hdac0: <{ctlr}> hdacc0: <{codec}> hdaa0: <{group}>");
+        // The stream half (docs/AUDIO.md stage A2): a looped test tone runs
+        // on the output stream, and the controller's link position moves and
+        // wraps the buffer (QEMU's null back end still takes the samples in
+        // real time).
+        let r = hda_driver::tone_test(&s, 2).expect("an audio function group");
+        kprintln!("hdaa0: tone {r:?}");
+        assert!(r.moved, "the link position did not move");
+        assert!(r.wraps >= 2, "the buffer wrapped {} times in 2 s", r.wraps);
     }
 }
 

@@ -19,6 +19,7 @@ extern crate std;
 
 pub mod graph;
 pub mod reg;
+pub mod stream;
 pub mod verb;
 
 pub use graph::{Codec, Function, GraphError, Widget, WidgetKind, read_function};

@@ -108,11 +108,28 @@ impl Driver for Hdacc {
     fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
 }
 
+/// What the audio function group keeps: the codec's link and the graph.
+#[derive(Debug)]
+struct Group {
+    link: Arc<Link>,
+    function: Function,
+}
+
+/// The groups attached, for [`tone_test`].
+static GROUPS: sync::SpinLock<Vec<alloc::sync::Weak<Group>>> = sync::SpinLock::new(Vec::new());
+
+/// Plays the test tone for `seconds` on the first audio function group
+/// that is attached (the kernel's audio test), `None` if there is none.
+pub fn tone_test(s: &Sleepable, seconds: u32) -> Option<crate::tone::Report> {
+    let g = GROUPS.lock().iter().find_map(alloc::sync::Weak::upgrade)?;
+    let log = |a: core::fmt::Arguments<'_>| bus::manager().log(format_args!("hdaa: {a}"));
+    Some(crate::tone::play(s, &g.link, &g.function, seconds, &log))
+}
+
 /// `hdaaN`.
 #[derive(Debug)]
 pub(crate) struct Hdaa {
-    /// The function group as read, kept for the devices built from it.
-    _function: Function,
+    group: Arc<Group>,
 }
 
 impl Driver for Hdaa {
@@ -145,9 +162,49 @@ impl Driver for Hdaa {
         let mut cmd = Cmd { link: &fg.link, s };
         let function = hda::read_function(&mut cmd, 0, fg.nid)
             .map_err(|_| AttachError::Device("the function group could not be read"))?;
-        Ok(Self {
-            _function: function,
-        })
+        let group = Arc::new(Group {
+            link: Arc::clone(&fg.link),
+            function,
+        });
+        GROUPS.lock().push(Arc::downgrade(&group));
+        Ok(Self { group })
+    }
+
+    fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        let unit = cx.unit();
+        let group = Arc::clone(&self.group);
+        bus::manager().sysctl(cx.sleepable(), &mut |t| {
+            let Some(node) = bus::device_node(t, Self::NAME, unit) else {
+                return;
+            };
+            let g = Arc::clone(&group);
+            let _ = t.add_writable(
+                node,
+                sysctl::Number::Auto,
+                "tone",
+                "Write a number of seconds (1 to 20) to play a 1 kHz test tone through the codec's best output pin (on a kernel thread; see the log)",
+                0,
+                sysctl::Value::Int(alloc::boxed::Box::new(|| 0)),
+                sysctl::int_writer(move |seconds| {
+                    let g = Arc::clone(&g);
+                    let seconds = u32::try_from(seconds).unwrap_or(0);
+                    if seconds == 0 {
+                        return Ok(());
+                    }
+                    sched::spawn("hda-tone", sched::Priority::KERNEL, move |s| {
+                        let name = alloc::format!("hdaa{unit}");
+                        let log = |a: core::fmt::Arguments<'_>| {
+                            bus::manager().log(format_args!("{name}: {a}"));
+                        };
+                        let r = crate::tone::play(s, &g.link, &g.function, seconds, &log);
+                        log(format_args!("tone: finished: {r:?}"));
+                    })
+                    .map(|_| ())
+                    .map_err(|_| abi::errno::Errno::EAGAIN)
+                }),
+            );
+        });
+        Ok(())
     }
 
     fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
