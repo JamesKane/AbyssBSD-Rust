@@ -23,6 +23,9 @@
 #                         disk's serial number, as a check that you meant it.
 #   --entry               the boot entry for ada0's ESP, outside BootOrder (--install
 #                         runs it last; safe to run again).
+#   --update-kernel       the server's newest release kernel (from its last
+#                         build) onto the installed root, the old one kept as
+#                         kernel.prev: no other disk or partition changes.
 #   --boot-once           BootNext to the AbyssBSD entry. It does not reboot.
 #   --status              what is there: the partitions, the boot entries.
 # Add --dry-run to --install to see its preflight and plan only.
@@ -39,7 +42,7 @@ wipe=
 dry=0
 while [ $# -gt 0 ]; do
 	case $1 in
-	--prepare | --install | --entry | --boot-once | --status) mode=${1#--} ;;
+	--prepare | --install | --entry | --update-kernel | --boot-once | --status) mode=${1#--} ;;
 	--wipe) wipe=$2; shift ;;
 	--dry-run) dry=1 ;;
 	-h | --help) sed -n '2,/^set -eu/p' "$0" | sed 's/^# \{0,1\}//; /^set -eu/d'; exit 0 ;;
@@ -47,7 +50,7 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
-[ -n "$mode" ] || { echo "usage: $0 --prepare | --install --wipe SERIAL [--dry-run] | --entry | --boot-once | --status" >&2; exit 2; }
+[ -n "$mode" ] || { echo "usage: $0 --prepare | --install --wipe SERIAL [--dry-run] | --entry | --update-kernel | --boot-once | --status" >&2; exit 2; }
 
 srv() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 abyss-build "$@"; }
 say() { echo "$(date +%T) $*"; }
@@ -161,6 +164,26 @@ fi
 doas -n efibootmgr -v | head -14
 EOF
 	say "BootOrder is as it was; --boot-once sets BootNext (it does not reboot)"
+	;;
+
+update-kernel)
+	srv "sh -s" << EOF
+set -eu
+k=\$HOME/abyss/src/target/x86_64-unknown-none/release/kernel
+[ -f \$k ] || { echo "no kernel at \$k: cargo xtask --remote build --arch x86_64 --release" >&2; exit 1; }
+ls -l \$k
+trap 'doas -n umount /mnt/abyssroot-z690a 2> /dev/null || true; doas -n rmdir /mnt/abyssroot-z690a 2> /dev/null || true' EXIT
+doas -n mkdir -p /mnt/abyssroot-z690a
+doas -n mount /dev/gpt/abyssroot /mnt/abyssroot-z690a
+if [ -f /mnt/abyssroot-z690a/boot/kernel/kernel ]; then
+	doas -n cp -p /mnt/abyssroot-z690a/boot/kernel/kernel /mnt/abyssroot-z690a/boot/kernel/kernel.prev
+fi
+doas -n cp \$k /mnt/abyssroot-z690a/boot/kernel/kernel
+doas -n sync
+echo "installed: \$(sha256 -q /mnt/abyssroot-z690a/boot/kernel/kernel) (the build's: \$(sha256 -q \$k))"
+doas -n umount /mnt/abyssroot-z690a
+EOF
+	say "the kernel is on abyssroot; BootNext is unchanged (--boot-once sets it)"
 	;;
 
 boot-once)
