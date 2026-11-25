@@ -36,6 +36,7 @@ pub mod gcfw;
 pub mod gmc;
 pub mod hdmi;
 pub mod ih;
+pub mod info;
 pub mod memory;
 mod memory_regs;
 pub mod modeset;
