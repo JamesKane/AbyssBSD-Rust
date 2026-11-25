@@ -2,7 +2,7 @@
 //! The Radeon's display as a graphics card (`drivers/amd-kms`): the
 //! firmware's running display adopted, its video memory written through
 //! BAR0, and the card registered in place of the firmware framebuffer's
-//! (docs/GRAPHICS.md §16.3).
+//! (docs/GRAPHICS.md §16.2).
 
 use alloc::sync::{Arc, Weak};
 
