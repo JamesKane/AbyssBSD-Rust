@@ -39,7 +39,7 @@ impl atom::Io for AtomIo<'_> {
     fn read(&self, index: u32) -> u32 {
         let byte = u64::from(index) * 4;
         if byte < WINDOW_BYTES {
-            self.0.read32(byte as usize)
+            self.0.read32(usize::try_from(byte).unwrap_or(0))
         } else {
             smu::read(self.0, u32::try_from(byte).unwrap_or(0))
         }
@@ -48,7 +48,7 @@ impl atom::Io for AtomIo<'_> {
     fn write(&self, index: u32, value: u32) {
         let byte = u64::from(index) * 4;
         if byte < WINDOW_BYTES {
-            self.0.write32(byte as usize, value);
+            self.0.write32(usize::try_from(byte).unwrap_or(0), value);
         } else {
             smu::write(self.0, u32::try_from(byte).unwrap_or(0), value);
         }
