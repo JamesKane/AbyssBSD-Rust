@@ -507,11 +507,14 @@ stock 15.1. Open:
 - **Drivers:** `rge` on the RTL8125D revision 2 (programmed, host-tested only) and the other RTL8125
   revisions; `amdsbwd` on the machine (host-tested only); `acpi_cppc` on amd64 if a machine needs it
   (the X870E's frequency is `hwpstate_amd`'s); and whatever else multi-user needs.
-- **Defects:** one dark-screen hang after a reboot (no log, not seen again in later reboots);
-  `xhci` `StoppedLengthInvalid` messages in benchmark boots; HD Audio's ring memory not yet checked on
-  the machine (compat-deviations).
-- **Performance:** `p2` passes (0.621), but AbyssBSD ran the cores at 5465 MHz and stock at 4700: the
-  comparison needs the same clocks. `p3` to `p7`, `p7` over the RTL8125.
+- **Defects:** one dark-screen hang after a reboot (no log, not seen again in later reboots, about
+  15 reboots on 2026-11-25); HD Audio's ring memory not yet checked on the machine
+  (compat-deviations). The `xhci` `StoppedLengthInvalid` messages were the answers to the driver's own
+  Stop Endpoint commands as the USB stack closed its pipes at shutdown: not logged any more.
+- **Performance:** `p2` at one clock (both sides at 3000 MHz, `P2_PIN_MHZ`; stock boosts to 5.2 GHz
+  and AbyssBSD ran 5465, so unpinned runs compare boost behavior) passes: geometric mean 0.645, every
+  component under the bound after `tlb.shootdown` answered before invalidating (1.035 to 0.992).
+  `p3` to `p7`, `p7` over the RTL8125.
 - **Exit:** the `x86_64-multiuser` scenario from the framebuffer and a USB keyboard alone; fsx with
   `fsck_ffs` on the media NVMe and a USB disk; the device tree against FreeBSD's `devinfo`; every
   suite so far within 2% of FreeBSD on the machine, P7's over its physical NIC.

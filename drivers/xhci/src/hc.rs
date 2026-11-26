@@ -240,6 +240,10 @@ pub(crate) struct Hc {
     slots: Vec<SpinLock<Option<Slot>>>,
     explorer: SpinLock<Option<Arc<Explorer>>>,
     stopping: AtomicBool,
+    /// Stop Endpoint commands this driver has issued and not yet seen
+    /// complete: the Stopped events meanwhile are the answer to them, so
+    /// only a stop nobody asked for is logged.
+    stops_asked: core::sync::atomic::AtomicU32,
     /// Watchdog ticks since start: a coarse clock for the diagnostics.
     ticks: core::sync::atomic::AtomicU64,
 }
@@ -435,6 +439,7 @@ impl Hc {
             slots: (0..=slots).map(|_| SpinLock::new(None)).collect(),
             explorer: SpinLock::new(None),
             stopping: AtomicBool::new(false),
+            stops_asked: core::sync::atomic::AtomicU32::new(0),
             ticks: core::sync::atomic::AtomicU64::new(0),
         })
     }
@@ -590,11 +595,13 @@ impl Hc {
                         | CompletionCode::StoppedLengthInvalid
                         | CompletionCode::StoppedShortPacket
                 ) {
-                    bus::manager().log(format_args!(
-                        "{}: tick {}: slot {slot} endpoint {endpoint} stopped at {pointer:#x}: {code:?}",
-                        self.name,
-                        self.ticks()
-                    ));
+                    if self.stops_asked.load(Ordering::Acquire) == 0 {
+                        bus::manager().log(format_args!(
+                            "{}: tick {}: slot {slot} endpoint {endpoint} stopped at {pointer:#x}: {code:?}",
+                            self.name,
+                            self.ticks()
+                        ));
+                    }
                     // Whoever stopped the endpoint completes what is left.
                     return;
                 }
@@ -806,7 +813,9 @@ impl Hc {
         only: Option<u16>,
     ) {
         if stop {
+            self.stops_asked.fetch_add(1, Ordering::AcqRel);
             let _ = self.exec(s, command::stop_endpoint(slot, dci.get()));
+            self.stops_asked.fetch_sub(1, Ordering::AcqRel);
         }
         let mut dropped = Vec::new();
         let mut others = Vec::new();
