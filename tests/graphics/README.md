@@ -62,6 +62,9 @@ needs a prepared image).
   Collabora's MIT uAPI header, which libdrm 2.4.134 does not install.
 - `panthor/gles_probe.c`: GBM, EGL and GLES 2 on a node. It prints the renderer, then clears and
   draws a triangle and checks the pixels (`gles_probe [node]`).
+- `panthor/gl_frames.c`: GL frames with no display, timed every 100 frames, to show a render
+  path that slows down (`gl_frames [node [frames [upload]]]`; `upload` adds a texture upload per
+  frame).
 - `panthor/libdrm-platform/`: **a test harness.** It builds libdrm 2.4.134 with a platform-device
   patch into `/root/harness/libdrm` on the board. Stock 15.1 libdrm describes only PCI devices, so
   stock Mesa cannot find this GPU.
@@ -71,5 +74,5 @@ needs a prepared image).
   `/var/log/sway.log`.
 - `accept-aarch64-panthor-sway.png`: the capture on the Orange Pi 6 Plus at 1680x1050.
   - Sway 1.12, Mesa 26.2.2 panfrost: `Mali-G720 MC10 (Panfrost)`, OpenGL ES 3.1.
-  - The jellyfish runs at 12 to 95 frames a second; the gap is open.
+  - The jellyfish holds about 4,100 frames a second over 90 s.
   - Taken through the harness libdrm, so it is not the stock-package acceptance.

@@ -1405,7 +1405,7 @@ hang costs a power cycle):
          (Panfrost)`;
        - komeda's card scanning out LINEAR buffers;
        - fastfetch naming the GPU;
-       - glmark2's jellyfish reporting the same renderer.
+       - glmark2's jellyfish reporting the same renderer, at about 4,100 frames a second.
 
      That is evidence for the kernel, not the stock-package acceptance. The decision (user,
      2026-11-25): the patched libdrm is what development and testing use. The patch goes upstream
@@ -1419,14 +1419,22 @@ hang costs a power cycle):
      the wrong one: `mmap` failed with `EINVAL` or mapped another buffer. `sys/drm` now hands out
      offsets from one space for all cards (test `a_buffer_imported_from_another_card_maps_as_itself`).
 
+   - **Finished timeline points are dropped at once.** The first Sway runs started at 95 frames
+     a second and decayed to none. `tests/graphics/panthor/gl_frames.c` (frames with no display)
+     showed each frame 0.2 ms slower per 100 frames. The cause was `sys/drm`'s timeline syncobjs:
+     - they kept finished points until 4,096 had piled up;
+     - a wait's fence was every point up to the one waited for;
+     - so each submit's wait and each frame's fence wait checked, and registered a waker on,
+       every earlier frame's fence.
+
+     A timeline now drops its leading finished points at every new point, and a wait covers only
+     the points not yet finished (test `a_timeline_waits_only_for_what_has_not_finished`).
+     `gl_frames` is now flat over 3,000 frames: 0.067 ms each, and 0.23 ms with a texture
+     uploaded each frame. Under Sway, the jellyfish holds 4,030 to 4,160 frames a second
+     (0.24 ms) over 90 s, as the capture shows. The sibling project's port of Linux's driver
+     reached about 711 (2,600 pinned to the big cores).
+
    Open:
-   - **Frame rate.** The jellyfish ran at 12 to 95 frames a second under Sway, where the sibling
-     project's port of Linux's driver reached about 711 (2,600 on the big cores). Not yet measured
-     or profiled. Candidates:
-     - every request waits for its input syncs on the CPU;
-     - the doorbell is re-rung by polling every 2 ms;
-     - all memory is non-cacheable;
-     - no frequency scaling (the core clock stays at 900 MHz).
    - **Scheduling.** Groups stay resident until destroyed; with more than eight groups, creation
      fails with `EBUSY`. Time-slicing, priorities and suspend and resume (07) are owed.
    - **Not done:** halt, suspend and resume, recovery after a hang (07 §7.10), and the
