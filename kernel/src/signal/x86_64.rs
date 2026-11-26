@@ -170,9 +170,7 @@ pub(super) fn sendsig(frame: &mut TrapFrame, d: &Delivery<'_>) -> Result<(), ()>
         copy_out(mc.mc_xfpustate, xstate).map_err(|_| ())?;
     }
     // The handler starts with a clean FPU (FreeBSD's `fpstate_drop`).
-    let init = FpuImage::initial().ok_or(())?;
-    // SAFETY: the initial state.
-    unsafe { init.load() };
+    FpuImage::load_initial().ok_or(())?;
     frame.rsp = sfp;
     frame.rip = d.trampoline;
     frame.rflags &= !(RFLAGS_TF | RFLAGS_DF);

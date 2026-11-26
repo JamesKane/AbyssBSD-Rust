@@ -650,12 +650,38 @@ impl FpuImage {
         &CACHE[hal::cpu_id().0 as usize % hal::MAX_CPUS]
     }
 
-    /// The initial state.
+    /// Loads the initial state into this CPU's registers (a handler
+    /// starts with a clean FPU: FreeBSD's `fpstate_drop`), from one image
+    /// made the first time and kept: no allocation, no save of the
+    /// registers it replaces.
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
-    pub(super) fn initial() -> Option<Self> {
-        let mut me = Self::saved()?;
-        me.reset();
-        Some(me)
+    pub(super) fn load_initial() -> Option<()> {
+        use core::sync::atomic::{AtomicPtr, Ordering};
+        static INITIAL: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+        let mut p = INITIAL.load(Ordering::Acquire);
+        if p.is_null() {
+            let mut me = Self::zeroed()?;
+            me.reset();
+            let mine = me.ptr.as_ptr();
+            match INITIAL.compare_exchange(
+                core::ptr::null_mut(),
+                mine,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    // Kept for good: not returned to the cache or freed.
+                    core::mem::forget(me);
+                    p = mine;
+                }
+                // Another CPU made one first: use it; ours is dropped.
+                Err(other) => p = other,
+            }
+        }
+        // SAFETY: an initial-state image of the HAL's size and alignment,
+        // never changed after it was published.
+        unsafe { hal::fpu::restore(p) };
+        Some(())
     }
 
     /// Replaces the image with the initial state.
