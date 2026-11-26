@@ -1329,8 +1329,103 @@ hang costs a power cycle):
    - **Memory attributes for user address spaces.** Slot 0 uses specification 04's generic
      non-coherent `AS_MEMATTR`; 11 §11.7's vendor rule maps GPU memory non-cacheable. Fine for the
      firmware's own sections; to decide before user memory is mapped.
-4. The global, group and stream interfaces; the scheduler; tiler heaps; buffer objects.
-5. The render node's ioctls, then Mesa's panvk and panfrost from the 15.1 packages. Before this
-   step: which Mesa the packages carry and whether it has the CSF drivers, how it finds a platform
-   render node on FreeBSD (`hw.dri` under the board's FreeBSD), and the display name it pairs
-   with (§15 question 5).
+4. The global, group and stream interfaces; the scheduler; tiler heaps; buffer objects. Exit: a
+   job runs and its fence signals, and a faulting job is contained. **Met (2026-11-25)** with
+   `tests/graphics/panthor/pt_job.c`, a client with raw ioctls and no Mesa. It sets up a VM, two
+   buffers, and a group of one queue. A three-instruction stream adds 5 to a word in a buffer,
+   and a syncobj is signalled and waited on. Then, with `fault`, a stream at an unmapped address
+   runs. Over three rounds: each job signals and its word reads 5; each fault is caught (`MMU
+   fault on address space 1`, stream fatal `0x10148`), and the group reports state 2 with fatal
+   queue 1. The fault's job still signals its fence, and the next group runs on the same address
+   space. What runs:
+   - `lib/panthor`: the ring's instructions (07 §7.4.5) and the 16-instruction kernel job around
+     a user stream (07 §7.4.3); the group and stream interface blocks, the request and
+     acknowledge words, and a group's start and stop (06, 07); page-table unmapping.
+   - `drivers/panthor`:
+     - the JOB, MMU and GPU interrupts, as a filter that masks and a thread that handles;
+     - the firmware's watchdog ping every 12 s;
+     - per-file VMs with their own address-space slots and kernel ranges, binds through the 04
+       §4.4 lock, flush, unlock sequence;
+     - groups made resident on a free group slot until destroyed (no time-slicing yet: `EBUSY`
+       when all eight are taken);
+     - each queue's sync object as the job's fence;
+     - tiler heaps and their out-of-memory growth (08);
+     - files' cleanup deferred to the driver's thread.
+
+   The MCU boots on the render node's first request, not at attach.
+
+   What the board taught:
+   - **A fault is stopped before the core lock is taken.** The first fault test wedged the board.
+     The MMU interrupt thread waited for the core lock, which a request held while it waited for
+     the firmware, which the fault had stopped. The thread now disables the faulting slot first
+     (04 §4.9.1). The bookkeeping follows under the lock: the VM is marked faulted and enabled
+     again before its next use, and every queue of its groups is marked fatal.
+   - **A failed job still completes.** A queue made fatal has its sync object written to its
+     last job's number with an error status, as group destruction does. A waiter on a dead
+     context returns instead of waiting forever.
+   - **Memory is never freed while still mapped for the GPU.** These are retired with their VM
+     instead:
+     - a mapping only partly replaced by a bind;
+     - a destroyed VM's heaps;
+     - buffers already made when a group or heap creation fails.
+
+     `mem::update` unlocks even when the flush fails. A cache-flush completion already latched
+     (a stream's own `FLUSH_CACHE2` raises it too) is cleared rather than refused.
+5. The render node's ioctls, then Mesa from the 15.1 packages. **Met for panfrost (GLES) through a
+   test harness; not met on stock packages, and not met for panvk:**
+   - **The ioctls.** All of panthor's 1.6 interface (`uapi.rs`, from Collabora's MIT header): device
+     queries, VMs and binds, buffers and their mmap offsets, groups, submits with sync operations,
+     group state, tiler heaps, and the flush-ID page at the user-MMIO offset. The flush-ID page
+     comes through `sys/drm`'s `mmap_special` hook.
+   - **panvk is not in the packages.** Mesa 26.2.2 on the board has `panthor_dri.so`,
+     `panfrost_dri.so` and `komeda_dri.so`, but no panvk Vulkan driver (only lavapipe and radv).
+     The planned exit, panvk's vkcube and Sway on Vulkan, is out of reach without building Mesa.
+     The sibling project reached the same conclusion (`../AbyssBSD/docs/boards/orangepi-6-plus/gpu.md`).
+   - **Stock libdrm cannot find a GPU that is not on PCI.** FreeBSD's libdrm 2.4.134 parses only a
+     `pci:` bus ID (`get_sysctl_pci_bus_info`). For any other device, `drmGetDevice2` fails, Mesa's
+     loader prints `failed to retrieve device information`, and EGL does not initialise on the
+     render node. Through komeda's card, Mesa falls back to llvmpipe. The kernel now publishes the
+     sysctls FreeBSD's drm-kmod does, and they are not enough for stock libdrm:
+     - `hw.dri.<unit>.busid` (`platform:panthor`, `platform:komeda`) and
+       `hw.dri.<unit>.modesetting`;
+     - per node, `dev.drm.<minor>.busid`.
+
+     So with stock packages, stock FreeBSD would not get hardware GL here either.
+   - **The harness.** `tests/graphics/panthor/libdrm-platform/build.sh` builds libdrm 2.4.134 into
+     `/root/harness/libdrm` on the board. It applies the platform-device patch from the user's
+     libdrm branch `freebsd-missing-node` (MIT, as libdrm is). The patch reads
+     `dev.drm.<minor>.busid`, treats `platform:` as a platform device, and pairs nodes by bus ID.
+     Programs get it only through `LD_LIBRARY_PATH`; the system's libdrm is untouched. With it:
+     - **GL works.** `gles_probe` on the render node and through komeda's card (Mesa's kmsro):
+       `GL_RENDERER Mali-G720 MC10 (Panfrost)`, OpenGL ES 3.1, Mesa 26.2.2. The clear and a
+       triangle read back right.
+     - **The Sway capture works.** `run-sway-panthor.sh` produced
+       `tests/graphics/accept-aarch64-panthor-sway.png`:
+       - Sway 1.12, wlroots' `Creating GLES2 renderer` with `GL renderer: Mali-G720 MC10
+         (Panfrost)`;
+       - komeda's card scanning out LINEAR buffers;
+       - fastfetch naming the GPU;
+       - glmark2's jellyfish reporting the same renderer.
+
+     That is evidence for the kernel, not the stock-package acceptance. The decision (2026-11-25):
+     test harness only, the stock exit recorded as not met until libdrm describes platform devices
+     upstream.
+   - **Offsets are global across cards.** The first Sway run drew the background right and every
+     window as garbage, on screen and in the capture. kmsro imports komeda's scanout buffers into
+     panthor's file, and a PRIME import keeps the exporter's mmap offset. With one offset space
+     per card, an imported buffer's range overlapped panthor's own buffers. `by_offset` then found
+     the wrong one: `mmap` failed with `EINVAL` or mapped another buffer. `sys/drm` now hands out
+     offsets from one space for all cards (test `a_buffer_imported_from_another_card_maps_as_itself`).
+
+   Open:
+   - **Frame rate.** The jellyfish ran at 12 to 95 frames a second under Sway, where the sibling
+     project's port of Linux's driver reached about 711 (2,600 on the big cores). Not yet measured
+     or profiled. Candidates:
+     - every request waits for its input syncs on the CPU;
+     - the doorbell is re-rung by polling every 2 ms;
+     - all memory is non-cacheable;
+     - no frequency scaling (the core clock stays at 900 MHz).
+   - **Scheduling.** Groups stay resident until destroyed; with more than eight groups, creation
+     fails with `EBUSY`. Time-slicing, priorities and suspend and resume (07) are owed.
+   - **Not done:** halt, suspend and resume, recovery after a hang (07 §7.10), and the
+     protected-mode paths.

@@ -53,3 +53,23 @@ rebooting it; QEMU exits on reboot (`-no-reboot`), so start it again.
 
 The two reference machines, and a case in the boot tier (the packages come from the network, so it
 needs a prepared image).
+
+## Panthor on the Sky1 (docs/GRAPHICS.md §17)
+
+- `panthor/pt_job.c`: the render node by raw ioctls, no Mesa. It runs a job that adds 5 to a
+  word and waits on its syncobj; with `fault`, it also runs a stream at an unmapped address and
+  checks that the group reports fatal (`pt_job [rounds [fault]]`). `panthor/panthor_drm.h` is
+  Collabora's MIT uAPI header, which libdrm 2.4.134 does not install.
+- `panthor/gles_probe.c`: GBM, EGL and GLES 2 on a node. It prints the renderer, then clears and
+  draws a triangle and checks the pixels (`gles_probe [node]`).
+- `panthor/libdrm-platform/`: **a test harness.** It builds libdrm 2.4.134 with a platform-device
+  patch into `/root/harness/libdrm` on the board. Stock 15.1 libdrm describes only PCI devices, so
+  stock Mesa cannot find this GPU.
+  `build.sh libdrm-2.4.134.tar.xz root@board [known_hosts]`.
+- `panthor/run-sway-panthor.sh`: Sway with `WLR_RENDERER=gles2`, komeda's card for the display,
+  and panthor's render node, through the harness libdrm. It uses `sway.conf` and logs to
+  `/var/log/sway.log`.
+- `accept-aarch64-panthor-sway.png`: the capture on the Orange Pi 6 Plus at 1680x1050.
+  - Sway 1.12, Mesa 26.2.2 panfrost: `Mali-G720 MC10 (Panfrost)`, OpenGL ES 3.1.
+  - The jellyfish runs at 12 to 95 frames a second; the gap is open.
+  - Taken through the harness libdrm, so it is not the stock-package acceptance.
