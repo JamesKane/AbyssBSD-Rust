@@ -1,0 +1,18 @@
+[package]
+name = "panthor-driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "panthor_driver"
+
+[dependencies]
+bus = { path = "../../sys/bus" }
+devtree = { path = "../../lib/devtree" }
+panthor = { path = "../../lib/panthor" }
+regs = { path = "../../lib/regs" }
+
+[lints]
+workspace = true

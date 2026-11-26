@@ -47,11 +47,13 @@ const REFERENCES: &[(&str, EdgeKind)] = &[
     ("dp_phy", EdgeKind::Required),
     ("cdns,pcie-phy", EdgeKind::Required),
     ("cdnsp,usb3-phy", EdgeKind::Required),
-    // The GPU's memory managers and TrustZone guard (Arm's kbase names).
-    ("physical-memory-group-manager", EdgeKind::Required),
-    ("protected-memory-allocator", EdgeKind::Required),
-    ("tzgt", EdgeKind::Required),
     // Things a device works without, and is told of when they appear.
+    // The GPU's memory managers and thermal zone (Arm's kbase driver's names): panthor uses
+    // neither manager (protected mode is not used; panthor specification 11 §11.4), and no
+    // driver serves them, so a required edge would keep the GPU waiting.
+    ("physical-memory-group-manager", EdgeKind::Optional),
+    ("protected-memory-allocator", EdgeKind::Optional),
+    ("tzgt", EdgeKind::Optional),
     ("edp-panel", EdgeKind::Optional),
     ("isp-src", EdgeKind::Optional),
     ("actuator-src", EdgeKind::Optional),

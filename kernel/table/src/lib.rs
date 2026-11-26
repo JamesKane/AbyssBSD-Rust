@@ -133,6 +133,8 @@ pub static AARCH64: &[DriverDecl] = drivers![
     sky1_clk::SHMEM_DRIVER,
     sky1_gpt::DRIVER,
     sky1_pd::DRIVER,
+    panthor_driver::POWER_DRIVER,
+    panthor_driver::DRIVER,
     sky1_pinctrl::DRIVER,
     sky1_reset::DRIVER,
     sky1_syscon::DRIVER,

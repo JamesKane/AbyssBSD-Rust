@@ -359,6 +359,7 @@ dependencies = [
  "isa",
  "linlondp",
  "nvme",
+ "panthor-driver",
  "pci",
  "rge",
  "rts5453",
@@ -969,6 +970,16 @@ dependencies = [
 [[package]]
 name = "panthor"
 version = "0.0.0"
+
+[[package]]
+name = "panthor-driver"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "devtree",
+ "panthor",
+ "regs",
+]
 
 [[package]]
 name = "pci"
