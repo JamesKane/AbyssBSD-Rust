@@ -1263,9 +1263,11 @@ settles three of the specification's open questions:
 **Platform facts from the DSDT and IORT** (`tests/corpus/opi6p/freebsd/acpidump-dt.txt`): the GPU has
 no IORT entry, so it is not behind the SMMU (its own MMU walks physical addresses, up to 40 bits);
 `_CCA` is 1, which specification 11 §11.7 says is wrong for sharing with the display, so CPU-side
-memory is treated as non-coherent. Its power resource `GPUP` (`CIXH5001`) only writes the RCSU's
-clock-gating bits; the power domain (SCMI domain 21 on Trusted Firmware's SMC agent, shared memory at
-`0x84380000`, in reserved memory) is the driver's to switch (Sky1 SoC specification 01 §1.3). Clocks
+memory is treated as non-coherent. Its `power-supply`, `GPUP` (`CIXH5001`), is a device holding
+one power resource whose `_ON` sets RCSU `PGCTRL` bits 2 to 12 and runs the SRAM memory repair
+(`DMRP`, through the RCSU window's start); the power domain (SCMI domain 21 on Trusted Firmware's SMC
+agent, shared memory at `0x84380000`, in reserved memory) has no AML at all (Sky1 SoC specification
+01 §1.3). Clocks
 `gpu_clk_core` (31), `gpu_clk_stacks` (32), `gpu_clk_200M` (272), `gpu_clk_400M` (30); resets
 `gpu_reset` (9) and `gpu_rcsu_reset` (119). The `pbha` data extension's `int_id_override` pairs pack
 into the specification's `SYSC_ALLOC` words.
@@ -1275,9 +1277,22 @@ hang costs a power cycle):
 
 1. `lib/panthor`: the register map, identification, soft reset, L2 power, cache flushes, interrupt
    blocks, and the Sky1's harvesting and system-cache values, host-tested against a model. **Built.**
-2. `drivers/panthor`: the ACPI glue (two windows, RCSU first; three positional interrupts; clocks;
-   the reset pulse; the SMC call for power domain 21). Exit: `panthor0` attaches with FreeBSD's
-   description and reports the identification above.
+2. `drivers/panthor`: the ACPI glue. Exit: `panthor0` attaches with FreeBSD's description and
+   reports the identification above. **Met (2026-11-25):** the boot log's identification lines are
+   FreeBSD's word for word (`Mali-G720-Immortalis id 0xc870 major 0x0 minor 0x0 status 0x8`, the
+   feature words, `shader_present=0x550555`), with the core clock at 900 MHz, and the soft reset
+   completes. What it took:
+   - `sky1_pd0`, the SMC agent's power domains: the platform description names the agent and the
+     GPU's line to it, `acpi0` adds it, and the kernel grants its one SiP call. On the board it
+     reports 22 domains, the running display's DPU4 on and the others off, and the GPU's domain
+     already on at boot;
+   - `sky1_gpupwr0` for `GPUP`, so the GPU's power edge to it is served (the framework brings it
+     to D0; its `_STA` already said on, so its `_ON` did not run). The GPU's kbase-only
+     references (`protected-memory-allocator`, `physical-memory-group-manager`, `tzgt`) became
+     optional edges: nothing serves the two managers;
+   - the order: domain, clocks, `gpu_reset` pulsed 20 µs, `PGCTRL` bit 0 (`0x3e77000` to
+     `0x3e77001`), then the GPU. The RCSU is mapped shared with firmware (`GPUP`'s AML uses it).
+   Interrupts are not claimed yet; nothing has unmasked them.
 3. Address space 0, the firmware image (`arm/mali/arch12.8/mali_csffw.bin`, installed on the
    board, never committed), and the MCU boot. Exit: interface 3.13.0 read back.
 4. The global, group and stream interfaces; the scheduler; tiler heaps; buffer objects.
