@@ -36,6 +36,8 @@ pub(crate) const POOL_BYTES: u64 = 1 << 20;
 const VMIDS: usize = 7;
 /// The largest buffer: 1 GiB.
 const MAX_BO: u64 = 1 << 30;
+/// `AMDGPU_IB_FLAG_EMIT_MEM_SYNC` (bit 6) of an indirect buffer.
+const IB_FLAG_EMIT_MEM_SYNC: u32 = 1 << 6;
 /// How long a submission waits for room in the ring.
 const RING_WAIT_MS: u32 = 200;
 /// `AMDGPU_VM_PAGE_*` of a mapping.
@@ -1112,22 +1114,34 @@ impl Render {
                 // fence, the address space, the state loads (all of them when the
                 // context changed), the frame, its fences, the switch.
                 let mut p = Packets::new();
-                p.wait_mem(
-                    3,
-                    gfx.seq_address(),
-                    self.seq.load(Ordering::Acquire),
-                    0xffff_ffff,
-                    4,
-                    true,
-                );
                 let (flush, epoch) = self.vm_check(engine, vmid);
+                let switched = self.last_ctx.swap(ctx_id, Ordering::AcqRel) != ctx_id;
+                // The engine waits for the previous job to finish only when
+                // something must not overlap it: a switch of address space
+                // (and its flush), or of context. Consecutive jobs of one
+                // context run in order, their caches written back by the
+                // previous job's end-of-pipe fence and invalidated by the
+                // client's own packets (or the IB's memory-sync flag).
+                if flush || switched {
+                    p.wait_mem(
+                        3,
+                        gfx.seq_address(),
+                        self.seq.load(Ordering::Acquire),
+                        0xffff_ffff,
+                        4,
+                        true,
+                    );
+                }
                 if flush {
                     p.0.extend(amdgpu::gmc::ring_vm_flush(vmid, root, false, 0).0);
                 }
-                let switched = self.last_ctx.swap(ctx_id, Ordering::AcqRel) != ctx_id;
                 p.context_control(if switched { 0x0101_8003 } else { 0 });
                 p.frame_control(false);
                 for ib in &ibs {
+                    // The client asked for a full cache acquire before it.
+                    if ib.flags & IB_FLAG_EMIT_MEM_SYNC != 0 {
+                        p.acquire_mem(amdgpu::pm4::acquire::FULL, false);
+                    }
                     p.indirect_buffer(extended(ib.va_start), ib.ib_bytes / 4, vmid, false);
                 }
                 p.frame_control(true);
