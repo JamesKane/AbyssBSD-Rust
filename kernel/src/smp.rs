@@ -449,6 +449,19 @@ pub(crate) fn on_call_ipi() {
     let generation = CALL.generation.load(Ordering::Acquire);
     let va = VirtAddr::new(CALL.va.load(Ordering::Acquire));
     let len = CALL.len.load(Ordering::Acquire);
+    if len == 0 {
+        // A full barrier for `membarrier`'s callers (and a ping), before
+        // the answer.
+        core::sync::atomic::fence(Ordering::SeqCst);
+    }
+    // The request is read; answer before invalidating, as FreeBSD's
+    // `invlop_handler` does: this CPU runs nothing else until the handler
+    // returns (interrupts are masked; only an NMI preempts it, and that
+    // touches neither the range nor user tables), so the initiator may go
+    // on while the flush finishes.
+    ACKS[hal::cpu_id().index() % hal::MAX_CPUS]
+        .0
+        .store(generation, Ordering::Release);
     if len > 64 * 4096 {
         // A user range needs only the user entries gone.
         #[cfg(target_arch = "x86_64")]
@@ -462,11 +475,6 @@ pub(crate) fn on_call_ipi() {
     } else if len > 0 {
         crate::mm::flush_range(va, len);
     }
-    // A full barrier for `membarrier`'s callers, before the answer.
-    core::sync::atomic::fence(Ordering::SeqCst);
-    ACKS[hal::cpu_id().index() % hal::MAX_CPUS]
-        .0
-        .store(generation, Ordering::Release);
 }
 
 /// How PSCI calls reach firmware: the FADT's `PSCI_USE_HVC`, else SMC.

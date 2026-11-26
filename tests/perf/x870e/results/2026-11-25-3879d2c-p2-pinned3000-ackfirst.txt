@@ -1,0 +1,60 @@
+perf on the Ryzen 9 7900X / X870E: AbyssBSD 3879d2c vs FreeBSD 15.1-RELEASE GENERIC (stock)
+3 FreeBSD runs, 3 AbyssBSD runs; FreeBSD 15.1 userland on both
+
+freebsd: side=freebsd freq=3000 levels=4700/5875,3000/2550 cx=C1 ident=GENERIC
+abyss: side=abyss ident=ABYSSBSD freq=5439
+
+core class workers, AbyssBSD 3879d2c vs FreeBSD 15.1-RELEASE GENERIC (stock), 3/3 runs
+ratio = median(AbyssBSD) / median(FreeBSD); pass <= 1.02; noisy = FreeBSD CV > 1%
+
+benchmark                     FreeBSD       AbyssBSD   ratio  95% CI              CV  verdict
+callout.armcancel          40.6 ns/op     25.9 ns/op   0.639  [0.632, 0.662]   0.3%  Win
+callout.latency.p50          836.0 ns       846.0 ns   1.012  [0.981, 1.016]   0.7%  Pass
+callout.latency.p99         1037.0 ns       906.0 ns   0.874  [0.868, 0.877]   0.0%  Win
+ctxsw.cross               551.2 ns/op    391.5 ns/op   0.710  [0.680, 0.723]   0.1%  Win
+ctxsw.same                274.3 ns/op    125.5 ns/op   0.457  [0.456, 0.458]   0.2%  Win
+ipi.rtt                   621.4 ns/op    445.3 ns/op   0.717  [0.714, 0.719]   0.3%  Win
+malloc.hit.t1              18.1 ns/op     11.8 ns/op   0.652  [0.646, 0.653]   0.6%  Win
+malloc.hit.t8               2.3 ns/op      2.0 ns/op   0.886  [0.845, 0.903]   0.1%  Win
+malloc.miss.t1             20.0 ns/op     12.5 ns/op   0.625  [0.593, 0.634]   3.2%  Noisy
+malloc.miss.t8              3.6 ns/op      3.7 ns/op   1.019  [1.009, 1.024]   0.2%  Pass
+mtx.t1                      5.9 ns/op      5.8 ns/op   0.994  [0.994, 0.995]   0.1%  Win
+mtx.t2                      9.0 ns/op      8.4 ns/op   0.935  [0.899, 1.048]   2.1%  Noisy
+mtx.t4                     11.5 ns/op      6.7 ns/op   0.583  [0.519, 0.648]   0.9%  Win
+mtx.t8                     12.6 ns/op      8.0 ns/op   0.635  [0.611, 0.649]   1.1%  Noisy
+page.hit.t1                25.6 ns/op      8.9 ns/op   0.348  [0.343, 0.352]   1.2%  Noisy
+page.hit.t8                 3.2 ns/op      1.4 ns/op   0.442  [0.441, 0.445]   0.4%  Win
+page.miss.t1               25.5 ns/op     23.6 ns/op   0.929  [0.918, 0.956]   0.5%  Win
+rw.rd.t1                    6.9 ns/op      4.8 ns/op   0.693  [0.691, 0.695]   0.1%  Win
+rw.rd.t2                   39.0 ns/op     15.5 ns/op   0.399  [0.388, 0.401]   0.3%  Win
+rw.rd.t4                   46.6 ns/op     24.2 ns/op   0.519  [0.502, 0.524]   0.1%  Win
+rw.rd.t8                   97.8 ns/op     28.8 ns/op   0.294  [0.293, 0.297]   0.4%  Win
+rw.wr.t1                    5.9 ns/op      5.9 ns/op   1.012  [1.007, 1.025]   0.3%  Pass
+rw.wr.t2                    8.7 ns/op      6.5 ns/op   0.746  [0.730, 0.774]   2.5%  Noisy
+rw.wr.t4                   12.0 ns/op      6.3 ns/op   0.531  [0.521, 0.534]   1.0%  Win
+rw.wr.t8                   11.0 ns/op      6.8 ns/op   0.615  [0.566, 0.620]   4.9%  Noisy
+sx.rd.t1                    6.9 ns/op      4.9 ns/op   0.709  [0.707, 0.711]   0.0%  Win
+sx.rd.t2                   39.0 ns/op     15.6 ns/op   0.400  [0.394, 0.401]   0.1%  Win
+sx.rd.t4                   46.7 ns/op     23.5 ns/op   0.503  [0.489, 0.511]   0.2%  Win
+sx.rd.t8                  100.7 ns/op     26.9 ns/op   0.267  [0.264, 0.274]   0.5%  Win
+sx.wr.t1                    5.9 ns/op      6.0 ns/op   1.021  [1.021, 1.022]   0.0%  Slower
+sx.wr.t2                    8.8 ns/op      6.4 ns/op   0.727  [0.718, 0.745]   1.2%  Noisy
+sx.wr.t4                   12.5 ns/op      6.4 ns/op   0.511  [0.499, 0.520]   0.9%  Win
+sx.wr.t8                   12.3 ns/op      6.7 ns/op   0.547  [0.515, 0.564]   4.2%  Noisy
+tlb.shootdown            1649.1 ns/op   1635.2 ns/op   0.992  [0.988, 0.993]   0.2%  Win
+wakeup.latency.p50           931.0 ns       781.0 ns   0.839  [0.802, 0.871]   1.8%  Noisy
+wakeup.latency.p99           991.0 ns       831.0 ns   0.839  [0.822, 0.857]   1.5%  Noisy
+
+geometric mean ratio 0.645; 3 pass, 22 win, 1 slower, 10 noisy, 0 missing
+
+components (gate: geometric mean <= 1.02):
+callout                  3 benchmarks   0.827  pass
+ctxsw                    2 benchmarks   0.570  pass
+ipi                      1 benchmarks   0.717  pass
+malloc                   4 benchmarks   0.779  pass
+mtx                      4 benchmarks   0.766  pass
+page                     3 benchmarks   0.523  pass
+rw                       8 benchmarks   0.565  pass
+sx                       8 benchmarks   0.546  pass
+tlb                      1 benchmarks   0.992  pass
+wakeup                   2 benchmarks   0.839  pass
