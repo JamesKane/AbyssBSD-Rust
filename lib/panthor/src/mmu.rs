@@ -98,6 +98,33 @@ pub fn map(
     Ok(())
 }
 
+/// Clears the page descriptors of `[va, va + len)` (whatever is mapped there; holes are left as
+/// they are). Tables stay: they are freed with the address space.
+pub fn unmap(t: &mut dyn Tables, root: u64, va_bits: u8, va: u64, len: u64) -> Result<(), Error> {
+    if (va | len) & 0xFFF != 0 {
+        return Err(Error::Bad("unaligned unmapping"));
+    }
+    if !(21..=48).contains(&va_bits) || va.checked_add(len).is_none_or(|end| end > 1 << va_bits) {
+        return Err(Error::Bad("unmapping beyond the address space"));
+    }
+    let n = levels(va_bits);
+    let mut off = 0;
+    while off < len {
+        let v = va + off;
+        let mut table = Some(root);
+        for level in (4 - n)..3 {
+            let Some(tb) = table else { break };
+            let d = t.read(tb, (v >> (39 - 9 * level) & 0x1FF) as usize);
+            table = (d & 0b11 == VALID_TABLE).then_some(d & OA_MASK);
+        }
+        if let Some(tb) = table {
+            t.write(tb, (v >> 12 & 0x1FF) as usize, 0);
+        }
+        off += 0x1000;
+    }
+    Ok(())
+}
+
 /// Walks `va` to its page descriptor (0 if unmapped), for checks.
 pub fn walk(t: &dyn Tables, root: u64, va_bits: u8, va: u64) -> u64 {
     if !(21..=48).contains(&va_bits) {

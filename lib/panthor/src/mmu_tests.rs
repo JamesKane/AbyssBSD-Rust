@@ -126,6 +126,25 @@ fn bad_mappings_are_refused() {
 }
 
 #[test]
+fn unmapping_clears_pages_and_skips_holes() {
+    let mut m = Mem::new();
+    let root = 0x8000_0000;
+    mmu::map(&mut m, root, 48, 0x10_0000, 0x5000_0000, 0x3000, RW).unwrap();
+    // Across mapped pages and an unmapped tail, and a range with no tables at all.
+    mmu::unmap(&mut m, root, 48, 0x10_1000, 0x4000).unwrap();
+    mmu::unmap(&mut m, root, 48, 0x40_0000_0000, 0x1000).unwrap();
+    assert_ne!(mmu::walk(&m, root, 48, 0x10_0000), 0);
+    assert_eq!(mmu::walk(&m, root, 48, 0x10_1000), 0);
+    assert_eq!(mmu::walk(&m, root, 48, 0x10_2000), 0);
+    // And mapped again.
+    mmu::map(&mut m, root, 48, 0x10_1000, 0x6000_0000, 0x1000, RW).unwrap();
+    assert_eq!(
+        mmu::walk(&m, root, 48, 0x10_1000) & 0x0000_FFFF_FFFF_F000,
+        0x6000_0000
+    );
+}
+
+#[test]
 fn attribute_words_are_the_specified_values() {
     assert_eq!(mmu::memattr(false), 0x4C4C_4C4C_8C4C_8F4C);
     assert_eq!(mmu::memattr(true), 0x4C4C_4C4C_9C4C_9F4C);

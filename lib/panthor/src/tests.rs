@@ -175,18 +175,18 @@ fn flush_commands_are_encoded_as_the_specification_shows() {
 }
 
 #[test]
-fn a_flush_waits_for_completion_and_refuses_a_pending_one() {
+fn a_flush_waits_for_its_own_completion_not_a_stale_one() {
     let m = Model::sky1();
     control::flush(&m, &mut Ticker(&m), Flush::PAGE_TABLES).unwrap();
     assert_eq!(m.get(regs::GPU_INT + regs::INT_RAWSTAT), 0);
+    // A stale completion is cleared first: the wait still lasts until the command completes.
     m.set(
         regs::GPU_INT + regs::INT_RAWSTAT,
         regs::INT_CLEAN_CACHES_COMPLETED,
     );
-    assert_eq!(
-        control::flush(&m, &mut Ticker(&m), Flush::SUSPEND),
-        Err(Error::FlushPending)
-    );
+    let before = m.now();
+    control::flush(&m, &mut Ticker(&m), Flush::SUSPEND).unwrap();
+    assert!(m.now() - before >= m.latency);
 }
 
 #[test]

@@ -117,9 +117,12 @@ impl Flush {
 /// already latched means an earlier flush was never acknowledged: that is refused, as the
 /// specification has a flush still pending fail at once.
 pub fn flush(r: &dyn Regs, d: &mut dyn Delay, f: Flush) -> Result<(), Error> {
-    if r.read32(regs::GPU_INT + regs::INT_RAWSTAT) & regs::INT_CLEAN_CACHES_COMPLETED != 0 {
-        return Err(Error::FlushPending);
-    }
+    // The caller serializes its flushes, so a completion already latched belongs to an earlier
+    // one, or to a command stream's own flush: cleared, so it cannot end this wait early.
+    r.write32(
+        regs::GPU_INT + regs::INT_CLEAR,
+        regs::INT_CLEAN_CACHES_COMPLETED,
+    );
     r.write32(regs::GPU_CMD, f.command());
     poll(d, 10, 100_000, "cache flush", || {
         r.read32(regs::GPU_INT + regs::INT_RAWSTAT) & regs::INT_CLEAN_CACHES_COMPLETED != 0

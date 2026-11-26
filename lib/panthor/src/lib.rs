@@ -25,6 +25,7 @@ pub mod fw;
 pub mod id;
 pub mod mmu;
 pub mod regs;
+pub mod ring;
 pub mod sky1;
 
 #[cfg(test)]
@@ -35,6 +36,8 @@ mod fw_tests;
 mod mmu_tests;
 #[cfg(test)]
 mod model;
+#[cfg(test)]
+mod ring_tests;
 #[cfg(test)]
 mod tests;
 

@@ -178,3 +178,78 @@ fn a_ping_toggles_and_is_acknowledged() {
     csf::ping(&s, &i);
     assert_eq!(s.read32(GLB_IN) & csf::REQ_PING, 0, "toggled back");
 }
+
+#[test]
+fn slots_resolve_and_requests_update_only_their_bits() {
+    let s = board(8, 8);
+    let i = csf::discover(&s).unwrap();
+    let g = csf::csg(&s, &i, 3).unwrap();
+    assert_eq!((g.input, g.output), (0x8300, 0x9300));
+    let c = csf::cs(&s, &i, 3, 2).unwrap();
+    assert_eq!((c.input, c.output), (0xA0C0, 0xC200));
+    assert!(csf::csg(&s, &i, 8).is_err());
+    assert!(csf::cs(&s, &i, 0, 8).is_err());
+    // A toggle of the endpoint bit leaves the state field and the other bits alone.
+    s.set(g.input, 0x1000_0001);
+    s.set(g.output, 0x0000_0011);
+    csf::toggle(&s, g.input, g.output, csf::CSG_ENDPOINT_CONFIG);
+    assert_eq!(s.read32(g.input), 0x1000_0001);
+    s.set(g.output, 0x0000_0001);
+    csf::toggle(&s, g.input, g.output, csf::CSG_ENDPOINT_CONFIG);
+    assert_eq!(s.read32(g.input), 0x1000_0011);
+    // Events: the firmware flips SYNC_UPDATE; acknowledging copies it back.
+    s.set(g.output, 0x1000_0011 ^ csf::CSG_SYNC_UPDATE);
+    assert_eq!(
+        csf::events(&s, g.input, g.output, csf::CSG_EVENTS),
+        csf::CSG_SYNC_UPDATE
+    );
+    csf::ack_events(&s, g.input, g.output, csf::CSG_EVENTS);
+    assert_eq!(csf::events(&s, g.input, g.output, csf::CSG_EVENTS), 0);
+}
+
+#[test]
+fn a_group_is_programmed_and_started() {
+    let s = board(8, 8);
+    let i = csf::discover(&s).unwrap();
+    let g = csf::csg(&s, &i, 0).unwrap();
+    let c = csf::cs(&s, &i, 0, 0).unwrap();
+    csf::program_stream(
+        &s,
+        &c,
+        &csf::Stream {
+            ring: 0x7F_0000_0000,
+            ring_size: 0x4000,
+            user_input: 0x0500_0000,
+            user_output: 0x0500_1000,
+            priority: 3,
+            doorbell: 1,
+        },
+    );
+    assert_eq!(s.read32(c.input + 0x10), 0);
+    assert_eq!(s.read32(c.input + 0x14), 0x7F);
+    assert_eq!(s.read32(c.input + 0x04), 3 | 1 << 8);
+    assert_eq!(s.read32(c.input) & 0x507, 0x501);
+    let grp = csf::Group {
+        compute: 0x55_0555,
+        fragment: 0x55_0555,
+        tiler: 1,
+        max_compute: 10,
+        max_fragment: 10,
+        max_tiler: 1,
+        priority: 15,
+        as_slot: 1,
+        suspend: 0x0600_0000,
+        protm_suspend: 0x0610_0000,
+    };
+    assert_eq!(csf::endpoint(&grp), 10 | 10 << 8 | 1 << 16 | 15 << 28);
+    csf::start_group(&s, &i, &g, &grp, 1, csf::CSG_START);
+    // Interface 3.13: the 32-bit endpoint field.
+    assert_eq!(s.read32(g.input + 0x34), csf::endpoint(&grp));
+    assert_eq!(s.read32(g.input + 0x38), 0);
+    assert_eq!(s.read32(g.input + 0x50), 1);
+    assert_eq!(s.read32(g.input) & 7, csf::CSG_START);
+    assert!(!csf::csg_acked(&s, &g, csf::CSG_ENDPOINT_CONFIG));
+    s.set(g.output, s.read32(g.input));
+    assert!(csf::csg_acked(&s, &g, csf::CSG_ENDPOINT_CONFIG));
+    assert_eq!(csf::csg_state(&s, &g), csf::CSG_START);
+}
