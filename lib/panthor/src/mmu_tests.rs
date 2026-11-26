@@ -112,6 +112,12 @@ fn bad_mappings_are_refused() {
         mmu::map(&mut m, root, 48, 0, 0x5000, 0x1000, RW),
         Err(Error::Bad("already mapped"))
     );
+    // More than four levels' worth of address bits: refused, not walked.
+    assert_eq!(
+        mmu::map(&mut m, root, 52, 0, 0, 0x1000, RW),
+        Err(Error::Bad("mapping beyond the address space"))
+    );
+    assert_eq!(mmu::walk(&m, root, 52, 0), 0);
     m.limit = m.tables.len();
     assert_eq!(
         mmu::map(&mut m, root, 48, 0x40_0000_0000, 0, 0x1000, RW),

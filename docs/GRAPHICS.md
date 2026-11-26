@@ -1313,6 +1313,22 @@ hang costs a power cycle):
      reader. To install it on the board's AbyssBSD root: copy it from the board's FreeBSD (same
      path) — it is Arm's, redistributable, and not in this repository.
    Not yet: the JOB, MMU and GPU interrupts; the watchdog ping; halt, suspend and recovery.
+   Detach (and shutdown) stops a running MCU before its memory goes: the JOB block masked,
+   `MCU_CONTROL` 0 and seen 0, the caches flushed and slot 0 unbound, the L2 down; if the MCU does
+   not stop, the memory is kept rather than freed under it. A failed boot after slot 0 is bound
+   does the same.
+
+   Open:
+   - **`GPUP`'s order against the domain.** On this board the firmware leaves both the domain and
+     `GPUP`'s power resource on, so `_ON` has never run here. Were `_STA` to read off,
+     `sky1_gpupwr0` would run `_ON` (power gates and the memory repair) before panthor votes the
+     domain on: whether that order is right is not established (a question for the wall).
+   - **A crash leaves the MCU running.** A panic or a watchdog reset skips detach, so slot 0
+     stays bound across a warm reset into the next system (FreeBSD by default). Whether FreeBSD's
+     driver then initialises the GPU has not been tried.
+   - **Memory attributes for user address spaces.** Slot 0 uses specification 04's generic
+     non-coherent `AS_MEMATTR`; 11 §11.7's vendor rule maps GPU memory non-cacheable. Fine for the
+     firmware's own sections; to decide before user memory is mapped.
 4. The global, group and stream interfaces; the scheduler; tiler heaps; buffer objects.
 5. The render node's ioctls, then Mesa's panvk and panfrost from the 15.1 packages. Before this
    step: which Mesa the packages carry and whether it has the CSF drivers, how it finds a platform

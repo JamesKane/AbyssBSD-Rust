@@ -35,6 +35,14 @@ fn the_board_gpu_is_identified_as_freebsd_named_it() {
 }
 
 #[test]
+fn address_bits_are_clamped_to_four_levels() {
+    let m = Model::sky1();
+    m.set(regs::MMU_FEATURES, 0x2834);
+    let info = id::probe(&m).unwrap();
+    assert_eq!(info.va_bits(), 48);
+}
+
+#[test]
 fn product_names_follow_cores_and_ray_tracing() {
     let m = Model::sky1();
     let mut info = id::probe(&m).unwrap();

@@ -66,7 +66,7 @@ pub fn map(
     if (va | pa | len) & 0xFFF != 0 {
         return Err(Error::Bad("unaligned mapping"));
     }
-    if va_bits >= 64 || va.checked_add(len).is_none_or(|end| end > 1 << va_bits) {
+    if !(21..=48).contains(&va_bits) || va.checked_add(len).is_none_or(|end| end > 1 << va_bits) {
         return Err(Error::Bad("mapping beyond the address space"));
     }
     let n = levels(va_bits);
@@ -100,6 +100,9 @@ pub fn map(
 
 /// Walks `va` to its page descriptor (0 if unmapped), for checks.
 pub fn walk(t: &dyn Tables, root: u64, va_bits: u8, va: u64) -> u64 {
+    if !(21..=48).contains(&va_bits) {
+        return 0;
+    }
     let n = levels(va_bits);
     let mut table = root;
     for level in (4 - n)..3 {
@@ -204,6 +207,18 @@ pub fn enable(
     r.write64(as_reg(slot, AS_TRANSTAB), root);
     r.write64(as_reg(slot, AS_MEMATTR), memattr);
     r.write64(as_reg(slot, AS_TRANSCFG), transcfg);
+    command(r, d, slot, CMD_UPDATE)
+}
+
+/// Unbinds `slot` (04 §4.3.2, full form, after the caller's cache flush): translation off, every
+/// access faults, its fault interrupt masked.
+pub fn disable(r: &dyn Regs, d: &mut dyn Delay, slot: usize) -> Result<(), Error> {
+    use crate::regs::{INT_MASK, MMU_INT};
+    let mask = r.read32(MMU_INT + INT_MASK);
+    r.write32(MMU_INT + INT_MASK, mask & !(1u32 << slot));
+    r.write64(as_reg(slot, AS_TRANSTAB), 0);
+    r.write64(as_reg(slot, AS_MEMATTR), 0);
+    r.write64(as_reg(slot, AS_TRANSCFG), 1);
     command(r, d, slot, CMD_UPDATE)
 }
 

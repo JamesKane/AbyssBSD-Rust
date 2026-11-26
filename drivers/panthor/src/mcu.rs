@@ -79,8 +79,11 @@ impl Shared for SharedMem<'_> {
 /// What a boot leaves running: the MCU's memory, which must stay while it runs.
 pub(crate) struct Booted {
     pub(crate) iface: Iface,
-    _tables: Vec<DmaCoherent<u64>>,
-    _sections: Vec<DmaCoherent<u8>>,
+    // Kept for the MCU's life: it runs from them.
+    #[allow(dead_code)]
+    tables: Vec<DmaCoherent<u64>>,
+    #[allow(dead_code)]
+    sections: Vec<DmaCoherent<u8>>,
     pub(crate) git_sha: String,
 }
 
@@ -169,7 +172,7 @@ pub(crate) fn boot(
         }
         sections.push(mem);
     }
-    let shared = &sections[shared_index.ok_or("no interface section")?];
+    shared_index.ok_or("no interface section")?;
     log(format_args!(
         "MCU address space: {} table pages, root {root:#x}; binding slot 0",
         t.pages.len()
@@ -186,7 +189,38 @@ pub(crate) fn boot(
         log(format_args!("slot 0: {e:?}"));
         "binding the MCU's address space failed"
     })?;
+    // From here the GPU may use the memory: a failure stops it before the memory goes.
+    match start(s, gpu, &sections, shared_index, info, core_hz, log) {
+        Ok(iface) => Ok(Booted {
+            iface,
+            tables: t.pages,
+            sections,
+            git_sha,
+        }),
+        Err(why) => {
+            let held = Booted {
+                iface: Iface::default(),
+                tables: t.pages,
+                sections,
+                git_sha,
+            };
+            held.shut_down(gpu, log);
+            Err(why)
+        }
+    }
+}
 
+/// Starts the MCU on the bound address space and brings its interface up (05 §5.5 steps 4 to 9).
+fn start(
+    s: &Sleepable,
+    gpu: &Window,
+    sections: &[DmaCoherent<u8>],
+    shared_index: Option<usize>,
+    info: &panthor::id::Info,
+    core_hz: u64,
+    log: &dyn Fn(core::fmt::Arguments<'_>),
+) -> Result<Iface, &'static str> {
+    let shared = &sections[shared_index.ok_or("no interface section")?];
     // 4. Start it and wait for the global interface's signal (polled: no handler yet).
     gpu.write32(r::JOB_INT + r::INT_CLEAR, u32::MAX);
     log(format_args!("MCU_CONTROL = auto; waiting for the firmware"));
@@ -251,12 +285,41 @@ pub(crate) fn boot(
         return Err("ping not answered");
     }
     log(format_args!("firmware configured and answering"));
-    Ok(Booted {
-        iface,
-        _tables: t.pages,
-        _sections: sections,
-        git_sha,
-    })
+    Ok(iface)
+}
+
+impl Booted {
+    /// Stops the MCU and frees its memory, in the order 05 §5.7.2 and §5.7.4 give: the JOB
+    /// block masked, the MCU disabled and seen disabled, the caches flushed and slot 0 unbound
+    /// (04 §4.3.2), the L2 down. If the MCU does not stop, or the slot does not unbind, the
+    /// memory is kept forever rather than freed under a GPU that may still use it.
+    pub(crate) fn shut_down(self, gpu: &Window, log: &dyn Fn(core::fmt::Arguments<'_>)) {
+        gpu.write32(r::JOB_INT + r::INT_MASK, 0);
+        gpu.write32(r::MCU_CONTROL, 0);
+        let mut stopped = false;
+        for _ in 0..10_000 {
+            if gpu.read32(r::MCU_STATUS) == 0 {
+                stopped = true;
+                break;
+            }
+            bus::manager().delay_us(10);
+        }
+        let unbound = stopped
+            && control::flush(gpu, &mut Spin, control::Flush::PAGE_TABLES).is_ok()
+            && mmu::disable(gpu, &mut Spin, 0).is_ok();
+        if !unbound {
+            log(format_args!(
+                "the MCU did not stop (MCU_STATUS {}): its memory is kept",
+                gpu.read32(r::MCU_STATUS)
+            ));
+            core::mem::forget(self);
+            return;
+        }
+        if let Err(e) = control::l2_power_down(gpu, &mut Spin) {
+            log(format_args!("L2 power-down: {e:?}"));
+        }
+        log(format_args!("MCU stopped, slot 0 unbound"));
+    }
 }
 
 /// Rings doorbell 0, after the shared memory's writes (05 §5.6.3 step 4).

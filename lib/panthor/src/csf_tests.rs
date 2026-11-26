@@ -27,9 +27,12 @@ impl Shared for Section {
         self.0.borrow().len() * 4
     }
     fn read32(&self, off: usize) -> u32 {
+        // As the driver's device memory: a misaligned word access is a bug.
+        assert!(off.is_multiple_of(4), "misaligned read at {off:#x}");
         self.0.borrow()[off / 4]
     }
     fn write32(&self, off: usize, v: u32) {
+        assert!(off.is_multiple_of(4), "misaligned write at {off:#x}");
         self.set(off, v);
     }
 }
@@ -101,6 +104,19 @@ fn a_firmware_that_did_not_boot_or_lies_is_refused() {
     let s = board(8, 8);
     s.set(0x0C, 0x100);
     assert!(csf::discover(&s).is_err());
+    // Misaligned addresses and strides: refused, never read.
+    let s = board(8, 8);
+    s.set(0x08, SHARED_VA + GLB_IN as u32 + 2);
+    assert_eq!(
+        csf::discover(&s),
+        Err(Error::Bad("interface object not word aligned"))
+    );
+    let s = board(8, 8);
+    s.set(0x14, 0x402);
+    assert_eq!(
+        csf::discover(&s),
+        Err(Error::Bad("control block not word aligned"))
+    );
     // Too few groups, too many streams, groups that differ.
     assert!(csf::discover(&board(2, 8)).is_err());
     assert!(csf::discover(&board(8, 33)).is_err());

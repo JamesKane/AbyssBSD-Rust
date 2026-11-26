@@ -18,7 +18,7 @@ pub trait Shared {
 }
 
 /// An interface version (05 §5.4.2).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version {
     pub major: u8,
     pub minor: u8,
@@ -46,7 +46,7 @@ impl core::fmt::Display for Version {
 }
 
 /// The interface as discovered.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Iface {
     pub version: Version,
     pub features: u32,
@@ -87,12 +87,19 @@ fn resolve(s: &dyn Shared, va: u32, size: usize) -> Result<usize, Error> {
     if off.checked_add(size).is_none_or(|end| end > s.len()) {
         return Err(Error::Bad("interface object outside the section"));
     }
+    // Every field is a 32-bit word: an object must be word aligned.
+    if !off.is_multiple_of(4) {
+        return Err(Error::Bad("interface object not word aligned"));
+    }
     Ok(off)
 }
 
 fn block(s: &dyn Shared, off: usize, size: usize) -> Result<(), Error> {
     if off.checked_add(size).is_none_or(|end| end > s.len()) {
         return Err(Error::Bad("control block outside the section"));
+    }
+    if !off.is_multiple_of(4) {
+        return Err(Error::Bad("control block not word aligned"));
     }
     Ok(())
 }

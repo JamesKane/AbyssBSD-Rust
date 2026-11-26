@@ -80,9 +80,10 @@ impl Info {
         }
     }
 
-    /// GPU virtual address bits (`MMU_FEATURES[7:0]`).
+    /// GPU virtual address bits (`MMU_FEATURES[7:0]`), at most 48: the page tables have four
+    /// levels at most (04 §4.6.1).
     pub fn va_bits(&self) -> u8 {
-        (self.mmu_features & 0xFF) as u8
+        ((self.mmu_features & 0xFF) as u8).min(48)
     }
 
     /// Physical address bits (`MMU_FEATURES[15:8]`): the DMA addressing limit.

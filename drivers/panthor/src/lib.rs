@@ -332,14 +332,22 @@ impl Driver for Panthor {
         Ok(())
     }
 
-    fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {
+    fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
+        let s = cx.sleepable();
+        // The thread first: a boot in progress finishes (or fails and tears itself down)
+        // before anything it uses goes.
         self.gpu.exit.store(true, Ordering::Release);
         self.gpu.queue.wake_all();
-        // The MCU is stopped and the interrupt blocks masked (05 §5.7.2).
-        self.gpu
-            .regs
-            .write32(panthor::regs::JOB_INT + panthor::regs::INT_MASK, 0);
-        self.gpu.regs.write32(panthor::regs::MCU_CONTROL, 0);
+        let t = self.thread.lock().take();
+        if let Some(t) = t {
+            t.join(s);
+        }
+        // Then a running MCU is stopped and its memory freed (05 §5.7.4), before the clocks,
+        // the domain vote and the register grants are released with the instance.
+        let booted = core::mem::replace(&mut *self.gpu.state.lock(), Ok(None));
+        if let Ok(Some(b)) = booted {
+            b.shut_down(&self.gpu.regs, &|a| self.gpu.log(a));
+        }
     }
 }
 
