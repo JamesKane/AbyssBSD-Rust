@@ -815,6 +815,7 @@ dependencies = [
  "mbuf",
  "net",
  "nvme",
+ "panthor-driver",
  "pci",
  "pt",
  "random",
@@ -975,10 +976,16 @@ version = "0.0.0"
 name = "panthor-driver"
 version = "0.0.0"
 dependencies = [
+ "abi",
  "bus",
  "devtree",
+ "hal",
  "panthor",
  "regs",
+ "sched",
+ "sync",
+ "sysctl",
+ "vm",
 ]
 
 [[package]]

@@ -9,10 +9,16 @@ publish.workspace = true
 name = "panthor_driver"
 
 [dependencies]
+abi = { path = "../../lib/abi" }
 bus = { path = "../../sys/bus" }
 devtree = { path = "../../lib/devtree" }
+hal = { path = "../../arch/hal" }
 panthor = { path = "../../lib/panthor" }
 regs = { path = "../../lib/regs" }
+sched = { path = "../../sys/sched" }
+sync = { path = "../../sys/sync" }
+sysctl = { path = "../../sys/sysctl" }
+vm = { path = "../../sys/vm" }
 
 [lints]
 workspace = true

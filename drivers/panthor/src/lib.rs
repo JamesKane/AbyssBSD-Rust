@@ -2,11 +2,15 @@
 //! `panthor`: the Arm Mali GPU with the Command Stream Frontend on the CIX Sky1 (`CIXH5000`, an
 //! Immortalis-G720), as the board's FreeBSD names it (`panthor0: <Arm Mali GPU (CIX Sky1)>`).
 //!
-//! Brought up in stages (docs/GRAPHICS.md §17). Attach now runs the Sky1's power-up sequence
+//! Brought up in stages (docs/GRAPHICS.md §17). Attach runs the Sky1's power-up sequence
 //! (panthor specification 11 §11.5; Sky1 SoC specification 02 §2.4.1): the power-domain vote
 //! (domain 21, `sky1_pd`), the clocks, the `gpu_reset` pulse, the RCSU's Q-channel clock
 //! gating; then identifies the GPU (03 §3.1) with the RCSU's core fuses applied (11 §11.6), and
-//! soft-resets it (03 §3.3). The L2, the MMU and the firmware are the next stages.
+//! soft-resets it (03 §3.3).
+//!
+//! The microcontroller's boot ([`mcu`]) runs on the driver's thread when `dev.panthor.N.mcu_boot`
+//! is set to 1, never at attach (as `drmn`'s stages: one that stops the machine cannot keep the
+//! installed kernel from booting). `dev.panthor.N.mcu` reports where it is.
 //!
 //! Each step is logged before it runs, so a boot that stops names the step.
 
@@ -15,9 +19,15 @@
 
 extern crate alloc;
 
-use alloc::string::String;
-use alloc::vec::Vec;
+mod mcu;
 
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use abi::errno::Errno;
 use bus::provider::{ClockHandle, Micros, PerfLevel, PowerVote, ProviderError, ResetHandle};
 use bus::{
     AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, MmioGrant, ResourceError, StartCx,
@@ -27,6 +37,9 @@ use devtree::ids::AcpiId;
 use panthor::id::Info;
 use panthor::{Delay, Regs, control, id, sky1};
 use regs::Bytes;
+use sched::{Sleepable, Thread, WaitQueue};
+use sync::{Once, SpinLock};
+use vm::dma::{Coherency, DmaConstraints, DmaTag};
 
 /// The firmware's clock names (the DSDT's `CLKT`): the core clock is required; the others are
 /// enabled with it when present (11 §11.4.1).
@@ -34,8 +47,24 @@ const CORE_CLOCK: &str = "gpu_clk_core";
 const OTHER_CLOCKS: [&str; 3] = ["gpu_clk_stacks", "gpu_clk_200M", "gpu_clk_400M"];
 /// The reset line the driver pulses (`RSTL`; `gpu_rcsu_reset` is never toggled, 11 §11.4.2).
 const RESET: &str = "gpu_reset";
-/// The GPU window must hold at least the MMU's address-space slots (02 §2.2).
-const GPU_WINDOW_MIN: usize = 0x2800;
+/// The GPU window must hold the MMU's slots and doorbell 0 (02 §2.2).
+const GPU_WINDOW_MIN: usize = 0x9_0000;
+
+/// Reads a firmware file, whole, from the root file system.
+pub trait Firmware: Sync {
+    fn read(&self, s: &Sleepable, path: &str) -> Result<Vec<u8>, Errno>;
+}
+
+static FIRMWARE: Once<&'static dyn Firmware> = Once::new();
+
+/// Gives the driver the kernel's firmware reader, once, before drivers start.
+pub fn set_firmware(f: &'static dyn Firmware) {
+    let _ = FIRMWARE.set(f);
+}
+
+fn firmware() -> Option<&'static dyn Firmware> {
+    FIRMWARE.get().copied()
+}
 
 fn provider(e: ProviderError) -> AttachError {
     AttachError::from(ResourceError::Provider(e))
@@ -53,7 +82,7 @@ impl Regs for Window {
     }
 }
 
-/// Busy-waits (attach may spin: these are microseconds).
+/// Busy-waits (these are microseconds).
 struct Spin;
 
 impl Delay for Spin {
@@ -62,20 +91,78 @@ impl Delay for Spin {
     }
 }
 
+/// What the attached GPU and its thread share.
+struct Gpu {
+    unit: u32,
+    regs: Window,
+    tag: DmaTag,
+    info: Info,
+    core_hz: u64,
+    /// A boot asked for, not yet run.
+    requested: AtomicBool,
+    exit: AtomicBool,
+    queue: WaitQueue,
+    /// The booted firmware, or why the last boot failed.
+    state: SpinLock<Result<Option<mcu::Booted>, &'static str>>,
+}
+
+impl Gpu {
+    fn log(&self, args: core::fmt::Arguments<'_>) {
+        bus::manager().log(format_args!("panthor{}: {args}", self.unit));
+    }
+
+    fn report(&self) -> String {
+        match &*self.state.lock() {
+            Ok(None) => "MCU not started".into(),
+            Ok(Some(b)) => alloc::format!(
+                "MCU running, interface {}, {} groups, firmware {}",
+                b.iface.version,
+                b.iface.groups,
+                b.git_sha
+            ),
+            Err(why) => alloc::format!("MCU boot failed: {why}"),
+        }
+    }
+}
+
+/// The driver's thread: runs a requested boot.
+fn worker(g: &Gpu, s: &Sleepable) {
+    loop {
+        g.queue.wait_until(s, || {
+            g.requested.load(Ordering::Acquire) || g.exit.load(Ordering::Acquire)
+        });
+        if g.exit.load(Ordering::Acquire) {
+            return;
+        }
+        g.requested.store(false, Ordering::Release);
+        if !matches!(*g.state.lock(), Ok(None)) {
+            g.log(format_args!(
+                "the MCU was already started (or failed): reboot to try again"
+            ));
+            continue;
+        }
+        let r = mcu::boot(s, &g.regs, &g.tag, &g.info, g.core_hz, &|a| g.log(a));
+        if let Err(why) = &r {
+            g.log(format_args!("MCU boot failed: {why}"));
+        }
+        *g.state.lock() = r.map(Some);
+    }
+}
+
 /// A `panthorN` instance.
 pub struct Panthor {
+    gpu: Arc<Gpu>,
+    thread: SpinLock<Option<Arc<Thread>>>,
     _domain: PowerVote,
     _clocks: Vec<ClockHandle>,
     _reset: Option<ResetHandle>,
     _rcsu: MmioGrant<Bytes>,
-    _gpu: Window,
-    info: Info,
 }
 
 impl core::fmt::Debug for Panthor {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Panthor")
-            .field("gpu_id", &self.info.gpu_id)
+            .field("gpu_id", &self.gpu.info.gpu_id)
             .finish_non_exhaustive()
     }
 }
@@ -176,25 +263,84 @@ impl Driver for Panthor {
             log(format_args!("soft reset failed: {e:?}"));
             AttachError::Device("GPU soft reset failed")
         })?;
-        log(format_args!(
-            "reset done, GPU_STATUS {:#x}",
-            gpu.read32(panthor::regs::GPU_STATUS)
-        ));
+        // Memory the GPU walks and runs from: physical addresses within its reach (no IOMMU,
+        // 04 §4.6.3), and non-coherent for the CPU whatever `_CCA` says (11 §11.7).
+        let tag = cx.dma_tag(DmaConstraints {
+            addr_bits: info.pa_bits(),
+            align: 0x1000,
+            coherency: Coherency::NonCoherent,
+            ..DmaConstraints::UNLIMITED
+        })?;
         Ok(Self {
+            gpu: Arc::new(Gpu {
+                unit,
+                regs: gpu,
+                tag,
+                info,
+                core_hz: rate,
+                requested: AtomicBool::new(false),
+                exit: AtomicBool::new(false),
+                queue: WaitQueue::new(),
+                state: SpinLock::new(Ok(None)),
+            }),
+            thread: SpinLock::new(None),
             _domain: domain,
             _clocks: clocks,
             _reset: reset,
             _rcsu: rcsu,
-            _gpu: gpu,
-            info,
         })
     }
 
-    fn start(&self, _: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+    fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
+        let g = Arc::clone(&self.gpu);
+        let t = sched::Builder::new("panthor")
+            .priority(sched::Priority::KERNEL)
+            .spawn(move |s| worker(&g, s))
+            .map_err(|_| AttachError::NoMemory)?;
+        *self.thread.lock() = Some(t);
+        let unit = self.gpu.unit;
+        let (boot, report) = (Arc::clone(&self.gpu), Arc::clone(&self.gpu));
+        bus::manager().sysctl(cx.sleepable(), &mut |t| {
+            let Some(node) = bus::device_node(t, Self::NAME, unit) else {
+                return;
+            };
+            let r = Arc::clone(&report);
+            let _ = t.add_value(
+                node,
+                sysctl::Number::Auto,
+                "mcu",
+                "Where the GPU's microcontroller is",
+                sysctl::Value::Str(Box::new(move |out| out.push_str(&r.report()))),
+            );
+            let b = Arc::clone(&boot);
+            let _ = t.add_writable(
+                node,
+                sysctl::Number::Auto,
+                "mcu_boot",
+                "Boot the GPU's microcontroller (write 1)",
+                0,
+                sysctl::Value::Int(Box::new(|| 0)),
+                sysctl::int_writer(move |v| {
+                    if v == 1 {
+                        b.requested.store(true, Ordering::Release);
+                        b.queue.wake_all();
+                    }
+                    Ok(())
+                }),
+            );
+        });
         Ok(())
     }
 
-    fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {}
+    fn stop(&self, _: &mut StopCx<'_>, _: StopReason) {
+        self.gpu.exit.store(true, Ordering::Release);
+        self.gpu.queue.wake_all();
+        // The MCU is stopped and the interrupt blocks masked (05 §5.7.2).
+        self.gpu
+            .regs
+            .write32(panthor::regs::JOB_INT + panthor::regs::INT_MASK, 0);
+        self.gpu.regs.write32(panthor::regs::MCU_CONTROL, 0);
+    }
 }
 
 /// The declaration for the build's driver table.

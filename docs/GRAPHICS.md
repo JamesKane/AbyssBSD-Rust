@@ -1294,7 +1294,25 @@ hang costs a power cycle):
      `0x3e77001`), then the GPU. The RCSU is mapped shared with firmware (`GPUP`'s AML uses it).
    Interrupts are not claimed yet; nothing has unmasked them.
 3. Address space 0, the firmware image (`arm/mali/arch12.8/mali_csffw.bin`, installed on the
-   board, never committed), and the MCU boot. Exit: interface 3.13.0 read back.
+   board, never committed), and the MCU boot. Exit: interface 3.13.0 read back. **Met
+   (2026-11-25), on the first try:** `panthor0: CSF FW using interface v3.13.0, Features 0x10
+   Instrumentation features 0x71`, FreeBSD's line, and the firmware takes the global configuration
+   and answers a ping. Eight command-stream groups of eight streams, 128 work registers. What runs:
+   - `lib/panthor`: the image parser (05 §5.2; on Arm's file, 8 sections and 1 protected one
+     skipped, git sha `95a25d71…` as FreeBSD logs it), the page tables and attribute words (04,
+     the non-coherent values), and the interface discovery, global configuration and ping (05 §5.4
+     to §5.6). 34 host tests; the real image is checked when `PANTHOR_FIRMWARE` names it;
+   - `drivers/panthor`: the system-cache words and the coherency protocol (ACE-Lite; the GPU does
+     not report the shareable-cache bit, so `0x0`), the L2 up, the sections in non-coherent DMA
+     memory within the GPU's 40-bit reach (the root table landed at `0x80_6c69_5000`), slot 0,
+     `MCU_CONTROL` auto, and the boot signal polled in the JOB block's raw status (no interrupt
+     handler yet);
+   - the boot runs on the driver's thread when `dev.panthor.0.mcu_boot` is set to 1, never at
+     attach, as `drmn`'s stages do; `dev.panthor.0.mcu` reports the state. The image is read from
+     `/boot/firmware/arm/mali/arch12.8/` (FreeBSD's place for it), through the kernel's firmware
+     reader. To install it on the board's AbyssBSD root: copy it from the board's FreeBSD (same
+     path) — it is Arm's, redistributable, and not in this repository.
+   Not yet: the JOB, MMU and GPU interrupts; the watchdog ping; halt, suspend and recovery.
 4. The global, group and stream interfaces; the scheduler; tiler heaps; buffer objects.
 5. The render node's ioctls, then Mesa's panvk and panfrost from the 15.1 packages. Before this
    step: which Mesa the packages carry and whether it has the CSF drivers, how it finds a platform

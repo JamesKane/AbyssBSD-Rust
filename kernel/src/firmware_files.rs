@@ -54,3 +54,9 @@ impl drmn::Firmware for Loader {
         Ok(buf)
     }
 }
+
+impl panthor_driver::Firmware for Loader {
+    fn read(&self, s: &Sleepable, path: &str) -> Result<Vec<u8>, Errno> {
+        <Self as drmn::Firmware>::read(self, s, path)
+    }
+}

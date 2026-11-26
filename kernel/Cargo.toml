@@ -76,6 +76,7 @@ mbuf = { path = "../sys/mbuf" }
 net = { path = "../sys/net" }
 drmn = { path = "../drivers/drmn" }
 sky1-pd = { path = "../drivers/sky1-pd" }
+panthor-driver = { path = "../drivers/panthor" }
 hda-driver = { path = "../drivers/hda" }
 vgapci = { path = "../drivers/vgapci" }
 nvme = { path = "../drivers/nvme" }

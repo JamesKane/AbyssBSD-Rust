@@ -20,10 +20,19 @@
 extern crate std;
 
 pub mod control;
+pub mod csf;
+pub mod fw;
 pub mod id;
+pub mod mmu;
 pub mod regs;
 pub mod sky1;
 
+#[cfg(test)]
+mod csf_tests;
+#[cfg(test)]
+mod fw_tests;
+#[cfg(test)]
+mod mmu_tests;
 #[cfg(test)]
 mod model;
 #[cfg(test)]
