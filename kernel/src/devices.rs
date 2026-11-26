@@ -315,6 +315,7 @@ pub(crate) fn init(s: &Sleepable) {
     // `hw.nvme.*` (`TUNABLE_INT_FETCH`), before any controller attaches.
     let tunable = |name: &str| crate::boot::value(name).and_then(|v| v.parse::<i32>().ok());
     nvme::set_tunables(&tunable);
+    rge::set_tunables(&tunable);
     drmn::set_tunables(&tunable);
     drmn::set_firmware(&crate::firmware_files::Loader);
     panthor_driver::set_firmware(&crate::firmware_files::Loader);

@@ -80,6 +80,7 @@ panthor-driver = { path = "../drivers/panthor" }
 hda-driver = { path = "../drivers/hda" }
 vgapci = { path = "../drivers/vgapci" }
 nvme = { path = "../drivers/nvme" }
+rge = { path = "../drivers/rge" }
 socket = { path = "../sys/socket" }
 inet = { path = "../sys/inet" }
 tcp = { path = "../sys/tcp" }

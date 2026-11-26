@@ -127,6 +127,34 @@ pub mod tx {
         ext
     }
 
+    /// Command word: the frame is cut into segments by the device
+    /// (TCP over IPv4, or over IPv6), with the TCP header's offset from
+    /// the frame's start in bits 24:18.
+    pub const TSO4: u32 = 0x0400_0000;
+    pub const TSO6: u32 = 0x0200_0000;
+    pub const TSO_OFFSET_SHIFT: u32 = 18;
+    /// The TCP header may start at most here (else software cuts it).
+    pub const TSO_MAX_OFFSET: usize = 127;
+    /// Extended status in TSO mode: the segment size in bits 28:18.
+    pub const TSO_MSS_SHIFT: u32 = 18;
+    pub const TSO_MAX_MSS: u32 = 0x7ff;
+
+    /// The command and extended status words for a TSO frame of IPv4 TCP
+    /// whose TCP header starts `tcp_offset` bytes into it, cut into
+    /// segments of `mss` payload bytes; `None` if the controller cannot
+    /// take it.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, reason = "at most 127, checked")]
+    pub const fn tso4(tcp_offset: usize, mss: u32) -> Option<(u32, u32)> {
+        if tcp_offset > TSO_MAX_OFFSET || mss == 0 || mss > TSO_MAX_MSS {
+            return None;
+        }
+        Some((
+            TSO4 | ((tcp_offset as u32) << TSO_OFFSET_SHIFT),
+            mss << TSO_MSS_SHIFT,
+        ))
+    }
+
     /// Word 0 is the command and status; word 1 the extended status;
     /// words 2 and 3 the buffer's address.
     pub const CMDSTS: usize = 0;
@@ -440,6 +468,7 @@ impl TxRing {
         b: &impl Barriers,
         segs: &[(u64, u32)],
         ext: u32,
+        frame_cmd: u32,
     ) -> Result<usize, TxFull> {
         if segs.is_empty() || segs.len() > TX_SEGS {
             return Err(TxFull::BadShape);
@@ -458,7 +487,7 @@ impl TxRing {
             m.set(d, tx::EXTSTS, ext);
             let eor = if d == DESCS - 1 { tx::EOR } else { 0 };
             b.write();
-            m.set(d, tx::CMDSTS, cmd | eor | (len & 0xffff));
+            m.set(d, tx::CMDSTS, cmd | eor | frame_cmd | (len & 0xffff));
         };
         let mut last = first;
         for (k, &seg) in segs.iter().enumerate().skip(1) {
@@ -491,6 +520,11 @@ impl TxRing {
         self.in_flight.pop_front();
         let n = (last + DESCS - first) % DESCS + 1;
         self.used -= n;
-        Some((first, cmd & tx::TXERR == 0))
+        // A TSO frame's command word holds the header offset where the
+        // error bit is: only a frame that is not one has a status to read.
+        Some((
+            first,
+            cmd & tx::TXERR == 0 || cmd & (tx::TSO4 | tx::TSO6) != 0,
+        ))
     }
 }

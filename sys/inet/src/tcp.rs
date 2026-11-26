@@ -496,11 +496,27 @@ fn path_for(vnet: &Vnet, inc: &Inc) -> Path {
     let ifmtu = n.by_index(r.ifindex).map_or(0, |i| i.mtu);
     let maxmtu = if r.mtu != 0 { r.mtu.min(ifmtu) } else { ifmtu };
     let localip = n.is_local(family, &dst, inc.zone);
+    // The interface cuts a large IPv4 segment itself (`tcp_maxmtu`'s
+    // `tso` out-parameter: `IFCAP_TSO4` on, and `CSUM_TSO` in its
+    // `if_hwassist`).
+    let tso = n
+        .by_index(r.ifindex)
+        .filter(|i| {
+            !inc.v6
+                && i.capenable & (abi::net::ifcap::TSO4 | abi::net::ifcap::TXCSUM)
+                    == (abi::net::ifcap::TSO4 | abi::net::ifcap::TXCSUM)
+                && i.hwassist & csum::IP_TSO != 0
+        })
+        .map(|_| ::tcp::TsoCap {
+            tsomax: net::netif::TSO_MAXLEN,
+            tsomaxsegcount: 32,
+            tsomaxsegsize: 65_536,
+        });
     Path {
         maxmtu,
         local: matches!(r.gateway, net::ifnet::Gateway::Link(_)) || localip,
         localip,
-        tso: None,
+        tso,
     }
 }
 

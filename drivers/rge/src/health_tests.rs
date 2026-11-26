@@ -217,7 +217,7 @@ impl<'a> Nic<'a> {
         let bus = 0x9000_0000 + self.sent * 0x1000;
         if self
             .tx
-            .push(&self.txm, &ring::Hal, &[(bus, 60)], 0)
+            .push(&self.txm, &ring::Hal, &[(bus, 60)], 0, 0)
             .is_err()
         {
             return false;

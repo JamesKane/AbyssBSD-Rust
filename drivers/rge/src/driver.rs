@@ -560,10 +560,13 @@ impl Shared {
         }
         let mcast = m.hdr.flags & (flags::BCAST | flags::MCAST) != 0;
         self.port.tap.mtap(&m, net::bpf::Way::Out);
-        if len <= SLOT {
+        if m.hdr.csum_flags & csum::IP_TSO != 0 {
+            self.send_tso(m)?;
+        } else if len <= SLOT {
             self.send_slotted(&m)?;
         } else {
-            self.send_mapped(m)?;
+            let ext = ring::tx::csum_ext(m.hdr.csum_flags);
+            self.send_mapped(m, ext, 0)?;
         }
         let st = &self.port.stats;
         st.opackets.add(1);
@@ -617,17 +620,42 @@ impl Shared {
             u32::try_from(padded).unwrap_or(u32::MAX),
         );
         let Tx { ring, descs, .. } = &mut *tx;
-        ring.push(descs, &ring::Hal, &[seg], ext)
+        ring.push(descs, &ring::Hal, &[seg], ext, 0)
             .map_err(|_| NoBufs)?;
         tx.wd.queued();
         self.chip.kick_tx();
         Ok(())
     }
 
-    /// Sends a longer `m` (a jumbo frame) from a buffer of its own,
-    /// mapped for it.
-    fn send_mapped(&self, m: Packet) -> Result<(), NoBufs> {
-        let ext = ring::tx::csum_ext(m.hdr.csum_flags);
+    /// Sends a TCP segment of IPv4 that the controller cuts into frames
+    /// (`CSUM_TSO`; its TCP checksum field holds the pseudo-header's sum
+    /// without the length, which the stack leaves for TSO): the command
+    /// and extended status words of every descriptor carry the TCP
+    /// header's offset and the segment size. A frame the controller
+    /// cannot take is dropped.
+    fn send_tso(&self, m: Packet) -> Result<(), NoBufs> {
+        // Ethernet, then an IPv4 header whose length gives the TCP
+        // header's offset (a VLAN tag the device inserts would move it).
+        let mut h = [0u8; 34];
+        if m.len() < h.len() || m.hdr.flags & flags::VLANTAG != 0 {
+            return Err(NoBufs);
+        }
+        m.data.copy_out(0, &mut h);
+        let ip_hlen = usize::from(h[14] & 0x0f) * 4;
+        let is_tcp4 = h[12..14] == [0x08, 0x00] && h[14] >> 4 == 4 && h[23] == 6;
+        let Some((cmd, ext)) = is_tcp4
+            .then(|| ring::tx::tso4(14 + ip_hlen, u32::from(m.hdr.tso_segsz)))
+            .flatten()
+        else {
+            return Err(NoBufs);
+        };
+        self.send_mapped(m, ext, cmd)
+    }
+
+    /// Sends a longer `m` (a jumbo frame, or a TSO segment) from a
+    /// buffer of its own, mapped for it. `ext` and `frame_cmd` go in
+    /// every descriptor.
+    fn send_mapped(&self, m: Packet, ext: u32, frame_cmd: u32) -> Result<(), NoBufs> {
         let mut buf = Vec::with_capacity(m.len());
         for seg in m.data.segments() {
             buf.extend_from_slice(seg);
@@ -650,7 +678,7 @@ impl Shared {
         }
         let first = {
             let Tx { ring, descs, .. } = &mut *tx;
-            ring.push(descs, &ring::Hal, &segs, ext)
+            ring.push(descs, &ring::Hal, &segs, ext, frame_cmd)
         };
         let Ok(first) = first else {
             drop(tx);
@@ -869,7 +897,14 @@ impl Driver for Rge {
         .map_err(hw)?;
         chip.set_filter(false, [0; 2]);
         let (line, messages) = pci::bus::msi_line(cx).map_err(|_| AttachError::Device("no MSI"))?;
-        let caps = ifcap::RXCSUM | ifcap::TXCSUM | ifcap::VLAN_MTU | ifcap::LINKSTATE;
+        // TSO for IPv4 (never on the first RTL8125, whose users reported
+        // transmit timeouts with it).
+        let tso = crate::tso_wanted(chip.mac);
+        let caps = ifcap::RXCSUM
+            | ifcap::TXCSUM
+            | ifcap::VLAN_MTU
+            | ifcap::LINKSTATE
+            | if tso { ifcap::TSO4 } else { 0 };
         let info = Ether {
             dname: "rge",
             unit: i32::try_from(unit).unwrap_or(0),
@@ -878,7 +913,7 @@ impl Driver for Rge {
             capabilities: caps,
             capenable: caps,
             // `RGE_CSUM_FEATURES`.
-            hwassist: csum::IP | csum::IP_TCP | csum::IP_UDP,
+            hwassist: csum::IP | csum::IP_TCP | csum::IP_UDP | if tso { csum::IP_TSO } else { 0 },
             baudrate: 5_000_000_000,
         };
         Ok(Self {

@@ -159,7 +159,7 @@ fn tx_hands_over_the_first_descriptor_last() {
     t.init(&m);
     assert_eq!(m.get(DESCS - 1, tx::CMDSTS), tx::EOR);
     let first = t
-        .push(&m, &B, &[(0x1000, 60), (0x2000, 40), (0x3000, 20)], 0)
+        .push(&m, &B, &[(0x1000, 60), (0x2000, 40), (0x3000, 20)], 0, 0)
         .unwrap();
     assert_eq!(first, 0);
     let c = |d| m.get(d, tx::CMDSTS);
@@ -184,10 +184,10 @@ fn tx_wraps_and_fills() {
     t.init(&m);
     // Fill to one short of the ring, one descriptor each.
     for i in 0..DESCS - 1 {
-        t.push(&m, &B, &[(i as u64 * 64, 64)], 0).unwrap();
+        t.push(&m, &B, &[(i as u64 * 64, 64)], 0, 0).unwrap();
     }
     assert_eq!(t.free(), 0);
-    assert_eq!(t.push(&m, &B, &[(0, 64)], 0), Err(TxFull::Full));
+    assert_eq!(t.push(&m, &B, &[(0, 64)], 0, 0), Err(TxFull::Full));
     // The last descriptor carries the end-of-ring mark with its frame.
     assert_eq!(
         m.get(DESCS - 2, tx::CMDSTS) & tx::EOR,
@@ -201,14 +201,14 @@ fn tx_wraps_and_fills() {
     assert_eq!(t.reap(&m, &B), Some((1, false)));
     assert_eq!(t.reap(&m, &B), None);
     // A frame now wraps from the last descriptor to the first.
-    let first = t.push(&m, &B, &[(0xa, 10), (0xb, 20)], 0).unwrap();
+    let first = t.push(&m, &B, &[(0xa, 10), (0xb, 20)], 0, 0).unwrap();
     assert_eq!(first, DESCS - 1);
     assert_eq!(
         m.get(DESCS - 1, tx::CMDSTS),
         tx::OWN | tx::SOF | tx::EOR | 10
     );
     assert_eq!(m.get(0, tx::CMDSTS), tx::OWN | tx::EOF | 20);
-    assert_eq!(t.push(&m, &B, &[], 0), Err(TxFull::BadShape));
+    assert_eq!(t.push(&m, &B, &[], 0, 0), Err(TxFull::BadShape));
 }
 
 /// The checksums the stack leaves to the controller become extended
@@ -227,6 +227,64 @@ fn tx_csum_ext() {
     assert_eq!(tx::csum_ext(csum::IP_CHECKED | csum::IP_VALID), 0);
 }
 
+/// TSO's words: the command word names the mode and the TCP header's
+/// offset (bits 24:18), the extended status the segment size (bits 28:18),
+/// and a frame the controller cannot take is refused.
+#[test]
+fn tx_tso_words() {
+    // An Ethernet header and a 20-byte IPv4 header: the TCP header at 34.
+    assert_eq!(
+        tx::tso4(34, 1448),
+        Some((0x0400_0000 | (34 << 18), 1448 << 18))
+    );
+    // The largest segment size, and the farthest header offset.
+    assert_eq!(
+        tx::tso4(127, 0x7ff),
+        Some((0x0400_0000 | (127 << 18), 0x7ff << 18))
+    );
+    assert_eq!(tx::tso4(128, 1448), None);
+    assert_eq!(tx::tso4(34, 0x800), None);
+    assert_eq!(tx::tso4(34, 0), None);
+    // The offset field stays inside bits 24:18 and the mode bits apart.
+    let (cmd, ext) = tx::tso4(127, 0x7ff).unwrap();
+    assert_eq!(cmd & !(tx::TSO4 | (0x7f << 18)), 0);
+    assert_eq!(ext & !(0x7ff << 18), 0);
+}
+
+/// A TSO frame's words go in every descriptor, and its completion is not
+/// read as an error by the offset bits that sit where the error bit does.
+#[test]
+fn tx_tso_every_descriptor() {
+    let m = Mem::new();
+    let mut t = TxRing::new();
+    t.init(&m);
+    let (cmd, ext) = tx::tso4(34, 1448).unwrap();
+    t.push(
+        &m,
+        &B,
+        &[(0x1000, 4096), (0x2000, 4096), (0x3000, 100)],
+        ext,
+        cmd,
+    )
+    .unwrap();
+    for d in 0..3 {
+        assert_eq!(m.get(d, tx::EXTSTS), ext, "descriptor {d}");
+        assert_eq!(
+            m.get(d, tx::CMDSTS) & (tx::TSO4 | (0x7f << 18)),
+            cmd,
+            "descriptor {d}"
+        );
+    }
+    assert_ne!(m.get(0, tx::CMDSTS) & tx::SOF, 0);
+    assert_ne!(m.get(2, tx::CMDSTS) & tx::EOF, 0);
+    // Offset 34 has bit 5 set: the error bit's place. Completed with the
+    // command bits still there, it is a good frame.
+    let done = m.get(2, tx::CMDSTS) & !tx::OWN;
+    m.set(2, tx::CMDSTS, done);
+    m.set(0, tx::CMDSTS, m.get(0, tx::CMDSTS) & !tx::OWN);
+    assert_eq!(t.reap(&m, &B), Some((0, true)));
+}
+
 /// The next frame starts where the last one ended.
 #[test]
 fn tx_next() {
@@ -234,7 +292,7 @@ fn tx_next() {
     let mut t = TxRing::new();
     t.init(&m);
     assert_eq!(t.next(), 0);
-    t.push(&m, &B, &[(0xa, 10), (0xb, 20)], 0).unwrap();
+    t.push(&m, &B, &[(0xa, 10), (0xb, 20)], 0, 0).unwrap();
     assert_eq!(t.next(), 2);
 }
 

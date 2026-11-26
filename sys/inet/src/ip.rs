@@ -185,7 +185,13 @@ fn hwassist(i: &IfView) -> u32 {
     } else if i.ty == IFT_LOOP {
         csum::IP | csum::IP_UDP | csum::IP_TCP
     } else {
-        i.hwassist & (csum::IP | csum::IP_UDP | csum::IP_TCP)
+        // TSO is a device's, when its capability is on.
+        let tso = if i.capenable & ifcap::TSO4 != 0 {
+            csum::IP_TSO
+        } else {
+            0
+        };
+        i.hwassist & (csum::IP | csum::IP_UDP | csum::IP_TCP | tso)
     }
 }
 
@@ -832,7 +838,13 @@ pub(crate) fn output_parsed(
     }
     let nexthop = from_v4(p.gw.unwrap_or(ip.dst));
     let is_gw = p.gw.is_some();
-    if usize::from(ip.len) <= mtu {
+    // A TSO segment goes whole to a device that cuts it (`ip_output`'s
+    // `CSUM_TSO` test); one that cannot would send a frame over its MTU.
+    let tso = m.hdr.csum_flags & csum::IP_TSO != 0;
+    if tso && assist & csum::IP_TSO == 0 {
+        return Err(Errno::EMSGSIZE);
+    }
+    if usize::from(ip.len) <= mtu || tso {
         let sum = assist & csum::IP == 0;
         if sum {
             m.hdr.csum_flags &= !csum::IP;

@@ -76,6 +76,12 @@ impl Port {
     }
 }
 
+/// The largest frame TCP may hand an interface that does TSO
+/// (`if_hw_tsomax`): the IP datagram, which the device cuts into segments.
+/// One limit for every driver that offers it so far (the RTL8125's is
+/// 64,000 bytes of payload).
+pub const TSO_MAXLEN: u32 = 64_000;
+
 /// An Ethernet interface to attach.
 #[derive(Clone, Debug)]
 pub struct Ether {
