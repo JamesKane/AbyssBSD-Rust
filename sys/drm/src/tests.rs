@@ -1943,6 +1943,35 @@ fn prime_refuses_what_it_cannot_do() {
 }
 
 #[test]
+fn a_buffer_imported_from_another_card_maps_as_itself() {
+    // A render card's file holds its own buffer and one imported from a display card (as a
+    // render-only driver's scanout buffers are): their offsets must not overlap, or a mapping of
+    // one reaches the other.
+    let display = card(true, true);
+    let render = card(true, false);
+    let (fd, fr) = (open(&display), open(&render));
+    let theirs = display_buffer(&fd);
+    let mine = dumb(&fr, 64, 64);
+    let imported = fr.handles.lock().insert(theirs.clone()).unwrap();
+    let (a, b) = (fr.gem(mine).unwrap(), fr.gem(imported).unwrap());
+    let ends = |g: &crate::gem::Gem| (g.mmap_offset(), g.mmap_offset() + g.size());
+    let ((a0, a1), (b0, b1)) = (ends(&a), ends(&b));
+    assert!(a1 <= b0 || b1 <= a0, "offsets overlap");
+    let pages = b.size() / PAGE_SIZE;
+    assert!(Arc::ptr_eq(
+        &fr.mmap(b0 / PAGE_SIZE, pages).unwrap(),
+        &b.map_range(b0 / PAGE_SIZE, pages).unwrap()
+    ));
+    display.unregister(&s());
+    render.unregister(&s());
+}
+
+fn display_buffer(f: &Arc<crate::Open>) -> Arc<crate::gem::Gem> {
+    let h = dumb(f, 256, 256);
+    f.gem(h).unwrap()
+}
+
+#[test]
 fn a_descriptor_maps_from_its_own_first_page() {
     let c = card(true, true);
     let f = open(&c);

@@ -251,6 +251,20 @@ pub trait DrmDriver: Send + Sync {
     /// render node's files do not count.
     fn last_close(&self) {}
 
+    /// A mapping of `pages` pages from page `page` of the card's file that is no buffer's: a
+    /// page of the driver's own (panthor's flush-ID page, at an offset above every buffer's).
+    /// `None` leaves the offset to the buffers. An object it returns is shared, as buffers'
+    /// are ([`crate::page_object`] makes one).
+    fn mmap_special(
+        &self,
+        file: u64,
+        page: u64,
+        pages: u64,
+    ) -> Option<Result<Arc<vm::object::Object>, Errno>> {
+        let _ = (file, page, pages);
+        None
+    }
+
     /// A file of this card closed (its last reference went): the driver
     /// frees what it kept for `file`.
     fn file_closed(&self, file: u64) {

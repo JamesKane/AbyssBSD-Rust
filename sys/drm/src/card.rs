@@ -28,6 +28,11 @@ const EVENT_SPACE: usize = 4096;
 
 static UNITS: SpinLock<BTreeSet<u32>> = SpinLock::new(BTreeSet::new());
 /// The registered cards by unit, for timer callbacks that name one.
+/// The file offsets of every card's buffers, from one space: a buffer imported from another card
+/// keeps its offset in the importing file, so no two cards may hand out the same one (as Linux's
+/// one offset manager per device would allow only because an import there gets a new offset).
+static OFFSETS: SpinLock<OffsetSpace> = SpinLock::new(OffsetSpace::new());
+
 static CARDS: SpinLock<alloc::collections::BTreeMap<u32, alloc::sync::Weak<Card>>> =
     SpinLock::new(alloc::collections::BTreeMap::new());
 
@@ -40,7 +45,6 @@ pub(crate) fn card_by_unit(unit: u32) -> Option<Arc<Card>> {
 pub struct Card {
     unit: u32,
     driver: Arc<dyn DrmDriver>,
-    offsets: SpinLock<OffsetSpace>,
     /// The open file with modesetting rights: the master.
     master: SpinLock<Option<u64>>,
     next_file: AtomicU64,
@@ -80,7 +84,6 @@ pub fn register(driver: Arc<dyn DrmDriver>) -> Result<Arc<Card>, Errno> {
     let card = Arc::new(Card {
         unit,
         driver,
-        offsets: SpinLock::new(OffsetSpace::new()),
         master: SpinLock::new(None),
         next_file: AtomicU64::new(1),
         revoked: AtomicBool::new(false),
@@ -294,7 +297,7 @@ impl Card {
     }
 
     pub(crate) fn alloc_offset(&self, pages: u64) -> Result<PageIndex, Errno> {
-        self.offsets.lock().alloc(pages)
+        OFFSETS.lock().alloc(pages)
     }
 }
 
@@ -659,6 +662,10 @@ impl CharDevice for Open {
     fn mmap(&self, page: u64, pages: u64) -> Result<Arc<Object>, Errno> {
         if self.card.is_revoked() {
             return Err(Errno::ENODEV);
+        }
+        // A page of the driver's own, not a buffer's (panthor's flush-ID page).
+        if let Some(r) = self.card.driver.mmap_special(self.id, page, pages) {
+            return r;
         }
         let h = self.handles.lock();
         let gem = h.by_offset(page).ok_or(Errno::EINVAL)?;

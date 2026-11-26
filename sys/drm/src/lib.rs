@@ -122,3 +122,26 @@ pub fn init(env: Env) {
 pub(crate) fn env() -> Option<&'static Env> {
     ENV.get()
 }
+
+/// A shared object of one page of system memory holding `bytes` (the rest zero), for
+/// [`DrmDriver::mmap_special`].
+///
+/// # Errors
+///
+/// `ENXIO` before the kernel's environment is set, `EINVAL` for more than a page, `ENOMEM`.
+pub fn page_object(
+    bytes: &[u8],
+) -> Result<alloc::sync::Arc<vm::object::Object>, abi::errno::Errno> {
+    use abi::errno::Errno;
+    let env = env().ok_or(Errno::ENXIO)?;
+    if bytes.len() as u64 > addr::PAGE_SIZE {
+        return Err(Errno::EINVAL);
+    }
+    let object = vm::object::Object::anonymous(env.pages);
+    object.set_shared();
+    let pfn = object.page_for_write(0).map_err(|_| Errno::ENOMEM)?;
+    object.access(pfn, &mut |page: &mut [u8]| {
+        page[..bytes.len()].copy_from_slice(bytes)
+    });
+    Ok(object)
+}
