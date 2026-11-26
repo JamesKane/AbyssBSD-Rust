@@ -500,12 +500,10 @@ This is P8's X870E half (P8.2), with its ground truth already in the corpus (P8.
 Done (git, HARDWARE.md §5; 2026-11-23 to 25): AbyssBSD on the media NVMe (WD SN740,
 serial 24413C804394), booted unattended by BootNext, with stock FreeBSD 15.1 beside it; `cargo xtask
 deploy --machine x870e` for kernels, checked by serial number (BUILD-AND-TEST.md; proved on the
-Orange Pi, not yet on the X870E); the loader's persistent log on the ESP; `hwpstate_amd` (CPPC through
+Orange Pi and, 2026-11-25, on the X870E: 30 s to come back with the same hash); the loader's persistent log on the ESP; `hwpstate_amd` (CPPC through
 the firmware's FFH registers), `amdsmn` and `amdtemp`; `rge` on the RTL8125D revision 1; `p2` against
 stock 15.1. Open:
 
-- **Deploy:** the first `deploy --machine x870e` (its last known address is `.23`). Never the Fedora
-  disk, the RAID members, the Fedora ESP, or its boot entry.
 - **Drivers:** `rge` on the RTL8125D revision 2 (programmed, host-tested only) and the other RTL8125
   revisions; `amdsbwd` on the machine (host-tested only); `acpi_cppc` on amd64 if a machine needs it
   (the X870E's frequency is `hwpstate_amd`'s); and whatever else multi-user needs.
