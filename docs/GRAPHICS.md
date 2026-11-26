@@ -1433,6 +1433,31 @@ hang costs a power cycle):
      uploaded each frame. Under Sway, the jellyfish holds 4,030 to 4,160 frames a second
      (0.24 ms) over 90 s, as the capture shows. The sibling project's port of Linux's driver
      reached about 711 (2,600 pinned to the big cores).
+   - **Against FreeBSD on the same board (2026-11-26).** `tests/graphics/panthor/compare.sh` ran
+     the same measurement on each system, as root with nothing else on the display:
+     - `gl_frames`;
+     - Sway with two windows and glmark2's jellyfish at 800x600 for 30 s, unpinned and then on
+       the big cores.
+
+     The two setups:
+     - **AbyssBSD:** the kernel of `92397f5`, through the harness libdrm.
+     - **FreeBSD:** the board's FreeBSD 16-CURRENT running the sibling project's port of Linux 7.0's
+       panthor (`panthor.ko`, with its frequency scaling), komeda and drm-kmod, and that project's
+       patched libdrm 2.4.134.
+
+     Both use Mesa 26.2.2.
+
+     | | AbyssBSD | FreeBSD | ratio |
+     |---|---|---|---|
+     | jellyfish, unpinned | 5,155 frames/s (0.194 ms) | 2,544 (0.393 ms) | 0.49 |
+     | jellyfish, big cores | 5,144 (0.194 ms) | 2,363 (0.423 ms) | 0.46 |
+     | `gl_frames`, ms a frame | 0.070 | 0.284 | 0.25 |
+     | `gl_frames` with an upload | 0.233 | 0.682 | 0.34 |
+
+     The ratio is AbyssBSD's time over FreeBSD's, so lower is faster. AbyssBSD's GPU stays at the
+     firmware's 900 MHz. FreeBSD's frequency scaling takes the GPU to 1,000 MHz under glmark2, but
+     holds it at 72 to 216 MHz on work as light as `gl_frames`, so that row says less about the
+     kernel. One run each; neither side was tuned.
 
    Open:
    - **Scheduling.** Groups stay resident until destroyed; with more than eight groups, creation
