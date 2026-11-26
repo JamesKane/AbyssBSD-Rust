@@ -111,6 +111,21 @@ pub(crate) fn cred() -> inet::Cred {
     }
 }
 
+/// [`cred`] from the thread's own credential (`td_ucred`, as
+/// `priv_check(td, ...)` reads it): no lock, and one lookup for the four
+/// checks. A datagram send makes this for every packet.
+pub(crate) fn cred_of(s: &Sleepable) -> inet::Cred {
+    use crate::cred::Priv;
+    let c = super::cred(s);
+    inet::Cred {
+        uid: c.euid(),
+        reservedport: c.priv_check(Priv::NetinetReservedport).is_ok(),
+        reuseport: c.priv_check(Priv::NetinetReuseport).is_ok(),
+        bindany: c.priv_check(Priv::NetinetBindany).is_ok(),
+        raw: c.priv_check(Priv::NetinetRaw).is_ok(),
+    }
+}
+
 /// The most a send copies into a kernel buffer of its own at once (the
 /// paths through mbufs take what the socket buffer has room for, as
 /// `sosend_generic` and `soreceive_stream` do).
@@ -147,12 +162,12 @@ pub(crate) fn send(
                             mbuf::Chain::fill_leading(len, mbuf::MAX_HDR as usize, |b, _| {
                                 uio.copy_in(b)
                             })?;
-                        so.send_dgram_chain(data, to, &cred(), ctl)
+                        so.send_dgram_chain(data, to, &cred_of(s), ctl)
                     } else {
                         let mut data = alloc::vec![0u8; len];
                         let n = uio.copy_in(&mut data)?;
                         data.truncate(n);
-                        so.send_dgram_ctl(&data, to, &cred(), ctl)
+                        so.send_dgram_ctl(&data, to, &cred_of(s), ctl)
                     }
                 }
             }

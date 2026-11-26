@@ -530,8 +530,11 @@ stock 15.1. Open:
   (less to find at each), so `tcp.cpu.rx` did not move (3,628 ns, stock 806 to 1,061). The cost is per
   interrupt and per call, about one frame each: it needs batching (the status read once an interrupt,
   receive polled while frames keep coming, or the controller's moderation timer, which the spec does not
-  describe), and a leaner per-frame path (three copies and two allocations). `udp.tx.small` 1.48: 330 ns a
-  packet more on transmit. Then software LRO. `fs.ufs.fsx` was 2.5: `ftruncate` zeroed and moved fragments on the disk, synchronously;
+  describe), and a leaner per-frame path (three copies and two allocations). `udp.tx.small` 1.50 (330 ns a
+  packet more on transmit; bhyve profile, flat: the global network lock and its guard's drop 6.6%, `bpf`
+  with the DHCP client's reader 10%, privilege checks and credential lookups about 4% (the send path took
+  the process credential's lock five times a packet: now the thread's own, 1,042 to 972 ns, 1.41), the
+  uptime read, route lookups). Then software LRO. `fs.ufs.fsx` was 2.5: `ftruncate` zeroed and moved fragments on the disk, synchronously;
   it now clears and carries them in the page cache (`truncate_new`), as FreeBSD's `ffs_truncate` works in
   the buffer cache: 0.75, and `fs.ufs` 0.837. Mapped writes (`msync`) are still twice stock's cost in
   `fsx` itself. `p3` is bhyve's (it reads `vtbd1` and `nda0`): not run here.
