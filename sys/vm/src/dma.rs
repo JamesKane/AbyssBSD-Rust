@@ -545,6 +545,20 @@ impl<T: DeviceShared> DmaCoherent<T> {
         self.bus
     }
 
+    /// The physical address of element 0 (one run of memory), for a
+    /// second, processor-side mapping with other attributes: a console
+    /// framebuffer the kernel maps write-combining.
+    #[must_use]
+    pub fn phys_addr(&self) -> u64 {
+        self.pa
+    }
+
+    /// The size in bytes (a multiple of the page).
+    #[must_use]
+    pub fn size_bytes(&self) -> u64 {
+        self.bytes
+    }
+
     /// The number of elements.
     #[must_use]
     pub fn len(&self) -> usize {

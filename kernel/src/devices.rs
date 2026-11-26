@@ -64,6 +64,17 @@ impl Platform for KernelPlatform {
         *CONSOLE_FB.lock()
     }
 
+    fn console_retarget(
+        &self,
+        s: &Sleepable,
+        pa: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+    ) -> bool {
+        crate::vtcons::retarget(s, pa, width, height, stride)
+    }
+
     fn map_device_wc(&self, pa: u64, len: u64) -> Option<usize> {
         crate::mm::map_device_wc(PhysAddr::new(pa), len)
             .ok()

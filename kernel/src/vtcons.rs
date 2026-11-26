@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 use abi::errno::Errno;
 use abi::termios::Winsize;
 use sched::{Sleepable, WaitQueue};
-use sync::Once;
+use sync::{Once, SpinLock};
 use vt::Pos;
 
 use crate::proc::Process;
@@ -57,8 +57,8 @@ impl tty::Driver for Window {
     /// The framebuffer, write-combining (`vtterm_mmap`, `vt_fb_mmap`):
     /// every page asked must start inside it.
     fn mmap(&self, page: u64, pages: u64) -> Result<Arc<vm::object::Object>, Errno> {
-        let object = FRAMEBUFFER.get().ok_or(Errno::ENXIO)?;
-        let (_, len) = FB_RANGE.get().copied().ok_or(Errno::ENXIO)?;
+        let object = FRAMEBUFFER.lock().clone().ok_or(Errno::ENXIO)?;
+        let (_, len) = (*FB_RANGE.lock()).ok_or(Errno::ENXIO)?;
         let last = page
             .checked_add(pages)
             .and_then(|end| end.checked_sub(1))
@@ -66,17 +66,18 @@ impl tty::Driver for Window {
         if last.checked_mul(PAGE_SIZE).is_none_or(|off| off >= len) {
             return Err(Errno::EINVAL);
         }
-        Ok(Arc::clone(object))
+        Ok(object)
     }
 }
 
 const PAGE_SIZE: u64 = vm::PAGE_SIZE;
 
 /// The framebuffer's physical base and size in bytes (`fb_pbase`,
-/// `fb_size`: its height in scan lines).
-static FB_RANGE: Once<(u64, u64)> = Once::new();
+/// `fb_size`: its height in scan lines). A display driver's console
+/// framebuffer replaces the loader's ([`retarget`]).
+static FB_RANGE: SpinLock<Option<(u64, u64)>> = SpinLock::new(None);
 /// The framebuffer as the device pager's object, for `mmap`.
-static FRAMEBUFFER: Once<Arc<vm::object::Object>> = Once::new();
+static FRAMEBUFFER: SpinLock<Option<Arc<vm::object::Object>>> = SpinLock::new(None);
 
 /// The kernel, as `vt` sees it.
 struct Host;
@@ -191,13 +192,7 @@ pub(crate) fn start() {
         return;
     }
     crate::console::vt_started();
-    let _ = FB_RANGE.set((phys, size));
-    let _ = FRAMEBUFFER.set(vm::object::Object::device(
-        crate::mm::space::page_ops(),
-        vm::Pfn::containing(vm::PhysAddr::new(phys)),
-        size.div_ceil(PAGE_SIZE),
-        vm::object::MemAttr::WriteCombining,
-    ));
+    set_framebuffer(phys, size);
     kprintln!("VT(efifb): resolution {width}x{height}");
     kprintln!("efifb: framebuffer at {phys:#x}, {size:#x} bytes");
     let ttys: Vec<_> = (0..vt::WINDOWS)
@@ -217,4 +212,51 @@ pub(crate) fn start() {
         tty::set_console(&ttys[vt::CONSWINDOW]);
     }
     let _ = TTYS.set(ttys);
+}
+
+/// The framebuffer `mmap` on a window hands out: `size` bytes at `phys`.
+fn set_framebuffer(phys: u64, size: u64) {
+    *FB_RANGE.lock() = Some((phys, size));
+    *FRAMEBUFFER.lock() = Some(vm::object::Object::device(
+        crate::mm::space::page_ops(),
+        vm::Pfn::containing(vm::PhysAddr::new(phys)),
+        size.div_ceil(PAGE_SIZE),
+        vm::object::MemAttr::WriteCombining,
+    ));
+}
+
+/// A display driver's console framebuffer, made at its mode: `width` by
+/// `height` pixels of XRGB8888, `stride` pixels a scan line, in one run
+/// of memory at `phys` that is never freed. `vt` draws on it from now on
+/// (`vt_fb_attach`, `vt_resize`), mapped write-combining, as the
+/// loader's framebuffer is; the windows' `mmap` gives it too. Whether it
+/// took.
+pub(crate) fn retarget(s: &Sleepable, phys: u64, width: u32, height: u32, stride: u32) -> bool {
+    if !vt::running() || stride < width {
+        return false;
+    }
+    let Some(pixels) = usize::try_from(u64::from(stride) * u64::from(height)).ok() else {
+        return false;
+    };
+    let size = u64::from(stride) * u64::from(height) * 4;
+    let Ok(va) = crate::mm::map_device_wc(vm::PhysAddr::new(phys), size) else {
+        return false;
+    };
+    // SAFETY: just mapped, write-combining, `size` bytes = `pixels` words
+    // at `va`; the memory is the driver's for good and given to `vt` alone
+    // (the driver's display reads it, the processor writes it only here).
+    let pixels = unsafe { core::slice::from_raw_parts_mut(va.get() as *mut u32, pixels) };
+    let display = vt::Display {
+        pixels,
+        width,
+        height,
+        stride,
+        layout: fb_console::PixelLayout::Bgrx,
+    };
+    if vt::retarget(s, display).is_err() {
+        return false;
+    }
+    set_framebuffer(phys, size);
+    kprintln!("VT: console framebuffer {width}x{height} at {phys:#x}");
+    true
 }

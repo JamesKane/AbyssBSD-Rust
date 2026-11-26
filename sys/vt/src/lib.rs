@@ -28,7 +28,7 @@ pub mod render;
 mod tests;
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use abi::consio::{VT_AUTO, VT_PROCESS, VtMode};
 use abi::errno::Errno;
@@ -190,8 +190,10 @@ struct Vt {
     /// The flush thread's, and the panic path's: drawing sleeps no
     /// one and stays preemptible.
     renderer: Mutex<Frame>,
-    /// The display's size in pixels.
-    pixels: (u32, u32),
+    /// The display's size in pixels, width in the high half: it changes
+    /// when a display driver gives `vt` a framebuffer of its own
+    /// ([`retarget`]).
+    pixels: AtomicU64,
     host: &'static dyn Host,
     state: SpinLock<State>,
     /// Woken on every switch (`vd_winswitch`).
@@ -259,7 +261,7 @@ pub fn start(display: Display, early: &[u8], host: &'static dyn Host) -> Result<
                 view: Vec::new(),
             },
         ),
-        pixels,
+        pixels: AtomicU64::new(pack(pixels)),
         host,
         state: SpinLock::new(State {
             win: [Win::NEW; WINDOWS],
@@ -285,6 +287,42 @@ pub fn start(display: Display, early: &[u8], host: &'static dyn Host) -> Result<
     Ok(())
 }
 
+/// Draws on `display` from now on, a framebuffer a display driver made
+/// at its mode, in place of the one `vt` started on (`vt_fb_attach`
+/// then `vt_resize`, as when FreeBSD's drm gives `vt` its console
+/// framebuffer): every window takes the size the display gives in its
+/// font, keeping what it holds, and the visible one is drawn again in
+/// full. The old framebuffer is not touched again.
+///
+/// # Errors
+///
+/// [`Error::Display`] if not one cell fits or the pixels don't cover
+/// it; nothing changes then.
+pub fn retarget(s: &Sleepable, display: Display) -> Result<(), Error> {
+    let Some(vt) = VT.get() else {
+        return Err(Error::Display);
+    };
+    let renderer = Renderer::new(display).ok_or(Error::Display)?;
+    {
+        let mut f = vt.renderer.lock(s);
+        vt.pixels
+            .store(pack(renderer.display_size()), Ordering::Release);
+        f.renderer = renderer;
+        f.view.clear();
+    }
+    for w in 0..WINDOWS {
+        vt.fit(w, None);
+    }
+    vt.invalid.store(true, Ordering::Release);
+    vt.changed(vt.active.load(Ordering::Acquire));
+    Ok(())
+}
+
+/// A size in pixels in one word, width in the high half.
+fn pack((w, h): (u32, u32)) -> u64 {
+    u64::from(w) << 32 | u64::from(h)
+}
+
 /// Whether `vt` has the framebuffer.
 #[must_use]
 pub fn running() -> bool {
@@ -297,7 +335,7 @@ pub fn running() -> bool {
 pub fn size(window: usize) -> Option<(Pos, (u32, u32))> {
     let vt = VT.get()?;
     let size = vt.windows.get(window)?.lock().emu.winsize();
-    Some((size, vt.pixels))
+    Some((size, vt.pixels()))
 }
 
 /// The visible window.
@@ -587,13 +625,29 @@ impl Vt {
         Ok(())
     }
 
+    /// The display's size in pixels.
+    fn pixels(&self) -> (u32, u32) {
+        let v = self.pixels.load(Ordering::Acquire);
+        let half = |x: u64| u32::try_from(x & 0xFFFF_FFFF).unwrap_or(0);
+        (half(v >> 32), half(v))
+    }
+
     /// Gives window `w` font `face` (`vt_change_font`): its screen and
     /// history take the size the font gives, keeping what they hold,
     /// and its terminal's window size follows.
     fn change_font(&self, w: usize, face: Face) {
+        self.fit(w, Some(face));
+    }
+
+    /// Sizes window `w` to the display, in `face` if given (else its
+    /// own): its screen and history keep what they hold, its terminal's
+    /// window size follows, and it is drawn again.
+    fn fit(&self, w: usize, face: Option<Face>) {
+        let pixels = self.pixels();
         let size = {
             let mut t = self.windows[w].lock();
-            let size = render::text_size(self.pixels, &face);
+            let face = face.unwrap_or_else(|| self.state.lock().fonts[w].clone());
+            let size = render::text_size(pixels, &face);
             let a = *t.emu.curattr();
             let history = t.buf.history_size();
             t.buf.grow(size, history, &a);
@@ -603,7 +657,7 @@ impl Vt {
             self.state.lock().fonts[w] = face;
             size
         };
-        self.host.resized(w, size, self.pixels);
+        self.host.resized(w, size, pixels);
         self.invalidate(w);
     }
 

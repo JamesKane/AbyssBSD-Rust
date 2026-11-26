@@ -510,6 +510,19 @@ impl Manager {
         self.platform.console_framebuffer()
     }
 
+    /// Gives the kernel's console a display driver's framebuffer (see
+    /// [`Platform::console_retarget`]).
+    pub fn console_retarget(
+        &self,
+        s: &Sleepable,
+        pa: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+    ) -> bool {
+        self.platform.console_retarget(s, pa, width, height, stride)
+    }
+
     pub(crate) fn platform(&self) -> &'static dyn Platform {
         self.platform
     }

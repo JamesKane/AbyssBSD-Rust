@@ -24,6 +24,22 @@ pub trait Platform: Sync {
     fn console_framebuffer(&self) -> Option<(u64, u64)> {
         None
     }
+    /// Has the kernel's console draw from now on on a display driver's
+    /// framebuffer: `width` by `height` pixels of XRGB8888, `stride`
+    /// pixels a scan line, in one run of memory at `pa` the driver never
+    /// frees and shows on its display. Whether it took (the default: no
+    /// console to give it to).
+    fn console_retarget(
+        &self,
+        s: &Sleepable,
+        pa: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+    ) -> bool {
+        let _ = (s, pa, width, height, stride);
+        false
+    }
     /// Whether `[pa, pa + len)` overlaps a sensitive range other than the
     /// console's framebuffer.
     fn sensitive_beyond_console(&self, pa: u64, len: u64) -> bool {
