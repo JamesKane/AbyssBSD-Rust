@@ -249,6 +249,20 @@ impl Gem {
         Ok((Arc::clone(&self.object), self.offset + page))
     }
 
+    /// Makes the pages of `first_page .. first_page + pages` of the buffer
+    /// now, as aligned runs of consecutive frames up to 2 MiB, so a device
+    /// that takes large pages can map them as such (see
+    /// [`Object::populate_runs`]). Frames already made stay.
+    pub fn populate_runs(&self, first_page: u64, pages: u64) {
+        if self.is_device() || first_page >= self.pages() {
+            return;
+        }
+        let pages = pages.min(self.pages() - first_page);
+        // The object's pages sit at the buffer's fake offset.
+        self.object
+            .populate_runs(self.offset + first_page, pages, 9, self.offset);
+    }
+
     /// The physical frames of every page, populating those not yet
     /// touched: what a device that reads the buffer by itself needs
     /// (scanout). The pages stay as long as the buffer does; nothing

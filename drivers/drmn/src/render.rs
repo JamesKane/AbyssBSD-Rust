@@ -298,6 +298,9 @@ pub(crate) struct Render {
     /// Jobs that skipped the switch, and jobs that made it.
     vm_skipped: AtomicU64,
     vm_flushed: AtomicU64,
+    /// Pages mapped for clients, and how many of them in fragments.
+    pages_mapped: AtomicU64,
+    pages_fragmented: AtomicU64,
     vram: Arc<crate::vram::VramPool>,
     vram_made: AtomicU64,
     vram_asked: AtomicU64,
@@ -353,6 +356,8 @@ impl Render {
             ring_vm: SpinLock::new([None; ENGINES]),
             vm_skipped: AtomicU64::new(0),
             vm_flushed: AtomicU64::new(0),
+            pages_mapped: AtomicU64::new(0),
+            pages_fragmented: AtomicU64::new(0),
             vram_made: AtomicU64::new(0),
             vram_asked: AtomicU64::new(0),
             vram_asked_shared: AtomicU64::new(0),
@@ -367,7 +372,7 @@ impl Render {
     pub(crate) fn summary(&self) -> alloc::string::String {
         alloc::format!(
             "{} submissions ({} switched address space, {} did not), {} with a buffer list, {} with inline buffer handles, {} ring resets, {} deadline hints; \
-             buffer requests: {} ({} write-combined, {} MiB of them; {} local); {} asked for video memory ({} that could be shared), {} made there, {} KiB of {} KiB in use",
+             {} pages mapped, {} in fragments; buffer requests: {} ({} write-combined, {} MiB of them; {} local); {} asked for video memory ({} that could be shared), {} made there, {} KiB of {} KiB in use",
             self.cs_count.load(Ordering::Relaxed),
             self.vm_flushed.load(Ordering::Relaxed),
             self.vm_skipped.load(Ordering::Relaxed),
@@ -375,6 +380,8 @@ impl Render {
             self.cs_with_handles.load(Ordering::Relaxed),
             self.resets.load(Ordering::Relaxed),
             self.deadline_hints.load(Ordering::Relaxed),
+            self.pages_mapped.load(Ordering::Relaxed),
+            self.pages_fragmented.load(Ordering::Relaxed),
             self.asks.load(Ordering::Relaxed),
             self.asks_wc.load(Ordering::Relaxed),
             self.asks_wc_bytes.load(Ordering::Relaxed) >> 20,
@@ -775,7 +782,10 @@ impl Render {
                 if off_end > gem.size() {
                     return Err(Errno::EINVAL);
                 }
-                // The pages, populated now (before any lock is held).
+                // The pages, populated now (before any lock is held): as
+                // runs of consecutive aligned frames where there are any,
+                // which the page tables then map as fragments.
+                gem.populate_runs(r.offset_in_bo / page, pages);
                 let frames = gem.frames()?;
                 let first = usize::try_from(r.offset_in_bo / page).map_err(|_| Errno::EINVAL)?;
                 let mut flags = gpu_flags(r.flags);
@@ -797,6 +807,7 @@ impl Render {
                     None
                 };
                 self.with_file(&amd, cx.file_id(), |fs, _| {
+                    let before = fs.space.fragmented_pages();
                     fs.space
                         .map(r.va_address, pages, flags, |n| {
                             let at = frames
@@ -812,6 +823,9 @@ impl Render {
                             amdgpu::vm::Error::NoMemory => Errno::ENOMEM,
                             amdgpu::vm::Error::Range => Errno::EINVAL,
                         })?;
+                    self.pages_mapped.fetch_add(pages, Ordering::Relaxed);
+                    self.pages_fragmented
+                        .fetch_add(fs.space.fragmented_pages() - before, Ordering::Relaxed);
                     fs.maps.push(Mapping {
                         va: r.va_address,
                         pages,

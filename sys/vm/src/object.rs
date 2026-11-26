@@ -53,6 +53,13 @@ pub trait PageOps: Sync {
     fn alloc_filled(&self, fill: &mut dyn FnMut(&mut [u8])) -> Option<Pfn>;
     /// Returns a page that no page table maps any more.
     fn free(&self, pfn: Pfn);
+    /// `2^order` consecutive zeroed pages, the first aligned to the block's
+    /// size, each of which is freed alone ([`PageOps::free`]); `None` where
+    /// the system has no such block (or no way to make one), and the caller
+    /// takes single pages.
+    fn alloc_block(&self, _order: u32) -> Option<Pfn> {
+        None
+    }
     /// Writes back and drops every cache line of page `pfn`, so that it can
     /// be mapped write-combined without a stale line of the direct map
     /// writing over it later. Nothing where the caches are not an issue.
@@ -954,6 +961,76 @@ impl Object {
     /// ([`PageOps::uncache`]). Before any page exists.
     pub fn set_write_combining(&self) {
         self.attr.store(1, Ordering::Release);
+    }
+
+    /// Makes the pages `first .. first + pages` of this (anonymous) object
+    /// now, as runs of consecutive frames aligned to their size, the largest
+    /// that fit (up to `max_order`, as 2^order pages) where the object's
+    /// pages are the aligned ones (counted from page `base`, where the
+    /// buffer starts), so a device's page tables can map them as large
+    /// pages. Pages the object holds already stay; where no block can
+    /// be had the pages are left to be made one at a time when touched.
+    pub fn populate_runs(&self, first: PageIndex, pages: u64, max_order: u32, base: PageIndex) {
+        if self.device.is_some() {
+            return;
+        }
+        let end = first + pages;
+        let mut at = first;
+        while at < end {
+            if self.resident_page(at).is_some() {
+                at += 1;
+                continue;
+            }
+            // The largest aligned block of absent pages from here.
+            let mut order = max_order;
+            while order > 0 {
+                let n = 1u64 << order;
+                if (at - base).is_multiple_of(n)
+                    && at + n <= end
+                    && (0..n).all(|k| self.resident_page(at + k).is_none())
+                {
+                    break;
+                }
+                order -= 1;
+            }
+            // A smaller block where there is no block of that size.
+            let block = loop {
+                if let Some(base) = self.pages_ops.alloc_block(order) {
+                    break Some(base);
+                }
+                if order == 0 {
+                    break None;
+                }
+                order -= 1;
+            };
+            let Some(base) = block else {
+                // No block at all (or none to make): single pages, when
+                // touched.
+                at += 1;
+                continue;
+            };
+            let n = 1u64 << order;
+            for k in 0..n {
+                let pfn = Pfn(base.0 + k);
+                if self.attr.load(Ordering::Acquire) != 0 {
+                    self.pages_ops.uncache(pfn);
+                }
+                let held = {
+                    let mut inner = self.inner.lock();
+                    match inner.pages.entry(at + k) {
+                        alloc::collections::btree_map::Entry::Vacant(e) => {
+                            e.insert(Page::new(pfn));
+                            false
+                        }
+                        alloc::collections::btree_map::Entry::Occupied(_) => true,
+                    }
+                };
+                if held {
+                    self.pages_ops.free(pfn);
+                }
+            }
+            at += n;
+        }
     }
 
     /// Takes page `pfn` of this object out of the processor's caches, and

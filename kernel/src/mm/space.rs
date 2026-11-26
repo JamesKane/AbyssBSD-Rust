@@ -33,7 +33,7 @@ use vm::map::{Entry, MapError, Prot, VmMap};
 use vm::object::{MemAttr, PageOps};
 use vm::{Order, PAGE_SIZE, Pfn};
 
-use super::{Format, Frames, alloc_pages_for, free_pages};
+use super::{Format, Frames, alloc_pages_for, alloc_single_pages_block, free_pages};
 
 /// [`PAGE_SIZE`] as a length.
 const PAGE_BYTES: usize = 4096;
@@ -95,6 +95,21 @@ impl PageOps for KernelPages {
         let pfn = Pfn::containing(pa);
         // SAFETY: a fresh page, reached through the DMAP, used by no one.
         unsafe { core::ptr::write_bytes(Self::page(pfn), 0, PAGE_BYTES) };
+        Some(pfn)
+    }
+
+    fn alloc_block(&self, order: u32) -> Option<Pfn> {
+        let order = Order::new(u8::try_from(order).ok()?)?;
+        let pa = alloc_single_pages_block(order)?;
+        let pfn = Pfn::containing(pa);
+        for k in 0..order.pages() {
+            // SAFETY: fresh pages, reached through the DMAP, used by no one.
+            unsafe { core::ptr::write_bytes(Self::page(Pfn(pfn.0 + k)), 0, PAGE_BYTES) };
+        }
+        OBJECT_PAGES.add(
+            i64::try_from(order.pages()).unwrap_or(0),
+            core::sync::atomic::Ordering::Relaxed,
+        );
         Some(pfn)
     }
 

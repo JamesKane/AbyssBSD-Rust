@@ -345,6 +345,21 @@ impl<'a> PhysAllocator<'a> {
         Some((self.pfn_at(i), take))
     }
 
+    /// Allocates a block of `order`, aligned to its size, and makes every
+    /// page of it a single allocated page (each freed alone, at order 0), as
+    /// [`PhysAllocator::alloc_run`] hands them out: consecutive pages the
+    /// owner takes apart as it likes. Returns the first frame.
+    pub fn alloc_block_as_pages(&mut self, order: Order, domain: DomainId) -> Option<Pfn> {
+        let pfn = self.alloc(order, domain)?;
+        let s = self.segment_of(pfn)?;
+        let base = self.index_in(s, pfn);
+        for k in 0..usize::try_from(order.pages()).unwrap_or(0) {
+            self.pages[base + k].state = PageState::Allocated;
+            self.pages[base + k].order = 0;
+        }
+        Some(pfn)
+    }
+
     /// Allocates a block of `order` lying wholly below frame `limit` (for
     /// devices that cannot address all of memory). Slower than
     /// [`PhysAllocator::alloc`]: it searches the free lists.

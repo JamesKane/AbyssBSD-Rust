@@ -271,6 +271,24 @@ fn alloc_locked(order: Order, class: AllocClass) -> Option<PhysAddr> {
     page.map(Pfn::addr)
 }
 
+/// A block of `order`, aligned to its size, zeroed, as single allocated
+/// pages (each freed alone, at order 0), for an object's pages: from the buddy
+/// allocator itself, `None` if it has no such block or the free pages are
+/// below what an object may take.
+pub(crate) fn alloc_single_pages_block(order: Order) -> Option<PhysAddr> {
+    if hal::interrupt::active() {
+        return None;
+    }
+    let mut phys = PHYS.lock();
+    let a = phys.as_mut()?;
+    if !thresholds().allows(a.stats().free, AllocClass::Normal, order.pages()) {
+        return None;
+    }
+    let page = a.alloc_block_as_pages(order, DomainId(0));
+    publish(a);
+    page.map(Pfn::addr)
+}
+
 /// Returns the pages this CPU's cache holds to the buddy allocator, so
 /// they can merge into larger blocks. Not from interrupt context.
 pub(crate) fn drain_page_cache() {

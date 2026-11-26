@@ -990,6 +990,72 @@ fn reclaiming_looks_at_each_page_once() {
     assert_eq!(object.resident(), 100);
 }
 
+/// Pages that come in aligned blocks of consecutive frames.
+struct Blocks {
+    next: std::sync::Mutex<u64>,
+    live: std::sync::Mutex<std::collections::BTreeSet<u64>>,
+}
+
+impl PageOps for Blocks {
+    fn alloc_zeroed(&self) -> Option<Pfn> {
+        None
+    }
+    fn alloc_copy(&self, _: Pfn) -> Option<Pfn> {
+        None
+    }
+    fn alloc_filled(&self, _: &mut dyn FnMut(&mut [u8])) -> Option<Pfn> {
+        None
+    }
+    fn free(&self, pfn: Pfn) {
+        assert!(self.live.lock().unwrap().remove(&pfn.0), "double free");
+    }
+    fn access(&self, _: Pfn, _: &mut dyn FnMut(&mut [u8])) {}
+    fn alloc_block(&self, order: u32) -> Option<Pfn> {
+        let n = 1u64 << order;
+        let mut next = self.next.lock().unwrap();
+        // A block is aligned to its size.
+        let base = next.next_multiple_of(n);
+        *next = base + n;
+        self.live.lock().unwrap().extend(base..base + n);
+        Some(Pfn(base))
+    }
+}
+
+#[test]
+fn an_object_is_made_of_aligned_runs_of_consecutive_frames() {
+    let ops: &'static Blocks = Box::leak(Box::new(Blocks {
+        next: std::sync::Mutex::new(0x10_0001),
+        live: Default::default(),
+    }));
+    let object = Object::anonymous(ops);
+    // A buffer at object page 4096, mapped from its page 8, 520 pages.
+    object.populate_runs(4096 + 8, 520, 9, 4096);
+    let pfn = |i: u64| object.resident_page(4096 + i).unwrap().0;
+    for i in 8..528 {
+        assert!(object.resident_page(4096 + i).is_some(), "page {i}");
+    }
+    assert!(object.resident_page(4096 + 7).is_none());
+    assert!(object.resident_page(4096 + 528).is_none());
+    // Runs: 8 pages at 8, 16 at 16, 32 at 32, ... 256 at 256; each starts
+    // aligned in the buffer and in memory.
+    for (start, len) in [
+        (8u64, 8u64),
+        (16, 16),
+        (32, 32),
+        (64, 64),
+        (128, 128),
+        (256, 256),
+    ] {
+        assert_eq!(pfn(start) % len, 0, "run at {start}");
+        for k in 1..len {
+            assert_eq!(pfn(start + k), pfn(start) + k, "run at {start}");
+        }
+    }
+    // All of it freed with the object, a page at a time.
+    drop(object);
+    assert!(ops.live.lock().unwrap().is_empty());
+}
+
 #[test]
 fn a_device_object_at_a_file_offset_has_its_pages_there_and_none_before() {
     use crate::object::MemAttr;

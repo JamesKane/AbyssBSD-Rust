@@ -157,6 +157,34 @@ pub struct Space<T: Tables> {
     root: usize,
     /// The tables made, to free them.
     made: Vec<usize>,
+    /// Pages mapped in fragments (a count, for the driver's statistics).
+    fragmented: u64,
+}
+
+/// Where the entry's fragment field starts (bits 11:7).
+const FRAGMENT_SHIFT: u32 = 7;
+/// The largest fragment: 2 MiB, a whole page table.
+const MAX_FRAGMENT: u64 = 9;
+
+/// The fragment for entry `n` of a mapping of `pages` pages from `va`: the
+/// largest `f` such that the entry starts a run of `2^f` pages that is
+/// aligned in the address space and in memory, lies within the mapping, and is
+/// contiguous in memory (the hardware treats the run as one page, so each
+/// of its pages must be where the first one says). 0 for a lone page.
+fn fragment_at(va: u64, pages: u64, n: u64, addr: &impl Fn(u64) -> u64) -> u64 {
+    let first = addr(n);
+    for f in (1..=MAX_FRAGMENT).rev() {
+        let run = 1u64 << f;
+        let bytes = run * PAGE;
+        if n + run > pages || !(va + n * PAGE).is_multiple_of(bytes) || !first.is_multiple_of(bytes)
+        {
+            continue;
+        }
+        if (1..run).all(|k| addr(n + k) == first + k * PAGE) {
+            return f;
+        }
+    }
+    0
 }
 
 fn index(va: u64, level: u32) -> usize {
@@ -176,6 +204,7 @@ impl<T: Tables> Space<T> {
             tables,
             root,
             made: alloc::vec![root],
+            fragmented: 0,
         })
     }
 
@@ -239,16 +268,35 @@ impl<T: Tables> Space<T> {
         if !va.is_multiple_of(PAGE) || end > 1 << VA_BITS || pages == 0 {
             return Err(Error::Range);
         }
+        // The fragment of the run the next entries are in (log2 of its
+        // pages) and how many of them are left.
+        let (mut fragment, mut left) = (0u64, 0u64);
         for n in 0..pages {
             let v = va + n * PAGE;
+            if left == 0 {
+                fragment = fragment_at(va, pages, n, &addr);
+                left = 1 << fragment;
+            }
+            left -= 1;
             let leaf = self.leaf(v, true)?.ok_or(Error::NoMemory)?;
             let i = index(v, 0);
             if self.tables.read(leaf, i) & bit::VALID != 0 {
                 return Err(Error::Busy);
             }
-            self.tables.write(leaf, i, pte(addr(n), flags));
+            self.tables
+                .write(leaf, i, pte(addr(n), flags) | fragment << FRAGMENT_SHIFT);
+            if fragment != 0 {
+                self.fragmented += 1;
+            }
         }
         Ok(())
+    }
+
+    /// How many pages were mapped as part of a fragment (a run of 2 or more
+    /// pages the TLB can hold as one entry).
+    #[must_use]
+    pub fn fragmented_pages(&self) -> u64 {
+        self.fragmented
     }
 
     /// Clears `pages` pages from `va` (pages that are not mapped are left).
@@ -373,6 +421,69 @@ mod tests {
             .unwrap();
         assert_eq!(s.made().len(), 7);
         assert!(s.translate(0x7fff_ffff_f000).is_some());
+    }
+
+    fn fragments_of(sp: &mut Space<Model>, va: u64, pages: u64) -> Vec<u64> {
+        (0..pages)
+            .map(|n| (sp.translate(va + n * PAGE).unwrap() >> FRAGMENT_SHIFT) & 0x1f)
+            .collect()
+    }
+
+    #[test]
+    fn contiguous_aligned_runs_are_fragments_and_nothing_else_is() {
+        let mut sp = Space::new(Model::new(false)).unwrap();
+        // 1024 pages from a 4 MiB address, physically contiguous from a 4 MiB
+        // address: two runs of 2 MiB (fragment 9).
+        sp.map(0x40_0000, 1024, Flags::SYSTEM_RW, |n| {
+            0x8000_0000 + n * PAGE
+        })
+        .unwrap();
+        let f = fragments_of(&mut sp, 0x40_0000, 1024);
+        assert!(f.iter().all(|x| *x == 9));
+        assert_eq!(sp.fragmented_pages(), 1024);
+        // The same mapping from 8 pages past a 2 MiB boundary: the runs grow
+        // as the alignment allows, 8 pages, 16, 32, ... then shrink at the end.
+        let mut sp = Space::new(Model::new(false)).unwrap();
+        sp.map(0x40_0000 + 8 * PAGE, 520, Flags::SYSTEM_RW, |n| {
+            0x8000_0000 + (8 + n) * PAGE
+        })
+        .unwrap();
+        let f = fragments_of(&mut sp, 0x40_0000 + 8 * PAGE, 520);
+        assert_eq!(f[..8], [3; 8]);
+        assert_eq!(f[8..24], [4; 16]);
+        assert_eq!(f[24..56], [5; 32]);
+        // The last run is cut short by the end of the mapping.
+        assert_eq!(f[504..520], [4; 16]);
+        // Scattered pages are lone pages.
+        let mut sp = Space::new(Model::new(false)).unwrap();
+        sp.map(0x40_0000, 16, Flags::SYSTEM_RW, |n| {
+            0x8000_0000 + n * 2 * PAGE
+        })
+        .unwrap();
+        assert!(fragments_of(&mut sp, 0x40_0000, 16).iter().all(|x| *x == 0));
+        // Contiguous but not aligned in memory: no run longer than the
+        // alignment allows (here 4 pages).
+        let mut sp = Space::new(Model::new(false)).unwrap();
+        sp.map(0x40_0000, 8, Flags::SYSTEM_RW, |n| 0x8000_4000 + n * PAGE)
+            .unwrap();
+        assert_eq!(
+            fragments_of(&mut sp, 0x40_0000, 8),
+            [2, 2, 2, 2, 2, 2, 2, 2]
+        );
+        // A run broken in the middle falls to the halves.
+        let mut sp = Space::new(Model::new(false)).unwrap();
+        sp.map(0x40_0000, 8, Flags::SYSTEM_RW, |n| {
+            if n < 4 {
+                0x8000_0000 + n * PAGE
+            } else {
+                0x9000_0000 + (n - 4) * PAGE
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            fragments_of(&mut sp, 0x40_0000, 8),
+            [2, 2, 2, 2, 2, 2, 2, 2]
+        );
     }
 
     #[test]
