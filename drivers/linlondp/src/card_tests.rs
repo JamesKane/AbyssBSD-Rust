@@ -70,6 +70,8 @@ struct TestPlatform {
     next_addr: AtomicU64,
     cleaned: AtomicU32,
     pixel: Mutex<Vec<(usize, Option<u32>)>>,
+    /// The console framebuffers handed to the kernel's console.
+    consoles: Mutex<Vec<ConsoleBuffer>>,
 }
 
 impl Platform for TestPlatform {
@@ -103,6 +105,19 @@ impl Platform for TestPlatform {
     fn now_ns(&self) -> u64 {
         1_000
     }
+    fn console_buffer(&self, width: u32, height: u32) -> Result<ConsoleBuffer, Errno> {
+        Ok(ConsoleBuffer {
+            addr: 0x4_0000_0000,
+            translated: false,
+            phys: 0x9_0000_0000,
+            width,
+            height,
+        })
+    }
+    fn console_retarget(&self, _: &Sleepable, b: &ConsoleBuffer) -> bool {
+        self.consoles.lock().unwrap().push(*b);
+        true
+    }
 }
 
 struct Rig {
@@ -125,6 +140,7 @@ fn rig() -> Rig {
         next_addr: AtomicU64::new(0x8000_0000),
         cleaned: AtomicU32::new(0),
         pixel: Mutex::new(Vec::new()),
+        consoles: Mutex::new(Vec::new()),
     });
     let card = create(dpu, plat.clone(), Vec::new()).unwrap();
     let inner = Arc::clone(&card.inner);
@@ -553,6 +569,55 @@ fn a_display_firmware_left_running_is_kept_when_its_mode_is_asked_for() {
         0
     );
     assert_eq!(r.sim.live(p.cu.offset + cu::INPUT_ID + 8), 0);
+}
+
+#[test]
+fn the_console_gets_a_framebuffer_at_the_mode_and_comes_back_at_the_last_close() {
+    let r = rig();
+    lit_by_firmware(&r, &hd());
+    assert!(r.card.adopt(&sl()));
+    let p = r.card.dpu().layout().pipes[0].clone();
+    let l0 = p.layers[0].block.offset;
+    // The console's own framebuffer, one to one at the mode, alone.
+    r.card.console(&sl());
+    let given = r.plat.consoles.lock().unwrap().clone();
+    assert_eq!(given.len(), 1);
+    assert_eq!((given[0].width, given[0].height), (1920, 1080));
+    assert_eq!(r.sim.live(l0 + layer::P0_PTR_LOW), 0);
+    assert_eq!(r.sim.live(l0 + layer::P0_PTR_HIGH), 4);
+    assert_eq!(r.sim.live(l0 + layer::P0_STRIDE), 1920 * 4);
+    assert_eq!(r.sim.live(l0 + layer::IN_SIZE), 1920 | 1080 << 16);
+    assert_eq!(
+        r.sim.live(p.layers[2].block.offset + layer::CONTROL) & layer::CTRL_EN,
+        0
+    );
+    assert_eq!(
+        r.sim.live(p.cu.offset + cu::INPUT_ID),
+        p.layers[0].block.input_id(0)
+    );
+    // A client's buffers on layers 0 and 1.
+    modeset(&r, &hd());
+    let (o, n) = (PlaneSt::default(), PlaneSt::default());
+    let f = fb(&r, format::XRGB8888, 1920, 1080, 7680);
+    r.layers[0].commit(&update(Some(&f), visible(1920, 1080, 0, 0), &o, &n));
+    let g = fb(&r, format::ARGB8888, 64, 64, 256);
+    r.layers[1].commit(&update(Some(&g), visible(64, 64, 10, 10), &o, &n));
+    r.card.dpu().flush_wait(0).unwrap();
+    assert_ne!(r.sim.live(l0 + layer::P0_PTR_HIGH), 4);
+    // It quits: the console again, the client's other layer gone.
+    r.card.last_close();
+    assert_eq!(r.sim.live(l0 + layer::P0_PTR_LOW), 0);
+    assert_eq!(r.sim.live(l0 + layer::P0_PTR_HIGH), 4);
+    assert_eq!(
+        r.sim.live(p.layers[1].block.offset + layer::CONTROL) & layer::CTRL_EN,
+        0
+    );
+    // A display left in a mode of another size keeps what it shows.
+    r.layers[0].commit(&update(Some(&f), visible(1920, 1080, 0, 0), &o, &n));
+    r.card.dpu().flush_wait(0).unwrap();
+    r.sim.poke(p.bs.offset + bs::ACTIVESIZE, 1280 | 720 << 16);
+    r.card.last_close();
+    assert_ne!(r.sim.live(l0 + layer::P0_PTR_HIGH), 4);
 }
 
 #[test]

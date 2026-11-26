@@ -154,6 +154,19 @@ pub mod layer {
     pub const PALPHA_DEFAULT: u32 = 0xFFAA_5500;
 }
 
+/// A compositor scaler (section 02 §2.9).
+pub mod sc {
+    pub const INPUT_ID0: usize = 0x080;
+    pub const CONTROL: usize = 0x0D0;
+}
+
+/// The merger (section 02 §2.11).
+pub mod mg {
+    pub const INPUT_ID0: usize = 0x080;
+    pub const INPUT_ID1: usize = 0x084;
+    pub const CONTROL: usize = 0x0D0;
+}
+
 /// The compositor (section 02 §2.8).
 pub mod cu {
     pub const INPUT_ID: usize = 0x080;

@@ -275,6 +275,37 @@ impl Dpu {
         })
     }
 
+    /// The frame size pipeline `p`'s timing generator runs, if it runs.
+    #[must_use]
+    pub fn active_size(&self, p: usize) -> Option<(u32, u32)> {
+        let pipe = self.layout.pipes.get(p)?;
+        let b = pipe.bs.offset;
+        if self.w.read(b + bs::CONTROL) & bs::CTRL_EN == 0 {
+            return None;
+        }
+        let a = self.w.read(b + bs::ACTIVESIZE);
+        Some((a & 0x1FFF, a >> 16 & 0x1FFF))
+    }
+
+    /// Takes pipeline `p`'s scalers and merger out of the picture, as
+    /// firmware's splash may use them (section 08 §8.5 phase 1: their
+    /// sources cleared, their enables off). The caller flushes.
+    pub fn bypass(&self, p: usize) {
+        let Some(pipe) = self.layout.pipes.get(p) else {
+            return;
+        };
+        let x = &*self.w;
+        for sc in &pipe.scalers {
+            x.write(sc.offset + regs::sc::CONTROL, 0);
+            x.write(sc.offset + regs::sc::INPUT_ID0, 0);
+        }
+        if let Some(mg) = &pipe.merger {
+            x.write(mg.offset + regs::mg::CONTROL, 0);
+            x.write(mg.offset + regs::mg::INPUT_ID0, 0);
+            x.write(mg.offset + regs::mg::INPUT_ID1, 0);
+        }
+    }
+
     /// Whether pipeline `p`'s timing generator runs exactly the timing
     /// `mode` asks for, so a display already showing it can be kept (the
     /// pixel clock is the caller's to compare).

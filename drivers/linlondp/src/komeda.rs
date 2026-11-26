@@ -32,7 +32,7 @@ use sched::{IrqCx, Sleepable};
 use sync::SpinLock;
 use vm::dma::{Coherency, DmaConstraints, DmaTag, IoMapping};
 
-use crate::card::{Card, Mapped, Output, Platform, create};
+use crate::card::{Card, ConsoleBuffer, Mapped, Output, Platform, create};
 use crate::discover::{self, Delay};
 use crate::hw::Dpu;
 use crate::regs::{Words, bs};
@@ -203,6 +203,35 @@ impl Platform for Machine {
 
     fn now_ns(&self) -> u64 {
         sched::now_ns()
+    }
+
+    fn console_buffer(&self, width: u32, height: u32) -> Result<ConsoleBuffer, Errno> {
+        let pixels =
+            usize::try_from(u64::from(width) * u64::from(height)).map_err(|_| Errno::EINVAL)?;
+        // Through the display's translation, as clients' buffers are, and
+        // zeroed and cleaned from the caches by the allocation: black.
+        let mem = self
+            .tag
+            .coherent::<u32>(pixels)
+            .map_err(|_| Errno::ENOMEM)?;
+        let buf = ConsoleBuffer {
+            addr: mem.bus_addr(),
+            translated: false,
+            phys: mem.phys_addr(),
+            width,
+            height,
+        };
+        // The console and a panic may show it at any time: never freed.
+        core::mem::forget(mem);
+        Ok(buf)
+    }
+
+    fn console_retarget(&self, s: &Sleepable, b: &ConsoleBuffer) -> bool {
+        bus::manager().console_retarget(s, b.phys, b.width, b.height, b.width)
+    }
+
+    fn log(&self, args: core::fmt::Arguments<'_>) {
+        bus::manager().log(args);
     }
 }
 
@@ -400,6 +429,9 @@ impl Driver for Komeda {
                     self.unit
                 ));
             }
+            // The console gets a framebuffer of its own at the display's
+            // mode, in place of firmware's.
+            self.card.console(cx.sleepable());
         }
         Ok(())
     }

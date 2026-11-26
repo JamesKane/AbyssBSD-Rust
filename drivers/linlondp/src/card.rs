@@ -21,6 +21,7 @@ use drm::kms::{
     ConnectorHw, CrtcHw, CrtcUpdate, EncoderHw, Fb, Kms, KmsLimits, PlaneHw, PlaneKind, PlaneUpdate,
 };
 use drm::{DriverInfo, DrmDriver, DumbLimits, KmsBuilder};
+use drm_fourcc::format::XRGB8888;
 use drm_fourcc::{Fourcc, MOD_LINEAR, lookup};
 use sched::Sleepable;
 use sync::SpinLock;
@@ -70,6 +71,40 @@ pub trait Platform: Send + Sync {
     fn aclk_khz(&self) -> u64;
     /// The time, in nanoseconds, for frame stamps.
     fn now_ns(&self) -> u64;
+    /// A buffer for the kernel's console, `width` by `height` pixels of
+    /// XRGB8888, readable by the display processor, in one run of memory
+    /// and never freed (the console, and a panic, may show it at any
+    /// time).
+    ///
+    /// # Errors
+    ///
+    /// `ENOMEM`, or `EINVAL` where there is no console to give it to.
+    fn console_buffer(&self, width: u32, height: u32) -> Result<ConsoleBuffer, Errno> {
+        let _ = (width, height);
+        Err(Errno::EINVAL)
+    }
+    /// Has the kernel's console draw on `buffer` from now on. Whether it
+    /// took.
+    fn console_retarget(&self, s: &Sleepable, buffer: &ConsoleBuffer) -> bool {
+        let _ = (s, buffer);
+        false
+    }
+    /// A line for the kernel's log.
+    fn log(&self, args: core::fmt::Arguments<'_>) {
+        let _ = args;
+    }
+}
+
+/// The kernel console's framebuffer, made at the display's mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConsoleBuffer {
+    /// Its address for the display processor.
+    pub addr: u64,
+    pub translated: bool,
+    /// Its physical address, for the processor's mapping.
+    pub phys: u64,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// What a pipeline's output is: the encoder and connector the
@@ -90,6 +125,11 @@ struct Inner {
     /// The pixel clock (kHz) of a pipeline taken over from firmware, until
     /// the first mode set decides to keep it or take it down.
     adopted: SpinLock<[Option<u32>; 2]>,
+    /// The kernel console's layer on pipeline 0, once it has its own
+    /// framebuffer: shown again when no client drives the display, as
+    /// FreeBSD's drm brings its console back at the last close. Set once,
+    /// read without a lock (a panic reads it).
+    console: sync::Once<LayerCfg<'static>>,
 }
 
 struct Crtc {
@@ -372,6 +412,7 @@ pub fn create(dpu: Dpu, plat: Arc<dyn Platform>, outputs: Vec<Output>) -> Result
         plat,
         shown: SpinLock::new([[None; 4]; 2]),
         adopted: SpinLock::new([None; 2]),
+        console: sync::Once::new(),
     });
     let mut b = KmsBuilder::new(KmsLimits {
         min_width: 4,
@@ -444,6 +485,91 @@ impl Card {
         any
     }
 
+    /// Gives the kernel's console a framebuffer of its own at the mode
+    /// pipeline 0 runs, shown one to one on layer 0, in place of firmware's
+    /// (FreeBSD's drm does the same with its console framebuffer, which
+    /// `vt` then draws on). Nothing changes if any step fails.
+    pub fn console(&self, s: &Sleepable) {
+        let inner = &self.inner;
+        let Some((w, h)) = inner.dpu.active_size(0) else {
+            return;
+        };
+        let buf = match inner.plat.console_buffer(w, h) {
+            Ok(b) => b,
+            Err(e) => {
+                inner
+                    .plat
+                    .log(format_args!("komeda: no console framebuffer: {e:?}"));
+                return;
+            }
+        };
+        let (Some(info), Some(hf)) = (lookup(XRGB8888), format::lookup(XRGB8888)) else {
+            return;
+        };
+        let cfg = LayerCfg {
+            format: hf,
+            info,
+            addr: [buf.addr, 0, 0],
+            pitch: [w * 4, 0, 0],
+            width: w,
+            height: h,
+            dst_x: 0,
+            dst_y: 0,
+            translated: buf.translated,
+            blend: Blend::Opaque,
+            alpha: 0xFF,
+        };
+        if inner.dpu.show(0, 0, &cfg).is_err() {
+            return;
+        }
+        let layers = inner.dpu.layout().pipes[0].layers.len();
+        for l in 1..layers {
+            inner.dpu.hide(0, l);
+        }
+        inner.dpu.bypass(0);
+        if inner.dpu.flush_wait(0).is_err() {
+            inner
+                .plat
+                .log(format_args!("komeda: the console layer did not latch"));
+        }
+        {
+            let mut shown = inner.shown.lock();
+            shown[0] = [None; 4];
+            shown[0][0] = Some(cfg);
+        }
+        let _ = inner.console.set(cfg);
+        if !inner.plat.console_retarget(s, &buf) {
+            inner.plat.log(format_args!(
+                "komeda: the console did not take its framebuffer"
+            ));
+        }
+    }
+
+    /// Shows the console's layer again on pipeline 0, if it has one and the
+    /// pipeline runs its frame size: register writes and a flush. `wait`:
+    /// for the latch too (not on the panic path). Whether it did.
+    fn show_console(&self, wait: bool) -> bool {
+        let inner = &self.inner;
+        let Some(cfg) = inner.console.get() else {
+            return false;
+        };
+        if inner.dpu.active_size(0) != Some((cfg.width, cfg.height)) {
+            return false;
+        }
+        if inner.dpu.show(0, 0, cfg).is_err() {
+            return false;
+        }
+        for l in 1..inner.dpu.layout().pipes[0].layers.len() {
+            inner.dpu.hide(0, l);
+        }
+        if wait {
+            let _ = inner.dpu.flush_wait(0);
+        } else {
+            inner.dpu.flush(0);
+        }
+        true
+    }
+
     /// The display processor.
     #[must_use]
     pub fn dpu(&self) -> &Dpu {
@@ -464,6 +590,30 @@ impl DrmDriver for Card {
             minor: 1,
             patch: 0,
         }
+    }
+
+    fn last_close(&self) {
+        // Nobody drives the display: the console is shown again, not the
+        // last picture of the program that quit. The client's buffers stay
+        // held until the next commit, so nothing it showed is freed while
+        // the display may still read it.
+        if self.show_console(true) {
+            let mut shown = self.inner.shown.lock();
+            if let Some(cfg) = self.inner.console.get() {
+                shown[0] = [None; 4];
+                shown[0][0] = Some(*cfg);
+            }
+        } else if self.inner.console.get().is_some() {
+            self.inner.plat.log(format_args!(
+                "komeda: the console is not shown again: the display runs another mode"
+            ));
+        }
+    }
+
+    /// The console back at once: register writes and a flush, no lock, no
+    /// wait.
+    fn panic_restore(&self) {
+        let _ = self.show_console(false);
     }
 
     fn kms(&self) -> Option<&Kms> {
