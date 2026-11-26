@@ -514,7 +514,12 @@ stock 15.1. Open:
 - **Performance:** `p2` at one clock (both sides at 3000 MHz, `P2_PIN_MHZ`; stock boosts to 5.2 GHz
   and AbyssBSD ran 5465, so unpinned runs compare boost behavior) passes: geometric mean 0.645, every
   component under the bound after `tlb.shootdown` answered before invalidating (1.035 to 0.992).
-  `p3` to `p7`, `p7` over the RTL8125.
+  `p4` to `p7` (2026-11-26, `tests/perf/x870e/perf-x870e.sh`, 3 runs, both sides at 3000 MHz, `p7` over the
+  RTL8125 to the build server): geometric mean 0.835, 12 of 16 components pass. Over the gate: `sig`
+  (`sig.deliver` 1.39, 1.23 after loading the handler's clean FPU state from one kept image),
+  `syscall` (`getpid` 1.05 to 1.08), `vm` (faults 1.13 to 1.17), `udp` (`udp.tx.small` 1.49). Outliers
+  inside passing components: `fs.ufs.fsx` 2.5, `tcp.cpu.rx/tx` 3.7 to 5.1 (check with `rusage` that it is
+  not `cp_time` accounting). `p3` is bhyve's (it reads `vtbd1` and `nda0`): not run here.
 - **Exit:** the `x86_64-multiuser` scenario from the framebuffer and a USB keyboard alone; fsx with
   `fsck_ffs` on the media NVMe and a USB disk; the device tree against FreeBSD's `devinfo`; every
   suite so far within 2% of FreeBSD on the machine, P7's over its physical NIC.
