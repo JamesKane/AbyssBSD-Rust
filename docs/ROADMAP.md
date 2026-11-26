@@ -518,8 +518,11 @@ stock 15.1. Open:
   RTL8125 to the build server): geometric mean 0.835, 12 of 16 components pass. Over the gate: `sig`
   (`sig.deliver` 1.39, 1.23 after loading the handler's clean FPU state from one kept image),
   `syscall` (`getpid` 1.05 to 1.08), `vm` (faults 1.13 to 1.17), `udp` (`udp.tx.small` 1.49). Outliers
-  inside passing components: `tcp.cpu.rx/tx` 3.7 to 5.1 (check with `rusage` that it is not `cp_time`
-  accounting). `fs.ufs.fsx` was 2.5: `ftruncate` zeroed and moved fragments on the disk, synchronously;
+  inside passing components: `tcp.cpu.rx/tx` 3.7 to 5.1: real (checked 2026-11-26 with `iperf3`'s own
+  `rusage`: 1.48 s against 0.28 s sending 1 Gbit/s for 20 s, 2.10 s against 0.59 s receiving). Stock's
+  `re0` (the `realtek-re-kmod` port, since 15.1 has no RTL8125D driver) offers `TSO4`, `TSO6` and `LRO`;
+  our `rge` has checksum offload only, and the stack has TSO plumbing (`TsoCap`) but no receive
+  coalescing. The work: TSO in `rge` (the RTL8125's large-send descriptor bits), then software LRO. `fs.ufs.fsx` was 2.5: `ftruncate` zeroed and moved fragments on the disk, synchronously;
   it now clears and carries them in the page cache (`truncate_new`), as FreeBSD's `ffs_truncate` works in
   the buffer cache: 0.75, and `fs.ufs` 0.837. Mapped writes (`msync`) are still twice stock's cost in
   `fsx` itself. `p3` is bhyve's (it reads `vtbd1` and `nda0`): not run here.
