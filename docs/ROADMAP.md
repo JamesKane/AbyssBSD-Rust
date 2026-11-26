@@ -534,7 +534,15 @@ stock 15.1. Open:
   packet more on transmit; bhyve profile, flat: the global network lock and its guard's drop 6.6%, `bpf`
   with the DHCP client's reader 10%, privilege checks and credential lookups about 4% (the send path took
   the process credential's lock five times a packet: now the thread's own, 1,042 to 972 ns, 1.41), the
-  uptime read, route lookups). Then software LRO. `fs.ufs.fsx` was 2.5: `ftruncate` zeroed and moved fragments on the disk, synchronously;
+  uptime read, route lookups). Then software LRO.
+  **Network lock (2026-11-26):** an Ethernet frame now leaves `ip::send` after the lock is let go, not
+  through the lock's frame queue (`output_direct`): `udp.tx.small` 972 to 913 ns, 1.30, `udp` 1.053.
+  Sending faster exposed a lost transmit doorbell in `rge`: a frame left in the ring until the next
+  `TXSTART` write (a connection attempt's one SYN, a second: `tcp.connect.net` 52 times stock; found with
+  a capture on the peer and timers in the driver; the older kernel has the same loss, rarer). The tick
+  thread now looks every millisecond while frames are in flight and rings again for one nothing has taken
+  (`watch_doorbell`): 10 of 10 runs clean, `tcp.connect.net` 0.935.
+  `fs.ufs.fsx` was 2.5: `ftruncate` zeroed and moved fragments on the disk, synchronously;
   it now clears and carries them in the page cache (`truncate_new`), as FreeBSD's `ffs_truncate` works in
   the buffer cache: 0.75, and `fs.ufs` 0.837. Mapped writes (`msync`) are still twice stock's cost in
   `fsx` itself. `p3` is bhyve's (it reads `vtbd1` and `nda0`): not run here.
