@@ -25,7 +25,7 @@ use pci::bus::PciChild;
 use regs::Bytes;
 use sched::Sleepable;
 use sched::lock::{LockClass, Mutex};
-use vm::dma::{DmaCoherent, DmaConstraints, DmaTag};
+use vm::dma::{Coherency, DmaCoherent, DmaConstraints, DmaTag};
 
 use crate::names;
 
@@ -371,6 +371,15 @@ impl Driver for Hdac {
             addr_bits: if caps.addr64 { 64 } else { 32 },
             // The rings are 128-byte aligned (`HDA_DMA_ALIGNMENT`).
             align: 128,
+            // On x86 FreeBSD maps the rings and the buffers uncacheable
+            // (`HDAC_F_DMA_NOCACHE`), because the controller may mark its
+            // DMA no-snoop and the snoop bits are vendor-specific. The
+            // same here: each access cleans or invalidates its lines.
+            coherency: if cfg!(target_arch = "x86_64") {
+                Coherency::NonCoherent
+            } else {
+                Coherency::Coherent
+            },
             ..DmaConstraints::UNLIMITED
         })?;
         let corb = tag

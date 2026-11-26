@@ -507,9 +507,9 @@ stock 15.1. Open:
 - **Drivers:** `rge` on the RTL8125D revision 2 (programmed, host-tested only) and the other RTL8125
   revisions; `amdsbwd` on the machine (host-tested only); `acpi_cppc` on amd64 if a machine needs it
   (the X870E's frequency is `hwpstate_amd`'s); and whatever else multi-user needs.
-- **Defects:** one dark-screen hang after a reboot (no log, not seen again in later reboots, about
-  15 reboots on 2026-11-25); HD Audio's ring memory not yet checked on the machine
-  (compat-deviations). The `xhci` `StoppedLengthInvalid` messages were the answers to the driver's own
+- **Defects:** one dark-screen hang after a reboot (no log; a non-reproducer, not seen in about
+  30 reboots since, until it happens again). HD Audio's ring memory was checked on the machine
+  2026-11-25 (compat-deviations). The `xhci` `StoppedLengthInvalid` messages were the answers to the driver's own
   Stop Endpoint commands as the USB stack closed its pipes at shutdown: not logged any more.
 - **Performance:** `p2` at one clock (both sides at 3000 MHz, `P2_PIN_MHZ`; stock boosts to 5.2 GHz
   and AbyssBSD ran 5465, so unpinned runs compare boost behavior) passes: geometric mean 0.645, every

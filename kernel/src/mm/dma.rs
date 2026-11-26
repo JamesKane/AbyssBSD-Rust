@@ -83,7 +83,14 @@ unsafe impl DmaMemory for KernelDma {
         #[cfg(target_arch = "aarch64")]
         crate::arch::cache::invalidate_to_poc(va as usize, len);
         #[cfg(target_arch = "x86_64")]
-        let _ = (va, len);
+        // SAFETY: as in `clean`. CLFLUSH writes a dirty line back and drops
+        // it: right for the memory a device that does not snoop (a HD Audio
+        // controller with its no-snoop bit set) wrote, where the CPU's
+        // cached copy is stale. The CPU cleans after each write it makes
+        // to such memory, so nothing dirty is lost.
+        unsafe {
+            crate::arch::cpu::flush_cache_range(va, len);
+        }
     }
 }
 
