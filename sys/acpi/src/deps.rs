@@ -576,6 +576,12 @@ fn platform_edges(
     all.links.append(&mut d.links);
     all.reserved.append(&mut d.reserved);
     all.shared.append(&mut d.shared);
+    for a in d.agents {
+        if !all.agents.contains(&a) {
+            all.agents.push(a);
+        }
+    }
+    all.power_domains.append(&mut d.power_domains);
     out.malformed.extend(x.malformed);
 }
 

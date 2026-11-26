@@ -380,3 +380,43 @@ fn the_register_window_properties_include_the_phys_orientation_syscon() {
         );
     }
 }
+
+/// The board's GPU takes power domain 21 from the SMC agent, which is described once, with its
+/// shared memory outside every device's `_CRS` (in memory the UEFI map reserves).
+#[test]
+fn the_gpu_takes_its_power_domain_from_the_smc_agent() {
+    let (mut i, mut h) = acpi_corpus::load("opi6p");
+    let devices = acpi::deps::devices(&mut i, &mut h);
+    let x = PLATFORM.extract(&mut i, &mut h, &devices);
+    let d = &x.description;
+    assert_eq!(d.agents, [crate::PD_AGENT]);
+    let lines: Vec<(String, Option<&str>, &str, u32)> = d
+        .power_domains
+        .iter()
+        .map(|l| {
+            (
+                i.path(l.consumer).to_text(),
+                l.name.as_deref(),
+                l.agent,
+                l.id,
+            )
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        [(String::from("\\_SB_.GPU_"), Some("gpu"), "sky1_pd", 21)]
+    );
+    let (base, end) = (
+        crate::PD_AGENT.base,
+        crate::PD_AGENT.base + crate::PD_AGENT.len,
+    );
+    for &dev in &devices {
+        for r in acpi::ranges::consumed(&i.crs(dev, &mut h).ok().flatten().unwrap_or_default()) {
+            assert!(
+                r.base + r.len <= base || r.base >= end,
+                "{} overlaps the agent's shared memory",
+                i.path(dev).to_text()
+            );
+        }
+    }
+}

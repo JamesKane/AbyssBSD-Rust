@@ -367,6 +367,7 @@ dependencies = [
  "sky1-clk",
  "sky1-dp",
  "sky1-gpt",
+ "sky1-pd",
  "sky1-pinctrl",
  "sky1-reset",
  "sky1-syscon",
@@ -820,6 +821,7 @@ dependencies = [
  "sbsa-gwdt",
  "sched",
  "security",
+ "sky1-pd",
  "smbios",
  "smmu",
  "socket",
@@ -1137,6 +1139,16 @@ dependencies = [
  "regs",
  "sync",
  "sysctl",
+]
+
+[[package]]
+name = "sky1-pd"
+version = "0.0.0"
+dependencies = [
+ "bus",
+ "regs",
+ "sched",
+ "sync",
 ]
 
 [[package]]

@@ -44,6 +44,7 @@ mod event;
 mod exec;
 mod fido;
 mod firmware;
+mod firmware_call;
 mod firmware_files;
 mod firstuse;
 mod fs;

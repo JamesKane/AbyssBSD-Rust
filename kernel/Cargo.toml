@@ -75,6 +75,7 @@ smbios = { path = "../lib/smbios" }
 mbuf = { path = "../sys/mbuf" }
 net = { path = "../sys/net" }
 drmn = { path = "../drivers/drmn" }
+sky1-pd = { path = "../drivers/sky1-pd" }
 hda-driver = { path = "../drivers/hda" }
 vgapci = { path = "../drivers/vgapci" }
 nvme = { path = "../drivers/nvme" }

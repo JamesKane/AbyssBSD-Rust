@@ -102,6 +102,36 @@ pub struct SharedRange<N> {
     pub why: &'static str,
 }
 
+/// A firmware service the OS reaches through a memory window and a firmware call, with no
+/// device in the namespace for it (the Sky1's SCMI power-domain agent in Trusted Firmware,
+/// over SMC). The bus adds it as a child of class `class` with the window as its one memory
+/// resource.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FirmwareAgent {
+    /// The child's class (its driver matches it).
+    pub class: &'static str,
+    /// Its description.
+    pub desc: &'static str,
+    /// The window's physical base.
+    pub base: u64,
+    /// The window's length in bytes.
+    pub len: u64,
+}
+
+/// A power domain a consumer needs on before its registers may be touched (DRIVER-MODEL.md
+/// §8.5), served by a [`FirmwareAgent`].
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PowerDomainLine<N> {
+    /// The device that needs it.
+    pub consumer: N,
+    /// The name its driver asks for it by.
+    pub name: Option<String>,
+    /// The agent's class.
+    pub agent: &'static str,
+    /// The domain, in the agent's numbering.
+    pub id: u32,
+}
+
 /// A platform's description.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Description<N> {
@@ -117,6 +147,10 @@ pub struct Description<N> {
     pub reserved: Vec<ReservedMemory<N>>,
     /// Devices whose ranges overlap another's on purpose.
     pub shared: Vec<SharedRange<N>>,
+    /// Firmware services the bus adds as children.
+    pub agents: Vec<FirmwareAgent>,
+    /// Power-domain lines by consumer, served by those agents.
+    pub power_domains: Vec<PowerDomainLine<N>>,
 }
 
 impl<N> Default for Description<N> {
@@ -128,6 +162,8 @@ impl<N> Default for Description<N> {
             links: Vec::new(),
             reserved: Vec::new(),
             shared: Vec::new(),
+            agents: Vec::new(),
+            power_domains: Vec::new(),
         }
     }
 }
@@ -142,6 +178,8 @@ impl<N: PartialEq> Description<N> {
             && self.links.is_empty()
             && self.reserved.is_empty()
             && self.shared.is_empty()
+            && self.agents.is_empty()
+            && self.power_domains.is_empty()
     }
 
     /// The clock `consumer`'s driver asks for by `name` (`None`: its

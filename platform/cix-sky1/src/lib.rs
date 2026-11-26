@@ -70,6 +70,20 @@ pub(crate) const SHARED: &[(&str, &str)] = &[
     ),
 ];
 
+/// The SCMI power-domain agent in Trusted Firmware (Sky1 SoC specification 01 §1.3): reached by
+/// SMC, with its shared memory in memory the UEFI map reserves. No ACPI device stands for it.
+pub const PD_AGENT: devtree::platform::FirmwareAgent = devtree::platform::FirmwareAgent {
+    class: "sky1_pd",
+    desc: "CIX Sky1 SCMI power domains (Trusted Firmware)",
+    base: 0x8438_0000,
+    len: 128,
+};
+
+/// Devices that need an agent's power domain on before their registers may be touched, and
+/// none of their own AML switches it (Sky1 SoC specification 01 §1.3.3; panthor 11 §11.5): by
+/// `_HID`, the name the driver asks for, and the domain.
+pub const POWER_DOMAINS: &[(&str, &str, u32)] = &[("CIXH5000", "gpu", 21)];
+
 /// The platform.
 #[derive(Debug)]
 pub struct CixSky1;
@@ -127,6 +141,23 @@ impl PlatformSource for CixSky1 {
             x.description
                 .shared
                 .push(devtree::platform::SharedRange { device: d, why });
+        }
+        let mut agent_used = false;
+        for &(hid, name, id) in POWER_DOMAINS {
+            if let Some(consumer) = tables::find_hid(interp, host, devices, hid) {
+                x.description
+                    .power_domains
+                    .push(devtree::platform::PowerDomainLine {
+                        consumer,
+                        name: Some(alloc::string::String::from(name)),
+                        agent: PD_AGENT.class,
+                        id,
+                    });
+                agent_used = true;
+            }
+        }
+        if agent_used {
+            x.description.agents.push(PD_AGENT);
         }
         x
     }

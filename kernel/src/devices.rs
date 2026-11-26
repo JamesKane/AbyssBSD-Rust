@@ -317,6 +317,7 @@ pub(crate) fn init(s: &Sleepable) {
     nvme::set_tunables(&tunable);
     drmn::set_tunables(&tunable);
     drmn::set_firmware(&crate::firmware_files::Loader);
+    crate::firmware_call::grant();
     vgapci::set_tunables(&tunable);
     // `hw.iommu.*` and `hw.smmu.*` (docs/IOMMU.md §4.12): arm64's, where
     // FreeBSD's IOMMU knobs are the SMMU's (x86 DMAR and AMD-Vi are

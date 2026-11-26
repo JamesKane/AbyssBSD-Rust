@@ -152,6 +152,14 @@ pub(crate) struct Walk {
     pub(crate) declared_shared: Vec<bus::Range>,
     /// The IORT's SMMUs and the devices they translate.
     pub(crate) iort: crate::iort::IortPlan,
+    /// Firmware services the platform description says are there, added as children.
+    pub(crate) agents: Vec<devtree::platform::FirmwareAgent>,
+}
+
+/// The name a firmware agent's child goes by among the walk's paths (no namespace path
+/// starts with `@`).
+fn agent_path(class: &str) -> String {
+    alloc::format!("@{class}")
 }
 
 pub(crate) fn walk(
@@ -264,6 +272,22 @@ pub(crate) fn walk(
             let path = alloc::format!("{}", interp.path(supplier));
             f.lines
                 .push((kind, name.clone(), path, id, LineDetail::None));
+        }
+    }
+    // Power domains a firmware agent serves: the consumer waits for the agent, which the bus
+    // adds as a child (`start`), and its driver votes the domain on before touching registers.
+    for l in &p.power_domains {
+        if let Some(f) = found.iter_mut().find(|f| f.device.node == l.consumer) {
+            let path = agent_path(l.agent);
+            f.deps
+                .push((path.clone(), EdgeKind::Required, Origin::Platform));
+            f.lines.push((
+                LineKind::PowerDomain,
+                l.name.clone(),
+                path,
+                l.id,
+                LineDetail::None,
+            ));
         }
     }
     // The register windows the applying platforms say `_DSD` references.
@@ -387,6 +411,7 @@ pub(crate) fn walk(
         firmware_shared: regions.into_iter().map(|r| r.range).collect(),
         declared_shared,
         iort,
+        agents: deps.platform.agents.clone(),
     }
 }
 
@@ -785,6 +810,7 @@ impl Driver for AcpiBus {
             firmware_shared,
             declared_shared,
             iort,
+            agents,
         } = svc.run(cx.sleepable(), move |i, h| {
             walk(i, h, &dma, &platforms, &id, iort)
         });
@@ -877,6 +903,22 @@ impl Driver for AcpiBus {
                 None,
                 Vec::new(),
             );
+        }
+        // Firmware agents the platform description names: their window is their one resource.
+        for a in &agents {
+            let id = cx.add_child(
+                Ident::AcpiChild {
+                    class: a.class,
+                    desc: a.desc,
+                },
+                None,
+                alloc::vec![Resource::Memory {
+                    base: a.base,
+                    len: a.len,
+                    prefetchable: false,
+                }],
+            );
+            added.push((agent_path(a.class), id, Vec::new(), Vec::new()));
         }
         let child = |path: &str| added.iter().find(|a| a.0 == path).map(|a| a.1);
         for (_, id, deps, lines) in &added {
