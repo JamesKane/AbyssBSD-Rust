@@ -295,7 +295,7 @@ impl Amd {
                 return;
             }
         };
-        let render = crate::render::Render::new(self.me.clone(), 512 << 20);
+        let render = crate::render::Render::new(self.me.clone());
         // A fence's interrupt wakes whoever waits for a job.
         *self.render.lock() = Some(Arc::downgrade(&render));
         let queue = render.queue();
@@ -333,6 +333,12 @@ impl Amd {
                 kms.vblank(0, now);
             }
         }));
+        // The interrupt ring is in system memory, which the engine reaches
+        // through the GART: the translation hubs first.
+        if self.dummy.lock().is_none() {
+            let _ = self.gmc(amdgpu::gmc::Hub::Gfx);
+            let _ = self.gmc(amdgpu::gmc::Hub::Mm);
+        }
         if self.irq.start().is_ok() {
             self.log(format_args!(
                 "vertical blanking from the display's interrupt"
@@ -363,6 +369,10 @@ impl Amd {
     /// Makes the interrupt handler's ring and turns the frame-start interrupt
     /// on (stage R2.1).
     pub(crate) fn start_interrupts(&self) -> Result<(), abi::errno::Errno> {
+        if self.dummy.lock().is_none() {
+            let _ = self.gmc(amdgpu::gmc::Hub::Gfx);
+            let _ = self.gmc(amdgpu::gmc::Hub::Mm);
+        }
         let r = self.irq.start();
         match &r {
             Ok(()) => self.log(format_args!("interrupts on")),
@@ -586,9 +596,10 @@ impl Amd {
         }
         match crate::gcring::start(&gpu, &log) {
             Ok(g) => {
+                let fences = g.fences();
                 *self.gfx.lock() = Some(g);
                 // The system DMA engine too; the graphics ring works without.
-                match crate::gcring::start_sdma(&gpu, &log) {
+                match crate::gcring::start_sdma(&gpu, fences, &log) {
                     Ok(d) => *self.sdma.lock() = Some(d),
                     Err(e) => self.log(format_args!("SDMA: not started: {e:?}")),
                 }

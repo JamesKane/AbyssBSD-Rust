@@ -55,9 +55,48 @@ const CP_GFX_HQD_BASE_HI: usize = 0xc39c;
 /// `RLC_RLCS_BOOTLOAD_STATUS` bit 31.
 const BOOT_COMPLETE: u32 = 1 << 31;
 
+/// How long a submission that finds its ring full waits between looks at the
+/// read pointer: a full ring frees room in microseconds, and the engine idles
+/// if the wait is longer than the jobs queued.
+const WAIT_STEP_US: u32 = 20;
+
+/// What the last look at a ring's read pointer showed, so that most
+/// submissions need no look (a read of video memory across the bus takes most
+/// of a microsecond, and so does the register write and read that make it
+/// current): the dwords in use then, and the write pointer then. Consumption
+/// only frees room, so the dwords in use now are at most those plus what was
+/// written since.
+#[derive(Clone, Copy, Debug)]
+struct Room {
+    used: u32,
+    at: u64,
+}
+
+impl Room {
+    /// Never looked.
+    const UNKNOWN: Self = Self {
+        used: 0,
+        at: u64::MAX,
+    };
+
+    /// An upper bound of the dwords in use with the write pointer at `wptr`;
+    /// `None` if there was no look, or the pointer is behind it (the ring was
+    /// made again).
+    fn used_at_most(&self, wptr: u64) -> Option<u32> {
+        if self.at == u64::MAX || wptr < self.at {
+            return None;
+        }
+        u32::try_from(wptr - self.at)
+            .ok()
+            .and_then(|d| self.used.checked_add(d))
+    }
+}
+
 /// A ring written through a doorbell.
 #[derive(Debug)]
 struct Ring {
+    /// The last look at its read pointer.
+    room: Room,
     /// Where its memory is (a video memory offset).
     at: u64,
     bytes: u32,
@@ -75,9 +114,63 @@ struct Ring {
     poll: u64,
 }
 
+/// Where the fence words are in the GART's address space.
+const FENCE_GART: u64 = crate::gart::FENCES;
+/// The words' slots: the graphics ring's, the eight compute queues', the
+/// system DMA engine's.
+const SLOT_GFX: usize = 0;
+const SLOT_COMPUTE: usize = 1;
+const SLOT_SDMA: usize = 1 + COMPUTE_QUEUES as usize;
+const SLOTS: usize = SLOT_SDMA + 1;
+/// The bytes between two words. A hung graphics job's fence packet, run
+/// when the queue is reset, was seen to write its value 16 bytes past its
+/// address (the same on every run); each word has a cache line to itself, so
+/// the stray write lands in padding, not in another ring's word.
+const SLOT_BYTES: usize = 64;
+const _: () = assert!(SLOTS * SLOT_BYTES <= 4096);
+
+/// The words the kernel's fences are written to: the sequence number of the
+/// last job each ring finished. They are in system memory, which the
+/// processor reads from its cache in a few nanoseconds (a read of video memory
+/// across the bus takes most of a microsecond, and a job's wait reads them
+/// several times); the engines write them through the GART's translation
+/// (snooped, so the processor's cache sees the write).
+#[derive(Debug)]
+pub(crate) struct Fences {
+    page: vm::dma::DmaCoherent<u8>,
+}
+
+impl Fences {
+    /// A zeroed page, entered in the GART at [`FENCE_GART`] and the hubs'
+    /// translation caches emptied. The hubs must be set up (the GART exists).
+    fn new(gpu: &Arc<Aperture>) -> Result<Arc<Self>, Stopped> {
+        let tag = gpu.dma_tag().ok_or(Stopped::Stalled("fence page", 0, 0))?;
+        let page = tag
+            .coherent::<u8>(4096)
+            .map_err(|_| Stopped::Stalled("fence page", 1, 0))?;
+        crate::gart::map_system(gpu, FENCE_GART, page.bus_addr(), 1);
+        Ok(Arc::new(Self { page }))
+    }
+
+    /// The GPU address of slot `slot`'s word.
+    fn address(&self, slot: usize) -> u64 {
+        FENCE_GART + (SLOT_BYTES * slot) as u64
+    }
+
+    fn read(&self, slot: usize) -> u32 {
+        self.page.read_at::<u32>(SLOT_BYTES * slot)
+    }
+
+    /// Sets the word (no engine write is in flight to it that matters).
+    fn write(&self, slot: usize, value: u32) {
+        self.page.write_at::<u32>(SLOT_BYTES * slot, value);
+    }
+}
+
 /// The started graphics block.
 #[derive(Debug)]
 pub(crate) struct Gfx {
+    fences: Arc<Fences>,
     base: u64,
     #[allow(dead_code, reason = "the interface queue maps the queues after it")]
     kiq: Ring,
@@ -94,7 +187,6 @@ const COMPUTE_STRIDE: u64 = 0x2_0000;
 const COMPUTE_RING_BYTES: u32 = 64 * 1024;
 const COMPUTE_REPORT: u64 = 0x1_0000;
 const COMPUTE_POLL: u64 = 0x1_0100;
-const COMPUTE_SEQ: u64 = 0x1_0200;
 const COMPUTE_TEST: u64 = 0x1_0300;
 const COMPUTE_PREEMPT: u64 = 0x1_0380;
 const COMPUTE_MQD: u64 = 0x1_1000;
@@ -147,9 +239,9 @@ impl Ring {
             gpu.vram_write32(usize::try_from(at).unwrap_or(0), *d);
             self.wptr += 1;
         }
-        mem.flush();
-        // The poll word first: the processor may read the pointer from it as
-        // well as from the doorbell.
+        // The poll word before the doorbell: the processor may read the
+        // pointer from it as well as from the doorbell. One flush covers the
+        // packets and the poll word.
         let poll = usize::try_from(self.poll).unwrap_or(0);
         gpu.vram_write32(poll, (self.wptr & 0xffff_ffff) as u32);
         gpu.vram_write32(poll + 4, (self.wptr >> 32) as u32);
@@ -172,15 +264,27 @@ impl Ring {
         if need + 1 >= size {
             return Err(abi::errno::Errno::E2BIG);
         }
-        for _ in 0..=ms {
+        if self
+            .room
+            .used_at_most(self.wptr)
+            .is_some_and(|used| size - used.min(size) > need + 1)
+        {
+            self.submit(gpu, &mem, packets);
+            return Ok(());
+        }
+        for _ in 0..=ms * (1000 / WAIT_STEP_US) {
             mem.invalidate();
             let rptr = mem.read32(base + self.report) % size;
             let at = u32::try_from(self.wptr % u64::from(size)).unwrap_or(0);
+            self.room = Room {
+                used: (at + size - rptr) % size,
+                at: self.wptr,
+            };
             if has_room(at, rptr, size, need, 1) {
                 self.submit(gpu, &mem, packets);
                 return Ok(());
             }
-            bus::manager().delay_us(1000);
+            bus::manager().delay_us(u64::from(WAIT_STEP_US));
         }
         Err(abi::errno::Errno::EAGAIN)
     }
@@ -208,6 +312,21 @@ impl Ring {
             rptr,
             (self.wptr & 0xffff_ffff) as u32,
         ))
+    }
+}
+
+/// Turns on the fence (end-of-pipe) interrupt of graphics ring 0 and of the
+/// four pipes of the first micro engine, which run the compute queues: a
+/// compute job's completion wakes its waiter at once instead of at the next
+/// poll.
+fn enable_fence_interrupts<W: Window + ?Sized>(w: &W) {
+    w.write32(
+        gc::CP_INT_CNTL_RING0,
+        w.read32(gc::CP_INT_CNTL_RING0) | gc::TIME_STAMP_INT_ENABLE,
+    );
+    for pipe in 0..gc::ME1_PIPES {
+        let at = gc::CP_ME1_PIPE0_INT_CNTL + 4 * pipe;
+        w.write32(at, w.read32(at) | gc::TIME_STAMP_INT_ENABLE);
     }
 }
 
@@ -294,6 +413,7 @@ pub(crate) fn start(
         at: KIQ_AT,
         bytes: KIQ_RING_BYTES,
         doorbell: 4 * kiq::KIQ_DOORBELL_DWORD as usize,
+        room: Room::UNKNOWN,
         wptr: 0,
         compute: true,
         report: KIQ_REPORT_AT,
@@ -374,6 +494,7 @@ pub(crate) fn start(
         at: GFX_AT,
         bytes: GFX_RING_BYTES,
         doorbell: 4 * GFX_DOORBELL_DWORD as usize,
+        room: Room::UNKNOWN,
         wptr: 0,
         compute: false,
         report: GFX_REPORT_AT,
@@ -390,16 +511,41 @@ pub(crate) fn start(
     ));
     fault(gpu, log);
     r?;
+    // The fence words: in system memory, written by the ring through the
+    // GART. A fence packet proves the path before anything depends on it.
+    let fences = Fences::new(gpu)?;
+    let mut t = Packets::new();
+    t.fence(fences.address(SLOT_GFX), 0x5e9_0001, false, false);
+    gfx.submit(gpu, &mem, &t.0);
+    let mut seen = 0;
+    for _ in 0..200 {
+        seen = fences.read(SLOT_GFX);
+        if seen == 0x5e9_0001 {
+            break;
+        }
+        bus::manager().delay_us(1000);
+    }
+    log(format_args!(
+        "GC: fence word in system memory: {seen:#010x} ({})",
+        if seen == 0x5e9_0001 {
+            "seen"
+        } else {
+            "NOT seen"
+        }
+    ));
+    fault(gpu, log);
+    if seen != 0x5e9_0001 {
+        return Err(Stopped::Stalled("fence word", seen, 0));
+    }
+    fences.write(SLOT_GFX, 0);
     // Fences interrupt: the end-of-pipe event of ring 0 goes to the
     // interrupt handler, which wakes whoever waits for a job.
-    w.write32(
-        gc::CP_INT_CNTL_RING0,
-        w.read32(gc::CP_INT_CNTL_RING0) | gc::TIME_STAMP_INT_ENABLE,
-    );
+    enable_fence_interrupts(&w);
     // The compute queues, mapped through the KIQ in one submission; a
     // failure leaves the graphics ring as it is.
     let compute = start_compute(gpu, base, &mut kiq_ring, &mem, log);
     Ok(Gfx {
+        fences,
         base,
         kiq: kiq_ring,
         gfx,
@@ -449,6 +595,7 @@ fn start_compute(
             at,
             bytes: COMPUTE_RING_BYTES,
             doorbell: 4 * doorbell as usize,
+            room: Room::UNKNOWN,
             wptr: 0,
             compute: true,
             report: at + COMPUTE_REPORT,
@@ -499,10 +646,6 @@ fn start_compute(
     ok
 }
 
-/// The word the kernel's fences are written to (a video memory offset): the
-/// sequence number of the last job the ring finished.
-const SEQ_AT: u64 = GFX_REPORT_AT + 0x400;
-
 impl Gfx {
     /// Logs where the ring is and the dwords around its read pointer (a
     /// diagnostic for a stuck engine; reads only).
@@ -534,14 +677,12 @@ impl Gfx {
 
     /// The GPU address of compute ring `i`'s fence word.
     pub(crate) fn compute_seq_address(&self, i: usize) -> u64 {
-        self.base + self.compute.get(i).map_or(0, |r| r.at) + COMPUTE_SEQ
+        self.fences.address(SLOT_COMPUTE + i)
     }
 
     /// The number of the last job compute ring `i` finished.
-    pub(crate) fn compute_finished(&self, gpu: &Arc<Aperture>, i: usize) -> u32 {
-        let mem = crate::psp::vram_memory(gpu, self.base);
-        mem.invalidate();
-        mem.read32(self.compute_seq_address(i))
+    pub(crate) fn compute_finished(&self, _gpu: &Arc<Aperture>, i: usize) -> u32 {
+        self.fences.read(SLOT_COMPUTE + i)
     }
 
     /// Runs `packets` on compute ring `i`.
@@ -561,14 +702,35 @@ impl Gfx {
 
     /// The GPU address of the fence word.
     pub(crate) fn seq_address(&self) -> u64 {
-        self.base + SEQ_AT
+        self.fences.address(SLOT_GFX)
     }
 
     /// The sequence number of the last job the ring has finished.
-    pub(crate) fn finished(&self, gpu: &Arc<Aperture>) -> u32 {
-        let mem = crate::psp::vram_memory(gpu, self.base);
-        mem.invalidate();
-        mem.read32(self.base + SEQ_AT)
+    pub(crate) fn finished(&self, _gpu: &Arc<Aperture>) -> u32 {
+        self.fences.read(SLOT_GFX)
+    }
+
+    /// Logs every fence word and where each ring's write pointer is.
+    pub(crate) fn fence_report(&self, log: &dyn Fn(core::fmt::Arguments<'_>)) {
+        for slot in 0..SLOTS {
+            log(format_args!(
+                "fence word {slot}: {:#010x}",
+                self.fences.read(slot)
+            ));
+        }
+        log(format_args!(
+            "graphics ring write pointer {}, {} compute rings",
+            self.gfx.wptr,
+            self.compute.len()
+        ));
+        for (i, r) in self.compute.iter().enumerate() {
+            log(format_args!("compute ring {i}: write pointer {}", r.wptr));
+        }
+    }
+
+    /// The fence words, for the system DMA engine to share.
+    pub(crate) fn fences(&self) -> Arc<Fences> {
+        Arc::clone(&self.fences)
     }
 
     /// Waits for room for `dwords` more in the ring, `ms` at most; then
@@ -805,12 +967,14 @@ const SDMA_AT: u64 = 174 << 20;
 const SDMA_RING_BYTES: u32 = 64 * 1024;
 const SDMA_REPORT_AT: u64 = SDMA_AT + 0x1_0000;
 const SDMA_POLL_AT: u64 = SDMA_AT + 0x1_0100;
-const SDMA_SEQ_AT: u64 = SDMA_AT + 0x1_0200;
 const SDMA_TEST_AT: u64 = SDMA_AT + 0x1_0300;
 
 /// System DMA engine 0's ring: pointers are 64-bit byte offsets.
 #[derive(Debug)]
 pub(crate) struct Sdma {
+    /// The last look at its read pointer.
+    room: Room,
+    fences: Arc<Fences>,
     base: u64,
     /// The write pointer in dwords, a count that never wraps.
     wptr: u64,
@@ -819,14 +983,12 @@ pub(crate) struct Sdma {
 impl Sdma {
     /// The GPU address of the fence word of its jobs.
     pub(crate) fn seq_address(&self) -> u64 {
-        self.base + SDMA_SEQ_AT
+        self.fences.address(SLOT_SDMA)
     }
 
     /// The sequence number of the last job it finished.
-    pub(crate) fn finished(&self, gpu: &Arc<Aperture>) -> u32 {
-        let mem = crate::psp::vram_memory(gpu, self.base);
-        mem.invalidate();
-        mem.read32(self.base + SDMA_SEQ_AT)
+    pub(crate) fn finished(&self, _gpu: &Arc<Aperture>) -> u32 {
+        self.fences.read(SLOT_SDMA)
     }
 
     /// The ring position the next packet goes at, in dwords.
@@ -847,16 +1009,28 @@ impl Sdma {
         if need + 8 >= size {
             return Err(abi::errno::Errno::E2BIG);
         }
-        for _ in 0..=ms {
+        if self
+            .room
+            .used_at_most(self.wptr)
+            .is_some_and(|used| size - used.min(size) > need + 8)
+        {
+            self.submit(gpu, &mem, packets);
+            return Ok(());
+        }
+        for _ in 0..=ms * (1000 / WAIT_STEP_US) {
             mem.invalidate();
             // The engine reports its read pointer in bytes.
             let rptr = (mem.read32(self.base + SDMA_REPORT_AT) / 4) % size;
             let at = u32::try_from(self.position()).unwrap_or(0);
+            self.room = Room {
+                used: (at + size - rptr) % size,
+                at: self.wptr,
+            };
             if has_room(at, rptr, size, need, 8) {
                 self.submit(gpu, &mem, packets);
                 return Ok(());
             }
-            bus::manager().delay_us(1000);
+            bus::manager().delay_us(u64::from(WAIT_STEP_US));
         }
         Err(abi::errno::Errno::EAGAIN)
     }
@@ -868,8 +1042,8 @@ impl Sdma {
             gpu.vram_write32(usize::try_from(at).unwrap_or(0), *d);
             self.wptr += 1;
         }
-        mem.flush();
-        // The poll word, then the doorbell, both the pointer in bytes.
+        // The poll word, then the doorbell, both the pointer in bytes; one
+        // flush covers the packets and the poll word.
         let bytes = self.wptr * 4;
         let poll = usize::try_from(SDMA_POLL_AT).unwrap_or(0);
         gpu.vram_write32(poll, (bytes & 0xffff_ffff) as u32);
@@ -888,7 +1062,7 @@ impl Sdma {
             self.wptr,
             mem.read32(self.base + SDMA_REPORT_AT) / 4,
             w.read32(amdgpu::sdma::GFX_RB_RPTR) / 4,
-            mem.read32(self.base + SDMA_SEQ_AT),
+            self.fences.read(SLOT_SDMA),
             w.read32(amdgpu::sdma::STATUS_REG)
         ));
     }
@@ -902,6 +1076,7 @@ impl Sdma {
 /// [`Stopped::Stalled`] if the test packets are not read.
 pub(crate) fn start_sdma(
     gpu: &Arc<Aperture>,
+    fences: Arc<Fences>,
     log: &dyn Fn(core::fmt::Arguments<'_>),
 ) -> Result<Sdma, Stopped> {
     let w = Bar5(gpu);
@@ -921,7 +1096,12 @@ pub(crate) fn start_sdma(
         wptr_poll: base + SDMA_POLL_AT,
     };
     amdgpu::sdma::start(&w, &ring, &|us| bus::manager().delay_us(u64::from(us)));
-    let mut s = Sdma { base, wptr: 0 };
+    let mut s = Sdma {
+        room: Room::UNKNOWN,
+        fences,
+        base,
+        wptr: 0,
+    };
     // The test: a word, then a fence.
     let mut p = amdgpu::sdma::Packets::new();
     p.write_linear(base + SDMA_TEST_AT, &[0x5d4a_0001]);
@@ -932,7 +1112,7 @@ pub(crate) fn start_sdma(
     for _ in 0..200 {
         mem.invalidate();
         word = mem.read32(base + SDMA_TEST_AT);
-        fence = mem.read32(base + SDMA_SEQ_AT);
+        fence = s.fences.read(SLOT_SDMA);
         if word == 0x5d4a_0001 && fence == 1 {
             break;
         }
@@ -958,8 +1138,7 @@ pub(crate) fn start_sdma(
         ));
     }
     // The jobs' numbers start at 1: the test's fence word goes back to 0.
-    gpu.vram_write32(usize::try_from(SDMA_SEQ_AT).unwrap_or(0), 0);
-    let _ = gpu.vram_read32(0);
+    s.fences.write(SLOT_SDMA, 0);
     Ok(s)
 }
 
@@ -968,7 +1147,7 @@ pub(crate) fn start_sdma(
 // soft reset (DMA), mapped again, and the jobs it held are completed by
 // writing its fence word.
 
-/// Writes `value` to a fence word (a video memory offset).
+/// Writes `value` to a word of video memory (an offset).
 fn set_word(gpu: &Arc<Aperture>, at: u64, value: u32) {
     gpu.vram_write32(usize::try_from(at).unwrap_or(0), value);
     let _ = gpu.vram_read32(0);
@@ -976,14 +1155,14 @@ fn set_word(gpu: &Arc<Aperture>, at: u64, value: u32) {
 
 impl Gfx {
     /// Completes every job of the graphics ring: its fence word reads `seq`.
-    pub(crate) fn complete_gfx(&self, gpu: &Arc<Aperture>, seq: u32) {
-        set_word(gpu, SEQ_AT, seq);
+    pub(crate) fn complete_gfx(&self, _gpu: &Arc<Aperture>, seq: u32) {
+        self.fences.write(SLOT_GFX, seq);
     }
 
     /// Completes every job of compute queue `n`.
-    pub(crate) fn complete_compute(&self, gpu: &Arc<Aperture>, n: usize, seq: u32) {
-        if let Some(r) = self.compute.get(n) {
-            set_word(gpu, r.at + COMPUTE_SEQ, seq);
+    pub(crate) fn complete_compute(&self, _gpu: &Arc<Aperture>, n: usize, seq: u32) {
+        if self.compute.get(n).is_some() {
+            self.fences.write(SLOT_COMPUTE + n, seq);
         }
     }
 
@@ -1005,12 +1184,10 @@ impl Gfx {
         let mem = crate::psp::vram_memory(gpu, base);
         let hw = u32::try_from(n).unwrap_or(0);
         let (pipe, queue, doorbell, _) = mqd::kernel_compute_place(hw);
-        let seq = self.compute.get(n).map_or(0, |r| r.at + COMPUTE_SEQ);
-        let kept = if seq == 0 {
-            0
+        let kept = if self.compute.get(n).is_some() {
+            self.fences.read(SLOT_COMPUTE + n)
         } else {
-            mem.invalidate();
-            mem.read32(base + seq)
+            0
         };
         // 1. Unmap with the reset action, and see the queue inactive.
         let p = mqd::unmap_queues(mqd::Unmap::Reset, false, doorbell, None);
@@ -1046,7 +1223,7 @@ impl Gfx {
             r.wptr = 0;
         }
         // The fence word keeps its number (the caller completes the jobs).
-        set_word(gpu, at + COMPUTE_SEQ, kept);
+        self.fences.write(SLOT_COMPUTE + n, kept);
         // 3. The queue answers a test write.
         let word = 0xc0de_1000 | hw;
         let mut t = Packets::new();
@@ -1090,8 +1267,7 @@ impl Gfx {
         let w = Bar5(gpu);
         let base = self.base;
         let mem = crate::psp::vram_memory(gpu, base);
-        mem.invalidate();
-        let kept = mem.read32(base + SEQ_AT);
+        let kept = self.fences.read(SLOT_GFX);
         // 1. The reset request: the address spaces 1 to 7, queue 0 of pipe 0.
         w.write32(gc::CP_VMID_RESET, gc::vmid_reset_value(0xfffe, 0));
         // 2. The descriptor says inactive; 3. the request reads 0.
@@ -1148,11 +1324,8 @@ impl Gfx {
         p.extend(gc::set_base_packets());
         self.gfx.submit(gpu, &mem, &p);
         self.gfx.drain("graphics", base, &mem, 200)?;
-        w.write32(
-            gc::CP_INT_CNTL_RING0,
-            w.read32(gc::CP_INT_CNTL_RING0) | gc::TIME_STAMP_INT_ENABLE,
-        );
-        set_word(gpu, SEQ_AT, kept);
+        enable_fence_interrupts(&w);
+        self.fences.write(SLOT_GFX, kept);
         log(format_args!("GC: graphics queue mapped again"));
         Ok(())
     }
@@ -1222,8 +1395,8 @@ impl Sdma {
     }
 
     /// Completes every job of the DMA engine.
-    pub(crate) fn complete(&self, gpu: &Arc<Aperture>, seq: u32) {
-        set_word(gpu, SDMA_SEQ_AT, seq);
+    pub(crate) fn complete(&self, _gpu: &Arc<Aperture>, seq: u32) {
+        self.fences.write(SLOT_SDMA, seq);
     }
 
     /// Resets the engine (10 section 4.4) and starts its ring again, then
@@ -1241,7 +1414,7 @@ impl Sdma {
         let base = self.base;
         let mem = crate::psp::vram_memory(gpu, base);
         mem.invalidate();
-        let kept = mem.read32(base + SDMA_SEQ_AT);
+        let kept = self.fences.read(SLOT_SDMA);
         amdgpu::sdma::stop(&w, SDMA_RING_BYTES);
         for at in (0..0x1_0200u64).step_by(4) {
             gpu.vram_write32(usize::try_from(SDMA_AT + at).unwrap_or(0), 0);
@@ -1256,7 +1429,7 @@ impl Sdma {
         };
         amdgpu::sdma::recover(&w, &ring, &|us| bus::manager().delay_us(u64::from(us)));
         self.wptr = 0;
-        set_word(gpu, SDMA_SEQ_AT, kept);
+        self.fences.write(SLOT_SDMA, kept);
         let word = 0x5d4a_0002;
         set_word(gpu, SDMA_TEST_AT, 0);
         let mut p = amdgpu::sdma::Packets::new();
@@ -1286,6 +1459,24 @@ impl Sdma {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cached_look_at_a_ring_only_overstates_what_is_in_use() {
+        // Never looked: nothing is known.
+        assert_eq!(Room::UNKNOWN.used_at_most(0), None);
+        assert_eq!(Room::UNKNOWN.used_at_most(500), None);
+        // Looked with 100 dwords in use at write pointer 1000: what has been
+        // written since is added, consumption is not counted.
+        let seen = Room {
+            used: 100,
+            at: 1000,
+        };
+        assert_eq!(seen.used_at_most(1000), Some(100));
+        assert_eq!(seen.used_at_most(1256), Some(356));
+        // A write pointer behind the look: the ring was made again.
+        assert_eq!(seen.used_at_most(0), None);
+        assert_eq!(seen.used_at_most(999), None);
+    }
 
     #[test]
     fn a_ring_has_room_until_the_pointers_would_meet() {

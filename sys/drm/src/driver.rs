@@ -115,6 +115,27 @@ impl IoctlCx<'_> {
         Ok((handle, gem))
     }
 
+    /// Makes a buffer of at least `size` bytes in the device's own memory,
+    /// from physical page `base` (see [`Gem::new_device`]); `range` is
+    /// dropped with the buffer. Names it in this file.
+    ///
+    /// # Errors
+    ///
+    /// `EINVAL` for size 0, `ENOMEM`, `ENOSPC` for too many handles.
+    pub fn new_device_gem(
+        &self,
+        size: u64,
+        base: vm::Pfn,
+        range: Arc<dyn core::any::Any + Send + Sync>,
+    ) -> Result<(u32, Arc<Gem>), Errno> {
+        let env = crate::env().ok_or(Errno::ENXIO)?;
+        let pages = size.div_ceil(addr::PAGE_SIZE);
+        let offset = self.file.card.alloc_offset(pages)?;
+        let gem = Gem::new_device(env.pages, size, offset, base, range)?;
+        let handle = self.file.handles.lock().insert(Arc::clone(&gem))?;
+        Ok((handle, gem))
+    }
+
     /// The synchronisation object `handle` names in this file: its slot
     /// holds the fence of the last submission put there.
     #[must_use]

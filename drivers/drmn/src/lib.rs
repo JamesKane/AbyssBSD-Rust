@@ -30,6 +30,7 @@ extern crate std;
 mod amd;
 mod control;
 mod dmcub;
+mod gart;
 mod gcload;
 mod gcring;
 mod hotplug;
@@ -38,6 +39,7 @@ mod kms;
 mod psp;
 mod render;
 mod sink;
+mod vram;
 
 use alloc::string::String;
 use alloc::sync::Arc;

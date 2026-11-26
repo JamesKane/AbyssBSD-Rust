@@ -57,6 +57,14 @@ pub const CP_ME_CNTL: usize = 0x86d8;
 pub const CP_INT_CNTL_RING0: usize = 0xc1a8;
 /// Its time-stamp (fence) interrupt enable bit.
 pub const TIME_STAMP_INT_ENABLE: u32 = 1 << 26;
+/// `CP_ME1_PIPE0_INT_CNTL`: the same enable bit (26) for the fences of the
+/// first micro engine's pipe 0, which runs the compute queues; pipes 1 to 3
+/// follow at four-byte steps. (Offset: the register's index 0x1e25 in the
+/// graphics block, which starts at 0x4980 in bytes; AMD's register header
+/// for this block, MIT-licensed.)
+pub const CP_ME1_PIPE0_INT_CNTL: usize = 0xc214;
+/// The pipes of the first micro engine.
+pub const ME1_PIPES: usize = 4;
 /// `CP_VMID_RESET` (10 section 4.2): the graphics queue reset.
 pub const CP_VMID_RESET: usize = 0xc2cc;
 

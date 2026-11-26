@@ -89,6 +89,10 @@ pub struct Gem {
     offset: PageIndex,
     /// The fences of the jobs using it.
     resv: sync::SpinLock<crate::resv::Reservation>,
+    /// For a buffer in the device's own memory: what gives that memory back
+    /// when the buffer goes.
+    #[allow(dead_code, reason = "held for its drop")]
+    range: Option<Arc<dyn core::any::Any + Send + Sync>>,
 }
 
 impl Gem {
@@ -104,10 +108,14 @@ impl Gem {
         offset: PageIndex,
         placement: Placement,
     ) -> Result<Arc<Self>, Errno> {
-        // Only cached system pages are built so far; the other
-        // placements come with the virtual memory support they need
-        // (cache attributes on user mappings, device windows).
-        if placement.backing != Backing::System || placement.cache != CacheMode::WriteBack {
+        // System pages, cached or write-combined, are built; the other
+        // placements (uncached, a device's window, contiguous) are not.
+        if placement.backing != Backing::System
+            || !matches!(
+                placement.cache,
+                CacheMode::WriteBack | CacheMode::WriteCombine
+            )
+        {
             return Err(Errno::EOPNOTSUPP);
         }
         if size == 0 {
@@ -117,6 +125,9 @@ impl Gem {
             .checked_next_multiple_of(PAGE_SIZE)
             .ok_or(Errno::EINVAL)?;
         let object = Object::anonymous(pages);
+        if placement.cache == CacheMode::WriteCombine {
+            object.set_write_combining();
+        }
         // Several processes will map it, and none of them privately.
         object.set_shared();
         Ok(Arc::new(Self {
@@ -125,7 +136,58 @@ impl Gem {
             placement,
             offset,
             resv: sync::SpinLock::new(crate::resv::Reservation::default()),
+            range: None,
         }))
+    }
+
+    /// A buffer of `size` bytes in the device's own memory: the physical
+    /// pages from `base` (reached through a window onto the device, mapped
+    /// write-combined), at page `offset` of the file. `range` is dropped
+    /// with the buffer and gives the memory back.
+    ///
+    /// # Errors
+    ///
+    /// `EINVAL` for a zero size.
+    pub fn new_device(
+        pages: &'static dyn PageOps,
+        size: u64,
+        offset: PageIndex,
+        base: vm::Pfn,
+        range: Arc<dyn core::any::Any + Send + Sync>,
+    ) -> Result<Arc<Self>, Errno> {
+        if size == 0 {
+            return Err(Errno::EINVAL);
+        }
+        let size = size
+            .checked_next_multiple_of(PAGE_SIZE)
+            .ok_or(Errno::EINVAL)?;
+        let object = Object::device_at(
+            pages,
+            base,
+            offset,
+            size / PAGE_SIZE,
+            vm::object::MemAttr::WriteCombining,
+        );
+        Ok(Arc::new(Self {
+            object,
+            size,
+            placement: Placement {
+                backing: Backing::DeviceLocal,
+                cache: CacheMode::WriteCombine,
+                coherent: false,
+            },
+            offset,
+            resv: sync::SpinLock::new(crate::resv::Reservation::default()),
+            range: Some(range),
+        }))
+    }
+
+    /// Whether it is in the device's own memory (its pages are not in the
+    /// processor's direct map, and the device addresses them as video
+    /// memory).
+    #[must_use]
+    pub fn is_device(&self) -> bool {
+        self.placement.backing == Backing::DeviceLocal
     }
 
     /// Its reservation: the fences of the jobs that use it.
@@ -213,6 +275,10 @@ impl Gem {
     ///
     /// `ENOMEM` when a page cannot be had.
     pub fn phys_pages(&self) -> Result<alloc::vec::Vec<u64>, Errno> {
+        // The display reads system memory only through the GART.
+        if self.is_device() {
+            return Err(Errno::EOPNOTSUPP);
+        }
         Ok(self.frames()?.into_iter().map(|p| p.addr().get()).collect())
     }
 
@@ -226,11 +292,24 @@ impl Gem {
         if index >= self.pages() {
             return Err(Errno::EINVAL);
         }
+        // A device's memory is not in the direct map.
+        if self.is_device() {
+            return Err(Errno::EOPNOTSUPP);
+        }
         let pfn = self
             .object
             .page_for_write(self.offset + index)
             .map_err(|_| Errno::ENOMEM)?;
+        let wc = self.placement.cache == CacheMode::WriteCombine;
+        if wc {
+            // What the processor's write-combined mappings wrote is in
+            // memory, not in a line of the direct map.
+            self.object.uncache_page(pfn);
+        }
         self.object.access(pfn, f);
+        if wc {
+            self.object.uncache_page(pfn);
+        }
         Ok(())
     }
 }

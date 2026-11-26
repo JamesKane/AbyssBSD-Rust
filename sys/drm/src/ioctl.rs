@@ -420,6 +420,12 @@ fn prime_handle_to_fd(f: &Open, s: &Sleepable, a: &mut DrmPrimeHandle) -> Result
         return Err(Errno::EINVAL);
     }
     let gem = f.gem(a.handle).ok_or(Errno::ENOENT)?;
+    // A buffer in the device's own memory has no pages another device or
+    // the display could read (it would have to move to system memory first;
+    // the drivers make shareable buffers there to begin with).
+    if gem.is_device() {
+        return Err(Errno::EOPNOTSUPP);
+    }
     let buf = crate::DmaBuf::new(gem);
     a.fd = (env.export_dmabuf)(s, buf, a.flags & DRM_CLOEXEC != 0, a.flags & DRM_RDWR != 0)?;
     Ok(0)

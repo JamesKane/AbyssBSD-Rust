@@ -358,6 +358,9 @@ pub(crate) struct Std {
     pub src: [PropId; 4],
     pub dst: [PropId; 4],
     pub in_formats: PropId,
+    /// A sync file the commit waits for before the plane's new buffer is
+    /// shown; never held in the state (it reads back as -1).
+    pub in_fence_fd: PropId,
     pub active: PropId,
     pub mode_id: PropId,
     pub dpms: PropId,
@@ -617,6 +620,7 @@ impl Kms {
                 x if x == s.dst[2] => u64::from(p.dst.w),
                 x if x == s.dst[3] => u64::from(p.dst.h),
                 x if x == s.in_formats => u64::from(self.in_formats[i].0),
+                x if x == s.in_fence_fd => (-1i64).cast_unsigned(),
                 _ => return self.extra_value(&self.planes[i].props, &p.extra, prop),
             });
         }

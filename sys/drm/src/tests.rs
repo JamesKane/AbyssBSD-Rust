@@ -61,6 +61,9 @@ impl vm::object::PageOps for HeapPages {
             "double free"
         );
     }
+    fn uncache(&self, _pfn: vm::Pfn) {
+        UNCACHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
     fn access(&self, pfn: vm::Pfn, f: &mut dyn FnMut(&mut [u8])) {
         f(&mut self
             .pages
@@ -70,6 +73,9 @@ impl vm::object::PageOps for HeapPages {
             .expect("freed page")[..]);
     }
 }
+
+/// How many times a page was taken out of the caches.
+static UNCACHED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// "User memory": addresses are offsets into one arena, from `BASE`.
 struct Arena(Mutex<Vec<u8>>);
@@ -1037,6 +1043,7 @@ fn plane_properties_and_in_formats() {
             "CRTC_W",
             "CRTC_H",
             "IN_FORMATS",
+            "IN_FENCE_FD",
             "zpos"
         ]
     );
@@ -2061,7 +2068,7 @@ fn a_coherent_buffer_needs_no_cleaning() {
 
 #[test]
 fn placements_not_built_yet_are_refused_with_a_clear_error() {
-    // A discrete card's own memory, and uncached or write-combined pages,
+    // A discrete card's own memory, a contiguous run and uncached pages
     // need virtual memory support that is not there.
     for p in [
         Placement {
@@ -2070,10 +2077,6 @@ fn placements_not_built_yet_are_refused_with_a_clear_error() {
         },
         Placement {
             backing: Backing::Contiguous,
-            ..Placement::SYSTEM_COHERENT
-        },
-        Placement {
-            cache: CacheMode::WriteCombine,
             ..Placement::SYSTEM_COHERENT
         },
         Placement {
@@ -2091,6 +2094,25 @@ fn placements_not_built_yet_are_refused_with_a_clear_error() {
         );
         c.unregister(&s());
     }
+}
+
+#[test]
+fn a_write_combined_buffer_is_mapped_write_combined_and_its_pages_are_uncached_when_made() {
+    let (c, _) = card_placed(Placement {
+        cache: CacheMode::WriteCombine,
+        ..Placement::SYSTEM_COHERENT
+    });
+    let f = open(&c);
+    let mut d = create_dumb_arg(64, 64, 32);
+    call(&f, DRM_IOCTL_MODE_CREATE_DUMB, &mut d).unwrap();
+    let gem = f.gem(1).unwrap();
+    let (object, _) = gem.mapping(0, 1).unwrap();
+    assert_eq!(object.memattr(), vm::object::MemAttr::WriteCombining);
+    // The page is made when first reached, and gets the cache treatment.
+    let before = UNCACHED.load(core::sync::atomic::Ordering::Relaxed);
+    gem.with_page(0, &mut |p| p[0] = 1).unwrap();
+    assert!(UNCACHED.load(core::sync::atomic::Ordering::Relaxed) > before);
+    c.unregister(&s());
 }
 
 // ---- authentication and leases ----
@@ -2704,6 +2726,13 @@ impl crate::Fence for Gate {
     fn signaled(&self) -> bool {
         self.open.load(std::sync::atomic::Ordering::SeqCst)
     }
+    fn wait(&self, _s: &sched::Sleepable, ns: u64) -> bool {
+        let end = std::time::Instant::now() + std::time::Duration::from_nanos(ns);
+        while !self.signaled() && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        self.signaled()
+    }
     fn register(&self, w: &Arc<dyn vfs::event::Wake>) {
         self.wakers.lock().unwrap().push(Arc::clone(w));
     }
@@ -2720,6 +2749,61 @@ impl vfs::event::Wake for Counter {
     fn wake(&self) {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+#[test]
+fn a_plane_waits_for_its_in_fence_before_the_commit_and_reads_back_minus_one() {
+    let (c, calls) = card_logged();
+    let f = open(&c);
+    let i = ids(&f);
+    ctl(
+        &f,
+        DRM_IOCTL_SET_CLIENT_CAP,
+        &DrmSetClientCap {
+            capability: DRM_CLIENT_CAP_ATOMIC,
+            value: 1,
+        },
+    )
+    .unwrap();
+    let fb = make_fb(&f, 1920, 1080);
+    let p = DRM_MODE_OBJECT_PLANE;
+    let in_fence = pid(&f, i.primary, p, "IN_FENCE_FD");
+    let modeset = DRM_MODE_ATOMIC_ALLOW_MODESET;
+    let with = |fd: i64| {
+        let mut changes = light(&f, &i, fb);
+        changes[2].1.push((in_fence, fd.cast_unsigned()));
+        changes
+    };
+    // A descriptor that names nothing is refused, and nothing is committed.
+    assert_eq!(atomic(&f, modeset, 0, &with(77)).err(), Some(Errno::EBADF));
+    assert!(take(&calls).is_empty());
+    // A fence still running holds the commit until it finishes.
+    let gate = Arc::new(Gate::default());
+    let sf = crate::SyncFile::new(std::vec![gate.clone() as Arc<dyn crate::Fence>]);
+    let fd = {
+        let mut t = SYNC_FILES.lock().unwrap();
+        t.push(sf);
+        200 + i64::try_from(t.len()).unwrap()
+    };
+    let opener = gate.clone();
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        opener.finish();
+    });
+    let before = std::time::Instant::now();
+    atomic(&f, modeset, 0, &with(fd)).unwrap();
+    assert!(before.elapsed() >= std::time::Duration::from_millis(40));
+    assert!(crate::Fence::signaled(&*gate));
+    t.join().unwrap();
+    assert!(!take(&calls).is_empty(), "the commit went through");
+    // The state does not keep it.
+    let v = props_of(&f, i.primary, p)
+        .iter()
+        .find(|(_, _, n)| n == "IN_FENCE_FD")
+        .unwrap()
+        .1;
+    assert_eq!(v.cast_signed(), -1);
+    c.unregister(&s());
 }
 
 #[test]

@@ -18,7 +18,7 @@ use amdgpu::info::{self, Device, Live};
 use amdgpu::pm4::Packets;
 use amdgpu::uapi::{self, InfoRequest, cmd};
 use amdgpu::vm::{Flags, MemoryType, Space, Tables};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use drm::IoctlCx;
 use sync::{PreemptLock, SpinLock};
 use vgapci::Aperture;
@@ -285,7 +285,18 @@ pub(crate) struct Render {
     /// when it was.
     resets: AtomicU32,
     guilty: SpinLock<Vec<u32>>,
-    vram_bytes: u64,
+    /// The pool of video memory for buffers, and how many were made there,
+    /// how many asked for it, and how many of those could be shared.
+    vram: Arc<crate::vram::VramPool>,
+    vram_made: AtomicU64,
+    vram_asked: AtomicU64,
+    vram_asked_shared: AtomicU64,
+    /// What buffer requests asked: all, with the write-combined flag, local
+    /// ones (the always-valid flag), and bytes of those.
+    asks: AtomicU64,
+    asks_wc: AtomicU64,
+    asks_local: AtomicU64,
+    asks_wc_bytes: AtomicU64,
 }
 
 impl core::fmt::Debug for Render {
@@ -295,7 +306,7 @@ impl core::fmt::Debug for Render {
 }
 
 impl Render {
-    pub(crate) fn new(amd: Weak<Amd>, vram_bytes: u64) -> Arc<Self> {
+    pub(crate) fn new(amd: Weak<Amd>) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
             watch: SpinLock::new([None; ENGINES]),
@@ -326,19 +337,36 @@ impl Render {
                     bound: [0; COMPUTE_QUEUES],
                 },
             }),
-            vram_bytes,
+            vram: crate::vram::VramPool::new(crate::vram::POOL_START, crate::vram::POOL_END),
+            vram_made: AtomicU64::new(0),
+            vram_asked: AtomicU64::new(0),
+            vram_asked_shared: AtomicU64::new(0),
+            asks: AtomicU64::new(0),
+            asks_wc: AtomicU64::new(0),
+            asks_local: AtomicU64::new(0),
+            asks_wc_bytes: AtomicU64::new(0),
         })
     }
 
     /// What the submissions looked like, for the `render` sysctl.
     pub(crate) fn summary(&self) -> alloc::string::String {
         alloc::format!(
-            "{} submissions, {} with a buffer list, {} with inline buffer handles, {} ring resets, {} deadline hints",
+            "{} submissions, {} with a buffer list, {} with inline buffer handles, {} ring resets, {} deadline hints; \
+             buffer requests: {} ({} write-combined, {} MiB of them; {} local); {} asked for video memory ({} that could be shared), {} made there, {} KiB of {} KiB in use",
             self.cs_count.load(Ordering::Relaxed),
             self.cs_with_list.load(Ordering::Relaxed),
             self.cs_with_handles.load(Ordering::Relaxed),
             self.resets.load(Ordering::Relaxed),
             self.deadline_hints.load(Ordering::Relaxed),
+            self.asks.load(Ordering::Relaxed),
+            self.asks_wc.load(Ordering::Relaxed),
+            self.asks_wc_bytes.load(Ordering::Relaxed) >> 20,
+            self.asks_local.load(Ordering::Relaxed),
+            self.vram_asked.load(Ordering::Relaxed),
+            self.vram_asked_shared.load(Ordering::Relaxed),
+            self.vram_made.load(Ordering::Relaxed),
+            self.vram.used() >> 10,
+            self.vram.total() >> 10,
         )
     }
 
@@ -585,10 +613,15 @@ impl Render {
         let req = InfoRequest::decode(arg).map_err(|_| Errno::EINVAL)?;
         let gpu = amd.gpu_arc()?;
         let bytes = self.state.lock().count.bytes;
-        let live = LiveState { gpu, bytes };
+        let vram_used = self.vram.used();
+        let live = LiveState {
+            gpu,
+            vram_used,
+            gtt_used: bytes.saturating_sub(vram_used),
+        };
         // The graphics ring always; the DMA engine when it started; compute
         // is not driven yet.
-        let device = Device::raphael(self.vram_bytes, GTT_BYTES);
+        let device = Device::raphael(self.vram.total(), GTT_BYTES);
         let device = match (amd.sdma_ready(), amd.compute_rings() > 0) {
             (true, true) => device,
             (true, false) => device.without_compute(),
@@ -607,8 +640,60 @@ impl Render {
             return Err(Errno::EINVAL);
         }
         let size = r.size.checked_next_multiple_of(4096).ok_or(Errno::EINVAL)?;
-        let (handle, gem) = cx.new_gem(size, drm::gem::Placement::SYSTEM_COHERENT)?;
         let amd = self.amd()?;
+        // A buffer that is not shared may live in the device's own memory,
+        // which the engines read faster than system memory behind the GART:
+        // when the client asks for it and the pool has a run that long;
+        // otherwise (and for every shareable buffer) it is system memory.
+        self.asks.fetch_add(1, Ordering::Relaxed);
+        if r.flags & 4 != 0 {
+            self.asks_wc.fetch_add(1, Ordering::Relaxed);
+            self.asks_wc_bytes.fetch_add(size, Ordering::Relaxed);
+        }
+        if r.flags & uapi::gem_flag::VM_ALWAYS_VALID != 0 {
+            self.asks_local.fetch_add(1, Ordering::Relaxed);
+        }
+        let asked = r.domains & uapi::domain::VRAM != 0;
+        let local = r.flags & uapi::gem_flag::VM_ALWAYS_VALID != 0;
+        if asked {
+            self.vram_asked.fetch_add(1, Ordering::Relaxed);
+            if !local {
+                self.vram_asked_shared.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let block = if asked && local && size <= self.vram.total() / 4 {
+            self.vram.alloc(size)
+        } else {
+            None
+        };
+        let (handle, gem) = match block {
+            Some(block) => {
+                let gpu = amd.gpu_arc()?;
+                let bar = gpu.vram_phys().ok_or(Errno::ENXIO)?;
+                let end = usize::try_from(block.offset() + size).map_err(|_| Errno::EINVAL)?;
+                if gpu.vram_len().is_none_or(|len| len < end) {
+                    return Err(Errno::ENXIO);
+                }
+                // What an earlier buffer left there must not be read.
+                for at in (block.offset()..block.offset() + size).step_by(4) {
+                    gpu.vram_write32(usize::try_from(at).unwrap_or(0), 0);
+                }
+                let made = cx.new_device_gem(size, vm::Pfn((bar + block.offset()) >> 12), block)?;
+                self.vram_made.fetch_add(1, Ordering::Relaxed);
+                made
+            }
+            // Write-combined when the client says it only writes the buffer
+            // from the processor (what Mesa does for most): the engines read
+            // such memory without snooping the processor's caches.
+            None if r.flags & uapi::gem_flag::CPU_GTT_USWC != 0 => cx.new_gem(
+                size,
+                drm::gem::Placement {
+                    cache: drm::gem::CacheMode::WriteCombine,
+                    ..drm::gem::Placement::SYSTEM_COHERENT
+                },
+            )?,
+            None => cx.new_gem(size, drm::gem::Placement::SYSTEM_COHERENT)?,
+        };
         self.with_file(&amd, cx.file_id(), |_, c| {
             c.bytes += gem.size();
             Ok(())
@@ -647,13 +732,34 @@ impl Render {
                 // The pages, populated now (before any lock is held).
                 let frames = gem.frames()?;
                 let first = usize::try_from(r.offset_in_bo / page).map_err(|_| Errno::EINVAL)?;
-                let flags = gpu_flags(r.flags);
+                let mut flags = gpu_flags(r.flags);
+                // A buffer in the device's own memory: the engines address
+                // it as video memory (the processor's window onto it, taken
+                // away and the start of video memory in the GPU's space
+                // put in its place).
+                // Write-combined system memory is read without snooping.
+                if gem.placement().cache == drm::gem::CacheMode::WriteCombine {
+                    flags.snooped = false;
+                }
+                let base = if gem.is_device() {
+                    let gpu = amd.gpu_arc()?;
+                    flags.system = false;
+                    flags.snooped = false;
+                    let window = gpu.vram_phys().ok_or(Errno::ENXIO)?;
+                    Some((amd.vram_phys()?, window))
+                } else {
+                    None
+                };
                 self.with_file(&amd, cx.file_id(), |fs, _| {
                     fs.space
                         .map(r.va_address, pages, flags, |n| {
-                            frames
+                            let at = frames
                                 .get(first + usize::try_from(n).unwrap_or(0))
-                                .map_or(0, |p| p.0 * page)
+                                .map_or(0, |p| p.0 * page);
+                            match base {
+                                Some((gpu_base, window)) => gpu_base + (at - window),
+                                None => at,
+                            }
                         })
                         .map_err(|e| match e {
                             amdgpu::vm::Error::Busy => Errno::EBUSY,
@@ -871,6 +977,9 @@ impl Render {
         // The address space's root and the user fence's address, under the
         // state lock; the job itself under the ring's.
         let fence_frames = match &user_fence_gem {
+            // The fence word's buffer is written by the engine through the
+            // job's address space as system memory.
+            Some((gem, _)) if gem.is_device() => return Err(Errno::EINVAL),
             Some((gem, _)) => Some(gem.frames()?),
             None => None,
         };
@@ -973,7 +1082,8 @@ impl Render {
                     for (i, d) in f.0.iter().enumerate() {
                         gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
                     }
-                    let _ = gpu.vram_read32(usize::try_from(off).unwrap_or(0));
+                    // No read back here: the ring's flush after its packets
+                    // (a read across the bus) completes these writes too.
                     p.indirect_buffer(
                         extended(FENCE_IB_VA + page * 4096),
                         u32::try_from(f.0.len()).unwrap_or(0),
@@ -1044,7 +1154,8 @@ impl Render {
                     for (i, d) in f.0.iter().enumerate() {
                         gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
                     }
-                    let _ = gpu.vram_read32(usize::try_from(off).unwrap_or(0));
+                    // No read back here: the ring's flush after its packets
+                    // (a read across the bus) completes these writes too.
                     p.pad_for_indirect(start);
                     p.indirect(
                         extended(FENCE_IB_VA + page * 4096),
@@ -1087,7 +1198,12 @@ impl Render {
                 // the ring's own invalidation engine), the buffers (with the
                 // valid bit), the fences.
                 let mut p = Packets::new();
-                p.wait_mem(3, gfx.compute_seq_address(r), last, 0xffff_ffff, 4, false);
+                // Only if the previous job is still running (the processor
+                // sees its fence word in a few nanoseconds; the engine polls
+                // it across the bus).
+                if gfx.compute_finished(&gpu, r).wrapping_sub(last) >= 0x8000_0000 {
+                    p.wait_mem(3, gfx.compute_seq_address(r), last, 0xffff_ffff, 4, false);
+                }
                 p.0.extend(amdgpu::gmc::ring_vm_flush_on(vmid, root, false, 4 + r, false).0);
                 for ib in &ibs {
                     p.indirect_buffer(extended(ib.va_start), ib.ib_bytes / 4, vmid, true);
@@ -1100,7 +1216,8 @@ impl Render {
                     for (i, d) in f.0.iter().enumerate() {
                         gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
                     }
-                    let _ = gpu.vram_read32(usize::try_from(off).unwrap_or(0));
+                    // No read back here: the ring's flush after its packets
+                    // (a read across the bus) completes these writes too.
                     p.indirect_buffer(
                         extended(FENCE_IB_VA + page * 4096),
                         u32::try_from(f.0.len()).unwrap_or(0),
@@ -1505,16 +1622,17 @@ fn unbind(fs: &mut FileState, c: &mut Counters, ctx: Option<u32>) {
 /// What the interface reads while it runs.
 struct LiveState {
     gpu: Arc<Aperture>,
-    bytes: u64,
+    vram_used: u64,
+    gtt_used: u64,
 }
 
 impl Live for LiveState {
     fn vram_usage(&self) -> u64 {
-        self.bytes
+        self.vram_used
     }
 
     fn gtt_usage(&self) -> u64 {
-        0
+        self.gtt_used
     }
 
     fn timestamp(&self) -> u64 {

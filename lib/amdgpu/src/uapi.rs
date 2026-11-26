@@ -72,6 +72,17 @@ pub mod domain {
     pub const VRAM: u64 = 0x4;
 }
 
+/// `AMDGPU_GEM_CREATE_*` flags of a buffer request.
+pub mod gem_flag {
+    /// The buffer is not shared with another process or device through a
+    /// descriptor (`AMDGPU_GEM_CREATE_VM_ALWAYS_VALID`): it may stay in the
+    /// device's own memory.
+    pub const VM_ALWAYS_VALID: u64 = 1 << 6;
+    /// The processor only writes the buffer, through write-combined mappings
+    /// (`AMDGPU_GEM_CREATE_CPU_GTT_USWC`).
+    pub const CPU_GTT_USWC: u64 = 1 << 2;
+}
+
 /// Hardware IP types (`AMDGPU_HW_IP_*`).
 pub mod ip {
     pub const GFX: u32 = 0;
