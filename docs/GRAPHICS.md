@@ -1142,8 +1142,8 @@ and of M-G.6.
 
 | | start | now | FreeBSD |
 |---|---|---|---|
-| glmark2 score, three full runs | 9,913 / 9,934 / 9,931 | 10,979 / 10,981 / 10,953 | 10,796 / 10,729 / 10,938 |
-| geometric mean of the 32 tests' frames per second against FreeBSD | 0.928 | **1.008** | 1 |
+| glmark2 score, three full runs | 9,913 / 9,934 / 9,931 | 11,864 / 11,854 / 11,839 | 10,796 / 10,729 / 10,938 |
+| geometric mean of the 32 tests' frames per second against FreeBSD | 0.928 | **1.077** | 1 |
 | `drm.submit.gfx`, submit and wait (ns) | 13,077 | 7,580 | 7,570 |
 | `drm.submit.gfx.batch`, per job of 1,000 queued (ns) | 7,900 | 3,430 | 7,700 |
 | `drm.submit.compute` (ns) | 50,029,499 | 8,096 | 7,575 |
@@ -1187,8 +1187,18 @@ one word, more when the engine is busy) was behind most of it:
   requests of 479, so a glmark2 run uses the pool for nothing; 241 requests ask for video memory unmarked.
   Creating one costs 453 us (the clearing, a word at a time across the bus).
 
-Where AbyssBSD is still behind (ratio of frames per second): `shadow` 0.88, `refract` 0.92, `desktop shadow`
-0.94, `buffer` (map update) 0.95. The first two render to textures. Open, in this order:
+- **Address-space switch and translation flush only when needed.** Every job wrote its address space's page-table
+  base and flushed every translation cache level (`0xf << 19 | 1 << 23`) before it ran; the job after it then walked
+  the page tables again. A job now does neither when the engine's last job was in the same address space and no
+  mapping was changed, removed or reset since (`Render::vm_check`; the `render` sysctl counts both: 34 switches
+  and 357,264 skipped jobs in a run). This was the largest single gap: `shadow` 8,114 to 8,942 fps, `desktop
+  shadow` 5,980 to 6,962, the glmark2 mean 10,971 to 11,852. The lead came from the specification's account of
+  when the reference flushes (05 section 5.4: a new or reassigned address space, a mapping removed or moved, a
+  reset; a new mapping into unused space needs none). Measured by comparing against the FreeBSD run, with the
+  clocks, memory placement and page-table setup ruled out first.
+
+Where AbyssBSD is still behind (ratio of frames per second): `refract` 0.93, `shadow` 0.97, `terrain` 0.98,
+`buffer` (map update) 0.98. Open, in this order:
 
 1. **Render targets in video memory** (`drm-kmod` places the buffers Mesa asks for in video memory in it): the
    pool takes every request for video memory, which needs a shared buffer in video memory to be usable: export
