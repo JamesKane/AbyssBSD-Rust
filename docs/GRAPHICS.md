@@ -1004,8 +1004,8 @@ reboot (always set `BootNext` first so the board does not boot Fedora).
 - Scan-out in place for buffers that are not exactly the firmware's surface (other sizes, pitches, modes
   other than 1080p60); they are copied.
 - Sound over HDMI through the sound engine (`/dev/dsp`, docs/AUDIO.md); the Navi 22 (Z690-A) bring-up; the half-speed-after-reset cause (§16.8).
-- Render targets in video memory, the compute rings' dependency wait through system memory, buffers made whole at
-  creation so a mapping does not fault page by page, (all §16.15).
+- The compute rings' dependency wait through system memory, and buffers made whole at creation so a mapping does
+  not fault page by page (both §16.15); the pool of video memory is 32 MiB.
 
 ### 16.11 HDMI audio: the stream half
 
@@ -1212,7 +1212,7 @@ one word, more when the engine is busy) was behind most of it:
 Where AbyssBSD is still behind (ratio of frames per second): `buffer` (map update) 0.97 and `shadow` 0.99; every
 other test is at or above FreeBSD. Open, in this order:
 
-1. **Render targets in video memory: tried, no effect.** The pool (`vram.rs`) is 32 MiB, not the 248 first
+1. **Render targets in video memory: tried, no effect (and not needed).** The pool (`vram.rs`) is 32 MiB, not the 248 first
    thought: the processor's window onto video memory (BAR 0) is 256 MiB, the driver's own structures take the
    first 224, and a buffer past the window cannot be mapped (the first build placed buffers up to 472 MiB and
    `refract` failed at once; a placement outside the window now falls back to system memory). With every
@@ -1220,8 +1220,9 @@ other test is at or above FreeBSD. Open, in this order:
    shadow` run, exportable, scanned out in place from video memory) `shadow` stayed at 8,114 frames per second
    (FreeBSD 9,186), `refract` at 876 (947) and `desktop shadow` at 5,980 (6,346). Placement is not the gap; that
    variant was dropped (the pool takes only buffers marked local, as before). The power firmware shows the
-   graphics clock at 2,200 MHz and the memory clock at 3,300 MHz under `refract`; FreeBSD's clocks under the
-   same test were not looked at, and are the next thing to compare.
+   graphics clock at 2,200 MHz and the memory clock at 3,300 MHz under `refract`, and FreeBSD's read the same
+   (2,200 / 3,300 MHz, 1,425 mV graphics, 1,290 mV SoC, 99% load). The gap was the translation caches, not
+   placement or clocks (the two items above: the per-job flush and the pages' runs).
 2. `drm.bo.create1m` is 2.2 times slower: a mapping's pages are made one write fault at a time (FreeBSD makes the
    buffer whole at creation and maps neighbors).
 3. `drm.submit.compute.batch`: 1,000 jobs queued behind each other wait for the previous fence, which the engine
