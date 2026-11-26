@@ -973,7 +973,8 @@ impl Render {
                     for (i, d) in f.0.iter().enumerate() {
                         gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
                     }
-                    let _ = gpu.vram_read32(usize::try_from(off).unwrap_or(0));
+                    // No read back here: the ring's flush after its packets
+                    // (a read across the bus) completes these writes too.
                     p.indirect_buffer(
                         extended(FENCE_IB_VA + page * 4096),
                         u32::try_from(f.0.len()).unwrap_or(0),
@@ -1044,7 +1045,8 @@ impl Render {
                     for (i, d) in f.0.iter().enumerate() {
                         gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
                     }
-                    let _ = gpu.vram_read32(usize::try_from(off).unwrap_or(0));
+                    // No read back here: the ring's flush after its packets
+                    // (a read across the bus) completes these writes too.
                     p.pad_for_indirect(start);
                     p.indirect(
                         extended(FENCE_IB_VA + page * 4096),
@@ -1087,7 +1089,12 @@ impl Render {
                 // the ring's own invalidation engine), the buffers (with the
                 // valid bit), the fences.
                 let mut p = Packets::new();
-                p.wait_mem(3, gfx.compute_seq_address(r), last, 0xffff_ffff, 4, false);
+                // Only if the previous job is still running (the processor
+                // sees its fence word in a few nanoseconds; the engine polls
+                // it across the bus).
+                if gfx.compute_finished(&gpu, r).wrapping_sub(last) >= 0x8000_0000 {
+                    p.wait_mem(3, gfx.compute_seq_address(r), last, 0xffff_ffff, 4, false);
+                }
                 p.0.extend(amdgpu::gmc::ring_vm_flush_on(vmid, root, false, 4 + r, false).0);
                 for ib in &ibs {
                     p.indirect_buffer(extended(ib.va_start), ib.ib_bytes / 4, vmid, true);
@@ -1100,7 +1107,8 @@ impl Render {
                     for (i, d) in f.0.iter().enumerate() {
                         gpu.vram_write32(usize::try_from(off).unwrap_or(0) + 4 * i, *d);
                     }
-                    let _ = gpu.vram_read32(usize::try_from(off).unwrap_or(0));
+                    // No read back here: the ring's flush after its packets
+                    // (a read across the bus) completes these writes too.
                     p.indirect_buffer(
                         extended(FENCE_IB_VA + page * 4096),
                         u32::try_from(f.0.len()).unwrap_or(0),

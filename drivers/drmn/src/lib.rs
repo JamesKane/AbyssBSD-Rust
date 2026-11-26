@@ -30,6 +30,7 @@ extern crate std;
 mod amd;
 mod control;
 mod dmcub;
+mod gart;
 mod gcload;
 mod gcring;
 mod hotplug;

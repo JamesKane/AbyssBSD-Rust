@@ -987,7 +987,7 @@ Mesa does not use the compute and DMA rings by default; the interface offers the
 ### 16.9 Debug triggers
 
 One-shot sysctls in `drivers/drmn/src/amd/debug.rs` (`dev.drmn.<unit>.<name>`, written with 1; all left out by
-`hw.drmn.debug=0`, on by default): reads (`discover`, `display`, `memory`, `vram`, `gc_probe`, `smu_probe`, `smu_metrics`, `afmt_probe`, `ddc_probe`,
+`hw.drmn.debug=0`, on by default): reads (`discover`, `display`, `memory`, `vram`, `gc_probe`, `smu_probe`, `smu_metrics`, `fence_words`, `afmt_probe`, `ddc_probe`,
 `mode_probe`, `vbios_dump`; and `sink` and `irq`, which are always present); bring-up pieces (`psp`, `gmc`,
 `gmc_mm`, `interrupts`, `doorbells`, `dmcub`, `gc_fw`, `gc_ring`, `gc_vm`, `asic_init`); display (`flip`,
 `mode=<code>`, `hdmi`, `hdmi_off`, `hdmi_audio`, `edid`, `link_reconnect`, `refresh`, `panic_restore`); and tests
@@ -1004,6 +1004,9 @@ reboot (always set `BootNext` first so the board does not boot Fedora).
 - Scan-out in place for buffers that are not exactly the firmware's surface (other sizes, pitches, modes
   other than 1080p60); they are copied.
 - Sound over HDMI through the sound engine (`/dev/dsp`, docs/AUDIO.md); the Navi 22 (Z690-A) bring-up; the half-speed-after-reset cause (§16.8).
+- Buffers in video memory (every buffer is system memory today; §16.15 shows the three tests that suffer), the
+  compute rings' dependency wait through system memory (§16.15), buffers made whole at creation so a mapping
+  does not fault page by page (§16.15).
 
 ### 16.11 HDMI audio: the stream half
 
@@ -1129,4 +1132,58 @@ the refusals (a plain syncobj descriptor, an empty syncobj, a bad descriptor) ar
 - **Pixel clocks above 148.5 MHz: not built, unverified.** The sink on the X870E (a Dell ST2421L) takes at most
   1080p60, and no other display is available; a 4K mode would also need larger surfaces than the card makes
   and, above 340 MHz, the SCDC scrambling handshake (08 section 3.7.8). Nothing was run for it.
+
+### 16.15 Performance against FreeBSD `drm-kmod` (the X870E, Radeon 610M)
+
+Measured on the same board against stock FreeBSD 15.1 with `drm-612-kmod` 6.12 and Mesa 26.2.2 (`radeonsi`,
+glmark2 2023.01), the same glmark2 and `tests/perf/graphics/drmbench.c` binaries on both
+(`tests/perf/graphics/README.md` says how; the raw runs are in `results/`). `drm-kmod` is the baseline of G5
+and of M-G.6.
+
+| | start | now | FreeBSD |
+|---|---|---|---|
+| glmark2 score, three full runs | 9,913 / 9,934 / 9,931 | 10,956 / 10,904 / 10,866 | 10,796 / 10,729 / 10,938 |
+| geometric mean of the 32 tests' frames per second against FreeBSD | 0.928 | **1.002** | 1 |
+| `drm.submit.gfx`, submit and wait (ns) | 13,077 | 7,580 | 7,570 |
+| `drm.submit.gfx.batch`, per job of 1,000 queued (ns) | 7,900 | 3,430 | 7,700 |
+| `drm.submit.compute` (ns) | 50,029,499 | 8,096 | 7,575 |
+| `drm.submit.compute.batch` (ns) | 50,070 | 33,240 | 7,570 |
+| `drm.fence.signalled`, a wait on a finished job (ns) | 888 | 119 | 139 |
+| `drm.bo.create4k` / `create1m` (ns) | 1,341 / 81,115 | 1,250 / 81,672 | 2,196 / 37,147 |
+
+What the gap was, and what closed it. The cost of reading across the bus into video memory (about 0.7 us for
+one word, more when the engine is busy) was behind most of it:
+
+- **The compute rings had no fence interrupt.** Only graphics ring 0's end-of-pipe interrupt was enabled; the
+  four pipes of the first micro engine (`CP_ME1_PIPE0_INT_CNTL` at `0xc214`, bit 26, from the vendor's MIT
+  register header) were not, so a compute job's waiter was woken by the 50 ms poll: 50 ms per compute job.
+- **The fence words are in system memory** (`drivers/drmn/src/gart.rs`, `Fences` in `gcring.rs`): one page,
+  entered in the GART at `0x3000_0000` (snooped), each word 64 bytes apart. A wait read the word four or five
+  times, each a read of video memory. (The spacing matters: a hung graphics job's fence packet, run when its
+  queue is reset, writes its value 16 bytes past its address; with the words 4 bytes apart that landed in a
+  compute ring's word, which then looked finished. `amdhang` followed by `amdrender` found it.)
+- **The interrupt handler's ring and its write-back word are in system memory** (GART `0x3100_0000`): the
+  handler read the write pointer and eight dwords of the entry from video memory, about 6 us per fence
+  interrupt before the waiter woke.
+- **A submission** no longer reads and flushes video memory more than it must: one flush for the packets and the
+  poll word instead of two, the read pointer looked at only when the cached bound (`Room`) says the ring may be
+  full, the user fence's read back dropped (the ring's flush completes it), a full ring polled every 20 us
+  rather than every millisecond, and a compute job's wait for the previous job's fence left out when the
+  processor already sees that job finished.
+
+Where AbyssBSD is still behind (ratio of frames per second), all heavy on buffers the GPU reads: `bump
+high-poly` 0.83, `shadow` 0.88, `refract` 0.91, `desktop shadow` 0.94. They fit buffers kept in system memory,
+which the GPU reads across the bus, where `drm-kmod` places them in video memory. Open, in this order:
+
+1. **Buffers in video memory** (the domain `GEM_CREATE` is given; a buffer the CPU maps stays in system memory
+   or goes through the write-combined window).
+2. `drm.bo.create1m` is 2.2 times slower: a mapping's pages are made one write fault at a time (FreeBSD makes the
+   buffer whole at creation and maps neighbors).
+3. `drm.submit.compute.batch`: 1,000 jobs queued behind each other wait for the previous fence, which the engine
+   polls in system memory (33 us a job against 8 us when the word was in video memory); a job queue that is
+   shallow is unaffected. A compute job could wait on a copy of the word in video memory.
+
+The regression programs (`amdrender`, `amdsync`, `amdprime`, `amdhang`) pass on the final build, and the host
+tests, `cargo xtask check` and the x86_64 and aarch64 boot cases do. The hot-plug interrupt, whose ring is now in
+system memory too, was not exercised again (frame-start and fence entries do come through it).
 

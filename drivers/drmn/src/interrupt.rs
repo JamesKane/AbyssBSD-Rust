@@ -99,6 +99,13 @@ pub(crate) struct Irq {
     /// The hot-plug interrupt is armed (a restart arms it again).
     hpd_armed: AtomicBool,
     hpd_interrupts: AtomicU64,
+    /// The ring and its write-back word in system memory (the engine writes
+    /// them through the GART), once made: reading them is a cache hit,
+    /// where the same words in video memory cost a read across the bus
+    /// each, several to an entry.
+    ring: sync::Once<vm::dma::DmaCoherent<u8>>,
+    /// Whether the ring in use is the one in system memory.
+    in_memory: AtomicBool,
 }
 
 impl core::fmt::Debug for Irq {
@@ -127,6 +134,48 @@ impl Irq {
             hpd_queue: Arc::new(sched::WaitQueue::new()),
             hpd_armed: AtomicBool::new(false),
             hpd_interrupts: AtomicU64::new(0),
+            ring: sync::Once::new(),
+            in_memory: AtomicBool::new(false),
+        }
+    }
+
+    /// Chooses the ring: the one in system memory (made on first use,
+    /// entered in the GART, zeroed) if the translation hubs are up, else the
+    /// one in video memory. Returns the hardware's description of it.
+    fn make_ring(&self, gpu: &Arc<Aperture>, base: u64) -> ih::Ring {
+        let bytes = RING_BYTES as usize;
+        if self.ring.get().is_none()
+            && let Some(tag) = gpu.dma_tag()
+            && let Ok(mem) = tag.coherent::<u8>(bytes + 4096)
+        {
+            let _ = self.ring.set(mem);
+        }
+        if let Some(mem) = self.ring.get() {
+            mem.copy_from_slice(0, &alloc::vec![0u8; bytes + 16]);
+            crate::gart::map_system(
+                gpu,
+                crate::gart::INTERRUPT_RING,
+                mem.bus_addr(),
+                (bytes + 4096) / 4096,
+            );
+            self.in_memory.store(true, Ordering::Release);
+            return ih::Ring {
+                address: crate::gart::INTERRUPT_RING,
+                bytes: RING_BYTES,
+                writeback: crate::gart::INTERRUPT_RING + u64::from(RING_BYTES),
+                snoop: true,
+            };
+        }
+        // Video memory: the ring and its slot start out zero.
+        for at in (0..bytes + 16).step_by(4) {
+            gpu.vram_write32(RING_AT + at, 0);
+        }
+        self.in_memory.store(false, Ordering::Release);
+        ih::Ring {
+            address: base + RING_AT as u64,
+            bytes: RING_BYTES,
+            writeback: base + WRITEBACK_AT as u64,
+            snoop: false,
         }
     }
 
@@ -189,7 +238,11 @@ impl Irq {
         let _ = write!(
             s,
             "{}: {} interrupts, {} entries, {} frame starts, {} fence interrupts, {} others (last client {} source {}), {} hot-plug, {} overflows",
-            if self.active() { "on" } else { "off" },
+            match (self.active(), self.in_memory.load(Ordering::Relaxed)) {
+                (false, _) => "off",
+                (true, true) => "on (ring in system memory)",
+                (true, false) => "on (ring in video memory)",
+            },
             self.interrupts.load(Ordering::Relaxed),
             self.entries.load(Ordering::Relaxed),
             self.frames.load(Ordering::Relaxed),
@@ -214,10 +267,7 @@ impl Irq {
     pub(crate) fn start(self: &Arc<Self>) -> Result<(), abi::errno::Errno> {
         use abi::errno::Errno;
         let gpu = self.gpu.upgrade().ok_or(Errno::ENXIO)?;
-        if gpu
-            .vram_len()
-            .is_none_or(|len| len < RING_AT + (RING_BYTES as usize) + 16)
-        {
+        if gpu.vram_len().is_none() {
             return Err(Errno::ENXIO);
         }
         if !gpu.has_interrupt() {
@@ -229,21 +279,12 @@ impl Irq {
         let w = Bar5(&gpu);
         // Where video memory is, in the GPU's address space.
         let base = u64::from(w.read32(flip::FB_LOCATION_BASE) & 0xffff) << 24;
-        // The ring and its slot start out zero.
-        for at in (0..RING_BYTES as usize + 16).step_by(4) {
-            gpu.vram_write32(RING_AT + at, 0);
-        }
+        let ring = self.make_ring(&gpu, base);
         self.rptr.store(0, Ordering::Release);
         let sink: Arc<dyn InterruptSink> = Arc::new(Sink(Arc::clone(self)));
         if !gpu.set_sink(sink) {
             return Err(Errno::EBUSY);
         }
-        let ring = ih::Ring {
-            address: base + RING_AT as u64,
-            bytes: RING_BYTES,
-            writeback: base + WRITEBACK_AT as u64,
-            snoop: false,
-        };
         // The ring first, then the display's event, so nothing is raised
         // into a ring that is not there.
         self.active.store(true, Ordering::Release);
@@ -276,16 +317,8 @@ impl Irq {
         let gpu = self.gpu.upgrade().ok_or(Errno::ENXIO)?;
         let w = Bar5(&gpu);
         let base = u64::from(w.read32(flip::FB_LOCATION_BASE) & 0xffff) << 24;
-        for at in (0..RING_BYTES as usize + 16).step_by(4) {
-            gpu.vram_write32(RING_AT + at, 0);
-        }
+        let ring = self.make_ring(&gpu, base);
         self.rptr.store(0, Ordering::Release);
-        let ring = ih::Ring {
-            address: base + RING_AT as u64,
-            bytes: RING_BYTES,
-            writeback: base + WRITEBACK_AT as u64,
-            snoop: false,
-        };
         self.active.store(true, Ordering::Release);
         if ih::bring_up(&w, &ring, true).is_err() {
             self.active.store(false, Ordering::Release);
@@ -381,7 +414,15 @@ impl Irq {
             return Filter::Stray;
         };
         let w = Bar5(&gpu);
-        let wptr = gpu.vram_read32(WRITEBACK_AT).unwrap_or(0);
+        let memory = if self.in_memory.load(Ordering::Acquire) {
+            self.ring.get()
+        } else {
+            None
+        };
+        let wptr = match memory {
+            Some(m) => m.read_at::<u32>(RING_BYTES as usize),
+            None => gpu.vram_read32(WRITEBACK_AT).unwrap_or(0),
+        };
         let rptr = self.rptr.load(Ordering::Acquire);
         let mut frame = false;
         let mut eop = false;
@@ -390,7 +431,10 @@ impl Irq {
             RING_BYTES,
             rptr,
             wptr,
-            &|o| gpu.vram_read32(RING_AT + o as usize).unwrap_or(0),
+            &|o| match memory {
+                Some(m) => m.read_at::<u32>(o as usize),
+                None => gpu.vram_read32(RING_AT + o as usize).unwrap_or(0),
+            },
             &mut |e| {
                 self.entries.fetch_add(1, Ordering::Relaxed);
                 if e.client == CLIENT_DISPLAY && e.source == amdgpu::hpd::IH_SOURCE {

@@ -1,0 +1,7 @@
+drmbench drm.bo.create4k 2196 ns/op
+drmbench drm.bo.create1m 37147 ns/op
+drmbench drm.submit.gfx 7570 ns/op
+drmbench drm.submit.gfx.batch 7612 ns/op
+drmbench drm.submit.compute 7575 ns/op
+drmbench drm.submit.compute.batch 7569 ns/op
+drmbench drm.fence.signalled 144 ns/op

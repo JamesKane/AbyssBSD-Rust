@@ -1170,6 +1170,17 @@ pub(super) fn publish(t: &mut sysctl::Tree, node: sysctl::NodeId, a: &Arc<Amd>) 
             Amd::afmt_probe,
         ),
         (
+            "fence_words",
+            "Write 1 to log the fence words of the rings and their write pointers (harmless)",
+            |a: &Amd| {
+                a.gfx_lock()
+                    .as_ref()
+                    .ok_or(abi::errno::Errno::ENXIO)?
+                    .fence_report(&|args| a.log(args));
+                Ok(())
+            },
+        ),
+        (
             "smu_metrics",
             "Write 1 to read the power firmware's metrics (clocks, activity, power, limits) and log them (harmless)",
             Amd::smu_metrics,
