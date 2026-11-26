@@ -153,6 +153,10 @@ struct Rx {
     descs: Descs,
     chunks: Vec<DmaCoherent<u8>>,
     asm: Assembler,
+    /// A slot's bytes on their way out of the DMA memory, kept between
+    /// calls: allocating (and zeroing) one for every call cost more than
+    /// the frames it took (about 1.8 µs against 0.4 µs a frame).
+    scratch: Vec<u8>,
     /// Descriptors taken so far, for the stall check.
     taken: u64,
 }
@@ -498,7 +502,7 @@ impl Shared {
         let mut frames: Vec<Packet> = Vec::new();
         {
             let mut rx = self.rx.lock();
-            let mut buf = alloc::vec![0u8; SLOT];
+            let mut buf = core::mem::take(&mut rx.scratch);
             while frames.len() < RX_BUDGET {
                 let Some(p) = ({
                     let Rx { ring, descs, .. } = &mut *rx;
@@ -533,6 +537,7 @@ impl Shared {
                     }
                 }
             }
+            rx.scratch = buf;
         }
         let more = frames.len() >= RX_BUDGET;
         (frames, more)
@@ -878,6 +883,7 @@ impl Driver for Rge {
             descs: rx_descs,
             chunks,
             asm: Assembler::default(),
+            scratch: alloc::vec![0u8; SLOT],
             taken: 0,
         };
         let mut tx = Tx {
