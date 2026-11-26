@@ -523,9 +523,15 @@ stock 15.1. Open:
   `TSO6` and `LRO`. TSO4 is now in `rge` (the delta spec's large-send descriptor; on by default on the
   RTL8125D rev 1, `hw.rge.tso` for the others until each is checked on its hardware): `iperf3`'s send-side
   CPU 1.48 to 0.65 s (stock 0.29), `tcp.cpu.tx` 3.65 to 2.95, `p7` geomean 0.960. What is left is the
-  receive path: about 14,000 interrupts a second at 1 Gbit/s, 7 CPU-seconds in 20 s charged to the
-  interrupt thread, about 4 µs a packet (stock's whole stack: 1.3 µs), and `udp.tx.small` 1.48 (330 ns a
-  packet more on transmit). Then software LRO. `fs.ufs.fsx` was 2.5: `ftruncate` zeroed and moved fragments on the disk, synchronously;
+  receive path (measured with temporary timers in `service`, the profiler's samples being skid): per
+  frame at 1 Gbit/s 2.6 µs in `rx_take`, 0.9 µs in the stack (`deliver`), 0.5 µs a status read and 3.4 of
+  them an interrupt; stock's whole stack is 1.3 µs. `rx_take` allocated and zeroed 2 KB every call
+  (1.8 µs): fixed, `service` 14.5 to 8.7 µs, but the interrupt rate rose from 26,000 to 37,000 a second
+  (less to find at each), so `tcp.cpu.rx` did not move (3,628 ns, stock 806 to 1,061). The cost is per
+  interrupt and per call, about one frame each: it needs batching (the status read once an interrupt,
+  receive polled while frames keep coming, or the controller's moderation timer, which the spec does not
+  describe), and a leaner per-frame path (three copies and two allocations). `udp.tx.small` 1.48: 330 ns a
+  packet more on transmit. Then software LRO. `fs.ufs.fsx` was 2.5: `ftruncate` zeroed and moved fragments on the disk, synchronously;
   it now clears and carries them in the page cache (`truncate_new`), as FreeBSD's `ffs_truncate` works in
   the buffer cache: 0.75, and `fs.ufs` 0.837. Mapped writes (`msync`) are still twice stock's cost in
   `fsx` itself. `p3` is bhyve's (it reads `vtbd1` and `nda0`): not run here.
