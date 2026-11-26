@@ -295,7 +295,7 @@ impl Amd {
                 return;
             }
         };
-        let render = crate::render::Render::new(self.me.clone(), 512 << 20);
+        let render = crate::render::Render::new(self.me.clone());
         // A fence's interrupt wakes whoever waits for a job.
         *self.render.lock() = Some(Arc::downgrade(&render));
         let queue = render.queue();

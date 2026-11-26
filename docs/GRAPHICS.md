@@ -1004,9 +1004,8 @@ reboot (always set `BootNext` first so the board does not boot Fedora).
 - Scan-out in place for buffers that are not exactly the firmware's surface (other sizes, pitches, modes
   other than 1080p60); they are copied.
 - Sound over HDMI through the sound engine (`/dev/dsp`, docs/AUDIO.md); the Navi 22 (Z690-A) bring-up; the half-speed-after-reset cause (§16.8).
-- Buffers in video memory (every buffer is system memory today; §16.15 shows the three tests that suffer), the
-  compute rings' dependency wait through system memory (§16.15), buffers made whole at creation so a mapping
-  does not fault page by page (§16.15).
+- Render targets in video memory, the compute rings' dependency wait through system memory, buffers made whole at
+  creation so a mapping does not fault page by page, and `IN_FENCE_FD` on the planes (all §16.15).
 
 ### 16.11 HDMI audio: the stream half
 
@@ -1137,19 +1136,20 @@ the refusals (a plain syncobj descriptor, an empty syncobj, a bad descriptor) ar
 
 Measured on the same board against stock FreeBSD 15.1 with `drm-612-kmod` 6.12 and Mesa 26.2.2 (`radeonsi`,
 glmark2 2023.01), the same glmark2 and `tests/perf/graphics/drmbench.c` binaries on both
-(`tests/perf/graphics/README.md` says how; the raw runs are in `results/`). `drm-kmod` is the baseline of G5
+(`tests/perf/graphics/README.md` says how; the raw runs are in `results/`: `abyss-start-*` before, `abyss-gl-*`
+after the changes below but the write-combined buffers, `abyss-wc-*` after them, the table's "now"). `drm-kmod` is the baseline of G5
 and of M-G.6.
 
 | | start | now | FreeBSD |
 |---|---|---|---|
-| glmark2 score, three full runs | 9,913 / 9,934 / 9,931 | 10,956 / 10,904 / 10,866 | 10,796 / 10,729 / 10,938 |
-| geometric mean of the 32 tests' frames per second against FreeBSD | 0.928 | **1.002** | 1 |
+| glmark2 score, three full runs | 9,913 / 9,934 / 9,931 | 10,979 / 10,981 / 10,953 | 10,796 / 10,729 / 10,938 |
+| geometric mean of the 32 tests' frames per second against FreeBSD | 0.928 | **1.008** | 1 |
 | `drm.submit.gfx`, submit and wait (ns) | 13,077 | 7,580 | 7,570 |
 | `drm.submit.gfx.batch`, per job of 1,000 queued (ns) | 7,900 | 3,430 | 7,700 |
 | `drm.submit.compute` (ns) | 50,029,499 | 8,096 | 7,575 |
 | `drm.submit.compute.batch` (ns) | 50,070 | 33,240 | 7,570 |
 | `drm.fence.signalled`, a wait on a finished job (ns) | 888 | 119 | 139 |
-| `drm.bo.create4k` / `create1m` (ns) | 1,341 / 81,115 | 1,250 / 81,672 | 2,196 / 37,147 |
+| `drm.bo.create4k` / `create1m` (ns) | 1,341 / 81,115 | 1,256 / 82,555 | 2,196 / 37,147 |
 
 What the gap was, and what closed it. The cost of reading across the bus into video memory (about 0.7 us for
 one word, more when the engine is busy) was behind most of it:
@@ -1171,17 +1171,41 @@ one word, more when the engine is busy) was behind most of it:
   rather than every millisecond, and a compute job's wait for the previous job's fence left out when the
   processor already sees that job finished.
 
-Where AbyssBSD is still behind (ratio of frames per second), all heavy on buffers the GPU reads: `bump
-high-poly` 0.83, `shadow` 0.88, `refract` 0.91, `desktop shadow` 0.94. They fit buffers kept in system memory,
-which the GPU reads across the bus, where `drm-kmod` places them in video memory. Open, in this order:
+- **Write-combined buffers, read without snooping.** Mesa asks for `AMDGPU_GEM_CREATE_CPU_GTT_USWC` on most
+  buffers (346 of 479 requests in a glmark2 run, 794 MiB): the processor only writes them. Such a buffer's
+  pages are now mapped write-combined for the processor (`Placement` write-combine; `Object::set_write_combining`,
+  and each page is written back out of the caches when it is made, `PageOps::uncache`, because the direct map
+  alias is write-back) and read by the engines with the PTE's snoop bit clear, as `drm-kmod` does. `bump
+  high-poly` went from 6,904 to 9,080 frames per second (FreeBSD 8,717). A first attempt that cleared the
+  snoop bit of every large buffer with the processor's mappings still write-back made the engines read stale
+  command buffers: the two sides have to change together.
+- **A pool of video memory for buffers** (`drivers/drmn/src/vram.rs`: 248 MiB, from 224 to 472 MiB of the 512,
+  first fit; `Object::device_at`, `Gem::new_device`): a buffer asked for in video memory *and* marked local
+  (`AMDGPU_GEM_CREATE_VM_ALWAYS_VALID`, not shared) lives there, mapped write-combined for the processor,
+  cleared when made, addressed by the engines as video memory, not exportable (`EOPNOTSUPP`) and not scanned
+  out. `tests/graphics/amdvram.c` checks it on the board. Mesa 26 on this card sends the local flag for 2
+  requests of 479, so a glmark2 run uses the pool for nothing; 241 requests ask for video memory unmarked.
+  Creating one costs 453 us (the clearing, a word at a time across the bus).
 
-1. **Buffers in video memory** (the domain `GEM_CREATE` is given; a buffer the CPU maps stays in system memory
-   or goes through the write-combined window).
+Where AbyssBSD is still behind (ratio of frames per second): `shadow` 0.88, `refract` 0.92, `desktop shadow`
+0.94, `buffer` (map update) 0.95. The first two render to textures. Open, in this order:
+
+1. **Render targets in video memory** (`drm-kmod` places the buffers Mesa asks for in video memory in it): the
+   pool takes every request for video memory, which needs a shared buffer in video memory to be usable: export
+   as a dma-buf (the importer maps it as video memory too, works on the same device), mapping by the processor
+   (write-combined, works), and scan-out straight from video memory (the display reads it as its own memory; the
+   card's flip takes a video memory address) or a copy by reading it back (`Gem::with_page` refuses a device
+   buffer now).
 2. `drm.bo.create1m` is 2.2 times slower: a mapping's pages are made one write fault at a time (FreeBSD makes the
    buffer whole at creation and maps neighbors).
 3. `drm.submit.compute.batch`: 1,000 jobs queued behind each other wait for the previous fence, which the engine
    polls in system memory (33 us a job against 8 us when the word was in video memory); a job queue that is
    shallow is unaffected. A compute job could wait on a copy of the word in video memory.
+4. **Sway with the `gles2` renderer does not start**: wlroots commits with an explicit-sync fence now that the
+   render node advertises native fence sync (§16.12), and the planes have no `IN_FENCE_FD` property
+   (`Plane 2 is missing the IN_FENCE_FD property`, then `Backend commit failed`); the `pixman` renderer is
+   unaffected. The planes need `IN_FENCE_FD` (and the CRTC `OUT_FENCE_PTR`): an atomic commit waits for the sync
+   file's fences before flipping. Found while testing this work; not caused by it.
 
 The regression programs (`amdrender`, `amdsync`, `amdprime`, `amdhang`) pass on the final build, and the host
 tests, `cargo xtask check` and the x86_64 and aarch64 boot cases do. The hot-plug interrupt, whose ring is now in

@@ -39,6 +39,7 @@ mod kms;
 mod psp;
 mod render;
 mod sink;
+mod vram;
 
 use alloc::string::String;
 use alloc::sync::Arc;

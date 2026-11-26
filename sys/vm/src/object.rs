@@ -53,6 +53,10 @@ pub trait PageOps: Sync {
     fn alloc_filled(&self, fill: &mut dyn FnMut(&mut [u8])) -> Option<Pfn>;
     /// Returns a page that no page table maps any more.
     fn free(&self, pfn: Pfn);
+    /// Writes back and drops every cache line of page `pfn`, so that it can
+    /// be mapped write-combined without a stale line of the direct map
+    /// writing over it later. Nothing where the caches are not an issue.
+    fn uncache(&self, _pfn: Pfn) {}
     /// Calls `f` with page `pfn`'s contents.
     fn access(&self, pfn: Pfn, f: &mut dyn FnMut(&mut [u8]));
     /// Where page `pfn`'s bytes lie for as long as it is allocated (a
@@ -301,6 +305,11 @@ pub struct Object {
     /// A device's memory (`OBJT_DEVICE`): its pages are the device's,
     /// never allocated or freed.
     device: Option<Device>,
+    /// How the pages of an object that is not a device's are mapped
+    /// (`MemAttr` as a number: 0 write-back, 1 write-combining): set once,
+    /// before the first page, for a graphics buffer the engines read
+    /// without snooping the processor's caches.
+    attr: core::sync::atomic::AtomicU8,
     /// Bytes of shared mappings that may be made writable
     /// (`writemappings`), which a write seal must wait out.
     writemappings: AtomicU64,
@@ -327,6 +336,9 @@ pub enum MemAttr {
 #[derive(Clone, Copy, Debug)]
 struct Device {
     base: Pfn,
+    /// The first object page index that is the device's (its page `first`
+    /// is `base`).
+    first: PageIndex,
     pages: PageIndex,
     attr: MemAttr,
 }
@@ -870,6 +882,7 @@ impl Object {
             ra_window: AtomicU64::new(1),
             ahead: PreemptLock::new(VecDeque::new()),
             device: None,
+            attr: core::sync::atomic::AtomicU8::new(0),
         })
     }
 
@@ -886,7 +899,35 @@ impl Object {
         let o = Self::anonymous(ops);
         o.set_shared();
         let mut o = Arc::into_inner(o).unwrap_or_else(|| unreachable!("a new object"));
-        o.device = Some(Device { base, pages, attr });
+        o.device = Some(Device {
+            base,
+            first: 0,
+            pages,
+            attr,
+        });
+        Arc::new(o)
+    }
+
+    /// A device's memory whose pages are the object's pages `first` to
+    /// `first + pages - 1` (a graphics buffer, which sits at a fake file
+    /// offset): page `first` is physical page `base`.
+    #[must_use]
+    pub fn device_at(
+        ops: &'static dyn PageOps,
+        base: Pfn,
+        first: PageIndex,
+        pages: PageIndex,
+        attr: MemAttr,
+    ) -> Arc<Self> {
+        let o = Self::anonymous(ops);
+        o.set_shared();
+        let mut o = Arc::into_inner(o).unwrap_or_else(|| unreachable!("a new object"));
+        o.device = Some(Device {
+            base,
+            first,
+            pages,
+            attr,
+        });
         Arc::new(o)
     }
 
@@ -899,13 +940,34 @@ impl Object {
     /// How its pages are mapped.
     #[must_use]
     pub fn memattr(&self) -> MemAttr {
-        self.device.map_or(MemAttr::WriteBack, |d| d.attr)
+        match self.device {
+            Some(d) => d.attr,
+            None => match self.attr.load(Ordering::Acquire) {
+                1 => MemAttr::WriteCombining,
+                _ => MemAttr::WriteBack,
+            },
+        }
+    }
+
+    /// Maps the pages of this (anonymous) object write-combined, and makes
+    /// each page uncached in the processor's caches when it is made
+    /// ([`PageOps::uncache`]). Before any page exists.
+    pub fn set_write_combining(&self) {
+        self.attr.store(1, Ordering::Release);
+    }
+
+    /// Takes page `pfn` of this object out of the processor's caches, and
+    /// writes back what they held: before another reader of the page than
+    /// the processor's write-combined mappings looks at it, or after the
+    /// processor wrote it through the direct map.
+    pub fn uncache_page(&self, pfn: Pfn) {
+        self.pages_ops.uncache(pfn);
     }
 
     /// A device object's page `index`.
     fn device_page(d: Device, index: PageIndex) -> Result<Pfn, LookupError> {
-        if index < d.pages {
-            Ok(Pfn(d.base.0 + index))
+        if index >= d.first && index - d.first < d.pages {
+            Ok(Pfn(d.base.0 + (index - d.first)))
         } else {
             Err(LookupError::PastEnd)
         }
@@ -928,6 +990,7 @@ impl Object {
             ra_window: AtomicU64::new(1),
             ahead: PreemptLock::new(VecDeque::new()),
             device: None,
+            attr: core::sync::atomic::AtomicU8::new(0),
         })
     }
 
@@ -952,6 +1015,7 @@ impl Object {
             ra_window: AtomicU64::new(1),
             ahead: PreemptLock::new(VecDeque::new()),
             device: None,
+            attr: core::sync::atomic::AtomicU8::new(0),
         });
         let mut list = PAGED.lock();
         if list.len() >= 64 && list.len().is_power_of_two() {
@@ -1423,6 +1487,11 @@ impl Object {
             Some(from) => self.pages_ops.alloc_copy(from)?,
             None => self.pages_ops.alloc_zeroed()?,
         };
+        if self.attr.load(Ordering::Acquire) != 0 {
+            // Zeroed through the direct map, in the caches: out before the
+            // page is mapped write-combined.
+            self.pages_ops.uncache(new);
+        }
         let mut inner = self.inner.lock();
         if let Some(&Page { pfn, .. }) = inner.pages.get(&index) {
             drop(inner);
@@ -1542,6 +1611,9 @@ impl Object {
     /// pager, or (for an anonymous object, or past the pager's data) a new
     /// zeroed page.
     pub fn page_for_write(&self, index: PageIndex) -> Result<Pfn, LookupError> {
+        if let Some(d) = self.device {
+            return Self::device_page(d, index);
+        }
         self.forget_synced(index);
         match self.page_or_fill(index, true) {
             Ok(Some(pfn)) => Ok(pfn),
@@ -1555,6 +1627,9 @@ impl Object {
     /// Page `index` of this object to overwrite or to start from zeros:
     /// held, or a new zeroed page, never read from the pager.
     pub fn page_for_overwrite(&self, index: PageIndex) -> Result<Pfn, LookupError> {
+        if let Some(d) = self.device {
+            return Self::device_page(d, index);
+        }
         if let Some(pfn) = self.page_here(index) {
             self.forget_synced(index);
             return Ok(pfn);

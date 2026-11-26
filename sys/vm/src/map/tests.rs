@@ -991,6 +991,24 @@ fn reclaiming_looks_at_each_page_once() {
 }
 
 #[test]
+fn a_device_object_at_a_file_offset_has_its_pages_there_and_none_before() {
+    use crate::object::MemAttr;
+    let pages = Pages::new();
+    // A graphics buffer: 4 pages at fake file offset 0x10_0000, physical
+    // pages from 5000.
+    let dev = Object::device_at(pages, Pfn(5000), 0x10_0000, 4, MemAttr::WriteCombining);
+    assert!(dev.is_device());
+    assert_eq!(dev.page_for_write(0x10_0000), Ok(Pfn(5000)));
+    assert_eq!(dev.page_for_write(0x10_0003), Ok(Pfn(5003)));
+    assert_eq!(dev.page_for_overwrite(0x10_0002), Ok(Pfn(5002)));
+    assert_eq!(dev.resident_page(0x10_0001), Some(Pfn(5001)));
+    // Before it and past it: not the device's.
+    assert!(dev.page_for_write(0xf_ffff).is_err());
+    assert!(dev.page_for_write(0x10_0004).is_err());
+    assert_eq!(dev.resident_page(0), None);
+}
+
+#[test]
 fn a_device_mapping_reaches_the_device_pages_write_combining() {
     use crate::object::MemAttr;
     let pages = Pages::new();

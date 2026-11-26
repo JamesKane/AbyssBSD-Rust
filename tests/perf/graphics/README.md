@@ -13,7 +13,7 @@ binaries from the same disk.
   the render node: `glmark2-es2-gbm --off-screen --winsys-options=drm-device=/dev/dri/renderD129`, three
   full runs per side. A run takes about five minutes.
 - `compare-glmark2.py`: per test median of each side, the ratios and their geometric mean.
-- `results/`: the raw output: `fbsd-*` (FreeBSD), `abyss-start-*` (AbyssBSD before the work of 16.15),
+- `results/`: the raw output: `fbsd-*` (FreeBSD), `abyss-start-*` (AbyssBSD before the work of 16.15), `abyss-wc-*` (with write-combined buffers),
   `abyss-*` (after).
 
 ## FreeBSD side

@@ -61,6 +61,9 @@ impl vm::object::PageOps for HeapPages {
             "double free"
         );
     }
+    fn uncache(&self, _pfn: vm::Pfn) {
+        UNCACHED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
     fn access(&self, pfn: vm::Pfn, f: &mut dyn FnMut(&mut [u8])) {
         f(&mut self
             .pages
@@ -70,6 +73,9 @@ impl vm::object::PageOps for HeapPages {
             .expect("freed page")[..]);
     }
 }
+
+/// How many times a page was taken out of the caches.
+static UNCACHED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// "User memory": addresses are offsets into one arena, from `BASE`.
 struct Arena(Mutex<Vec<u8>>);
@@ -2061,7 +2067,7 @@ fn a_coherent_buffer_needs_no_cleaning() {
 
 #[test]
 fn placements_not_built_yet_are_refused_with_a_clear_error() {
-    // A discrete card's own memory, and uncached or write-combined pages,
+    // A discrete card's own memory, a contiguous run and uncached pages
     // need virtual memory support that is not there.
     for p in [
         Placement {
@@ -2070,10 +2076,6 @@ fn placements_not_built_yet_are_refused_with_a_clear_error() {
         },
         Placement {
             backing: Backing::Contiguous,
-            ..Placement::SYSTEM_COHERENT
-        },
-        Placement {
-            cache: CacheMode::WriteCombine,
             ..Placement::SYSTEM_COHERENT
         },
         Placement {
@@ -2091,6 +2093,25 @@ fn placements_not_built_yet_are_refused_with_a_clear_error() {
         );
         c.unregister(&s());
     }
+}
+
+#[test]
+fn a_write_combined_buffer_is_mapped_write_combined_and_its_pages_are_uncached_when_made() {
+    let (c, _) = card_placed(Placement {
+        cache: CacheMode::WriteCombine,
+        ..Placement::SYSTEM_COHERENT
+    });
+    let f = open(&c);
+    let mut d = create_dumb_arg(64, 64, 32);
+    call(&f, DRM_IOCTL_MODE_CREATE_DUMB, &mut d).unwrap();
+    let gem = f.gem(1).unwrap();
+    let (object, _) = gem.mapping(0, 1).unwrap();
+    assert_eq!(object.memattr(), vm::object::MemAttr::WriteCombining);
+    // The page is made when first reached, and gets the cache treatment.
+    let before = UNCACHED.load(core::sync::atomic::Ordering::Relaxed);
+    gem.with_page(0, &mut |p| p[0] = 1).unwrap();
+    assert!(UNCACHED.load(core::sync::atomic::Ordering::Relaxed) > before);
+    c.unregister(&s());
 }
 
 // ---- authentication and leases ----

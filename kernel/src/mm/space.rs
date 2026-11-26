@@ -98,6 +98,17 @@ impl PageOps for KernelPages {
         Some(pfn)
     }
 
+    fn uncache(&self, pfn: Pfn) {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: a page of RAM, reached through the DMAP; the lines are
+        // written back and dropped.
+        unsafe {
+            crate::arch::cpu::flush_cache_range(Self::page(pfn), PAGE_BYTES);
+        }
+        #[cfg(target_arch = "aarch64")]
+        crate::arch::cache::clean_to_poc(Self::page(pfn) as usize, PAGE_BYTES);
+    }
+
     fn alloc_copy(&self, from: Pfn) -> Option<Pfn> {
         let pa = user_page()?;
         OBJECT_PAGES.add(1, core::sync::atomic::Ordering::Relaxed);

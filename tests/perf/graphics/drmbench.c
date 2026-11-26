@@ -5,6 +5,8 @@
  *
  *   drm.bo.create4k     create, map, touch, unmap and close a 4 KiB buffer in system memory
  *   drm.bo.create1m     the same for 1 MiB
+ *   drm.bo.create1m.vram  the same for a buffer asked for in the device's own memory (domain video memory,
+ *                       "always valid"); a kernel with no such memory makes it in system memory
  *   drm.submit.<ring>   a small job submitted and waited for, one at a time (round trip)
  *   drm.submit.<ring>.batch  1000 small jobs submitted, then the last waited for, per job
  *   drm.submit.<ring>.cpu  40 jobs submitted back to back, the time of the submit calls only
@@ -61,12 +63,14 @@ static void report(const char *name, double *v, int n)
 	fflush(stdout);
 }
 
-static uint32_t bo_create(uint64_t size)
+static uint32_t bo_create_in(uint64_t size, uint64_t domains, uint64_t flags)
 {
-	struct gem_create g = { .size = size, .align = 4096, .domains = 2 };
+	struct gem_create g = { .size = size, .align = 4096, .domains = domains, .flags = flags };
 	if (ioctl(fd, CMD(0x00, struct gem_create), &g) < 0) { perror("GEM_CREATE"); exit(1); }
 	return (uint32_t)g.size; /* the handle is the first dword of the answer */
 }
+
+static uint32_t bo_create(uint64_t size) { return bo_create_in(size, 2, 0); }
 
 static void *bo_map(uint32_t h, uint64_t size)
 {
@@ -111,13 +115,14 @@ int main(int argc, char **argv)
 	double *v = calloc((size_t)rounds, sizeof *v);
 
 	/* Buffers: create, map, touch every page, unmap, close. */
-	static const struct { const char *name; uint64_t size; int n; } bos[] = {
-		{ "drm.bo.create4k", 4096, 2000 }, { "drm.bo.create1m", 1 << 20, 200 } };
-	for (unsigned k = 0; k < 2; k++) {
+	static const struct { const char *name; uint64_t size; int n; uint64_t domains, flags; } bos[] = {
+		{ "drm.bo.create4k", 4096, 2000, 2, 0 }, { "drm.bo.create1m", 1 << 20, 200, 2, 0 },
+		{ "drm.bo.create1m.vram", 1 << 20, 200, 4, 1 << 6 } };
+	for (unsigned k = 0; k < 3; k++) {
 		for (int r = 0; r < rounds; r++) {
 			uint64_t t0 = now();
 			for (int i = 0; i < bos[k].n; i++) {
-				uint32_t h = bo_create(bos[k].size);
+				uint32_t h = bo_create_in(bos[k].size, bos[k].domains, bos[k].flags);
 				volatile char *p = bo_map(h, bos[k].size);
 				for (uint64_t o = 0; o < bos[k].size; o += 4096) p[o] = 1;
 				munmap((void *)p, bos[k].size);
