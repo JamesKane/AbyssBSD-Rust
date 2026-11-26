@@ -292,6 +292,24 @@ impl Driver for HwpstateAmd {
                 "hwpstate_amd{unit}: CPU{cpu}: CPPC_CAPABILITY_1 not read (fault or previous errors)"
             ));
         }
+        // Benchmark boots: `abyss.bench.pin_perf=N` holds every core at
+        // performance level N (below the boost range), so a comparison with
+        // stock FreeBSD's fixed P-state runs at one clock.
+        if let Some(n) =
+            crate::boot::value("abyss.bench.pin_perf").and_then(|v| v.parse::<u64>().ok())
+        {
+            let c = Arc::clone(&core);
+            let done = on_cpu(cpu, move || {
+                set_field(&c, request::MAX, n)
+                    .and_then(|()| set_field(&c, request::DESIRED, n))
+                    .and_then(|()| set_field(&c, request::MIN, n))
+            });
+            if done.is_err() {
+                log(format_args!(
+                    "hwpstate_amd{unit}: CPU{cpu}: could not pin performance to {n}"
+                ));
+            }
+        }
         CORES.lock().push(Arc::clone(&core));
         Ok(Self {
             core,

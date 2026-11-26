@@ -21,6 +21,10 @@
 # `cargo xtask perf --platform x870e --dir WORKDIR` makes the report.
 # Rerun with the same WORKDIR to resume: runs with a complete log are kept.
 #
+# With P2_PIN_MHZ=3000 (and P2_PIN_PERF=88, CPPC's level for 3000 MHz on
+# this part) both sides run at that fixed clock, below the boost range, so
+# the comparison is not between two different boost behaviors.
+#
 # Usage: p2-x870e.sh WORKDIR RUNS
 set -u
 S=${1:?usage: p2-x870e.sh WORKDIR RUNS}
@@ -101,9 +105,9 @@ for run in $(seq 0 $((RUNS - 1))); do
 		log "run $((run + 1))/$RUNS: $side"
 		if [ $side = freebsd ]; then
 			echo "kbench class workers $CPUS" >> "$out.tmp"
-			T=7200 fb "sh /root/perf/kbench-run.sh $CPUS /root/perf/kbench.ko" | tr -d '\r' | sed 's/^kbench env /kbench env side=freebsd /' >> "$out.tmp"
+			T=7200 fb "P2_PIN_MHZ=${P2_PIN_MHZ:-} sh /root/perf/kbench-run.sh $CPUS /root/perf/kbench.ko" | tr -d '\r' | sed 's/^kbench env /kbench env side=freebsd /' >> "$out.tmp"
 		else
-			fb "mount -t msdosfs /dev/gpt/fbsdefi /mnt && printf %s 'boot_multicons=YES boot_serial=YES abyss.bench=p2 abyss.bench.reboot abyss.bench.cpus=$CPUS' > /mnt/EFI/ABYSS/CMDLINE; r=\$?; umount /mnt; exit \$r" ||
+			fb "mount -t msdosfs /dev/gpt/fbsdefi /mnt && printf %s 'boot_multicons=YES boot_serial=YES abyss.bench=p2 abyss.bench.reboot abyss.bench.cpus=$CPUS${P2_PIN_PERF:+ abyss.bench.pin_perf=$P2_PIN_PERF}' > /mnt/EFI/ABYSS/CMDLINE; r=\$?; umount /mnt; exit \$r" ||
 			    { log "could not set the bench command line"; exit 1; }
 			ensure_bench_entry || { log "no bench boot entry"; exit 1; }
 			fb 'efibootmgr -n -b 0004 >/dev/null && shutdown -r now' > /dev/null

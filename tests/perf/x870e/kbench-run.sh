@@ -17,7 +17,10 @@ SUITE=${3:-p2}
 if pgrep -x powerd >/dev/null; then
 	service powerd onestop >/dev/null 2>&1 || kill "$(cat /var/run/powerd.pid)"
 fi
-top=$(sysctl -n dev.cpu.0.freq_levels | cut -d/ -f1)
+# P2_PIN_MHZ pins every CPU at that level (the fixed 3000 MHz P-state,
+# which has no boost) instead of the top one; AbyssBSD's side pins its
+# cores to the same clock (p2-x870e.sh, abyss.bench.pin_perf).
+top=$(sysctl -n dev.cpu.0.freq_levels | tr ' ' '\n' | cut -d/ -f1 | { if [ -n "${P2_PIN_MHZ:-}" ]; then grep -x "$P2_PIN_MHZ"; else head -1; fi; })
 for c in $(jot "$(sysctl -n hw.ncpu)" 0); do
 	sysctl -q dev.cpu.$c.freq=$top >/dev/null 2>&1 || true
 done
