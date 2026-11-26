@@ -510,6 +510,12 @@ impl TxRing {
     /// The oldest frame the controller has finished: its first
     /// descriptor's index (the caller frees what it held there) and
     /// whether it went out without error (`rge_txeof`).
+    /// The first descriptor of the oldest frame in flight, if any.
+    #[must_use]
+    pub fn oldest(&self) -> Option<usize> {
+        self.in_flight.front().map(|f| f.0)
+    }
+
     pub fn reap(&mut self, m: &impl Words, b: &impl Barriers) -> Option<(usize, bool)> {
         let &(first, last) = self.in_flight.front()?;
         let cmd = m.get(last, tx::CMDSTS);

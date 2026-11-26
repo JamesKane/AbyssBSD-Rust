@@ -39,6 +39,59 @@ pub fn output(
     m: Packet,
     now: u64,
 ) -> Result<(), Errno> {
+    output_in(n, ifindex, family, nexthop, is_gw, m, now, false).map(|_| ())
+}
+
+/// A finished Ethernet frame to send once the lock is let go: what the
+/// guard's release would send from the frame queue, without the queue
+/// (the queue is for a frame that must wait for the release's other work).
+pub struct Direct {
+    pub link: alloc::sync::Arc<dyn crate::link::Link>,
+    pub flags: u32,
+    pub m: Packet,
+}
+
+impl core::fmt::Debug for Direct {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Direct")
+            .field("flags", &self.flags)
+            .field("len", &self.m.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// [`output`] for a caller that sends the frame itself after letting go of
+/// the lock: an Ethernet frame that needs nothing from the release (no
+/// bridge, no VLAN priority) comes back as [`Direct`]; any other goes in
+/// the frame queue as usual, and `None` comes back.
+///
+/// # Errors
+///
+/// As [`output`].
+#[allow(clippy::too_many_arguments)]
+pub fn output_direct(
+    n: &mut Net,
+    ifindex: u16,
+    family: Family,
+    nexthop: &In6,
+    is_gw: bool,
+    m: Packet,
+    now: u64,
+) -> Result<Option<Direct>, Errno> {
+    output_in(n, ifindex, family, nexthop, is_gw, m, now, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn output_in(
+    n: &mut Net,
+    ifindex: u16,
+    family: Family,
+    nexthop: &In6,
+    is_gw: bool,
+    m: Packet,
+    now: u64,
+    direct: bool,
+) -> Result<Option<Direct>, Errno> {
     let ifp = n.by_index(ifindex).ok_or(Errno::ENXIO)?;
     if ifp.flags & (iff::UP | iff::RUNNING) != iff::UP | iff::RUNNING {
         return Err(Errno::ENETDOWN);
@@ -47,7 +100,7 @@ pub fn output(
     match ty {
         IFT_LOOP => {
             n.txq.push((ifindex, Some(family), m));
-            Ok(())
+            Ok(None)
         }
         // A point-to-point link with no link layer (`tunoutput`): the
         // packet as it is, with its family.
@@ -56,7 +109,7 @@ pub fn output(
                 l.ready()?;
             }
             n.txq.push((ifindex, Some(family), m));
-            Ok(())
+            Ok(None)
         }
         t if ether::is_ether(t) => {
             let src = lladdr.ok_or(Errno::EAFNOSUPPORT)?;
@@ -66,16 +119,16 @@ pub fn output(
                     match arp::resolve(n, ifindex, is_gw, &mut slot, v4_of(nexthop), now)? {
                         Resolved::Addr(a) => a,
                         // `ether_output` turns `EWOULDBLOCK` into success.
-                        Resolved::Held => return Ok(()),
+                        Resolved::Held => return Ok(None),
                     }
                 }
                 Family::Inet6 => match resolve6(n, ifindex, nexthop, &mut slot)? {
                     Resolved::Addr(a) => a,
-                    Resolved::Held => return Ok(()),
+                    Resolved::Held => return Ok(None),
                 },
             };
             let Some(mut m) = slot else {
-                return Ok(());
+                return Ok(None);
             };
             let ty = match family {
                 Family::Inet => ether::ty::IP,
@@ -99,8 +152,21 @@ pub fn output(
                 n.isrq.push((proto, c));
             }
             ether::encap(&mut m, &Header { dst, src, ty })?;
+            if direct
+                && m.hdr.flags & flags::VLANTAG == 0
+                && let Some(i) = n.by_index(ifindex)
+                && i.bridge.is_none()
+                && i.pcp == crate::ifnet::PCP_NONE
+                && let Some(link) = i.link.0.clone()
+            {
+                return Ok(Some(Direct {
+                    link,
+                    flags: i.flags,
+                    m,
+                }));
+            }
             n.txq.push((ifindex, None, m));
-            Ok(())
+            Ok(None)
         }
         _ => Err(Errno::EAFNOSUPPORT),
     }

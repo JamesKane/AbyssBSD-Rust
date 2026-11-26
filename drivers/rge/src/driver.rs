@@ -42,7 +42,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use abi::net::{ifcap, iff};
 use bus::{
@@ -77,6 +77,10 @@ const ETHERMTU: u32 = 1500;
 const MAX_FRAME: usize = r::JUMBO_FRAMELEN as usize - ring::CRC_LEN;
 /// The tick's period (`callout_reset(..., hz, rge_tick, sc)`).
 const TICK_NS: u64 = 1_000_000_000;
+/// How often the doorbell watch looks while frames are in flight, and how
+/// old the oldest may be before it rings again. A frame takes some tens of
+/// microseconds to go; one older than this has been left in the ring.
+const WATCH_NS: u64 = 1_000_000;
 /// The longest wait between attempts to reinitialize a chip that failed
 /// to: 2^6 = 64 ticks.
 const RETRY_SHIFT: u64 = 6;
@@ -196,6 +200,9 @@ struct Tx {
     sent: Vec<Option<Mapped<Vec<u8>, dir::ToDevice>>>,
     /// `sc_watchdog`.
     wd: TxWatchdog,
+    /// When each in-flight frame was pushed (the clock's own ticks), by
+    /// its first descriptor, for the doorbell watch.
+    stamp: Vec<u64>,
 }
 
 impl Tx {
@@ -254,6 +261,14 @@ pub struct Shared {
     core: Mutex<Core>,
     /// Wakes the tick thread to stop.
     wake: WaitQueue,
+    /// Frames may be in flight that the controller has not been told of
+    /// (or has missed): the tick thread looks every [`WATCH_NS`].
+    watch: AtomicBool,
+    /// Frames the watch had to ring for again.
+    rekicks: AtomicU64,
+    /// The oldest frame in flight at the watch's last look (its first
+    /// descriptor and push time), to tell a stuck frame from a busy ring.
+    seen: SpinLock<Option<(usize, u64)>>,
 }
 
 impl core::fmt::Debug for Shared {
@@ -445,6 +460,50 @@ impl Shared {
         }
     }
 
+    /// A frame was queued and the doorbell rung: the tick thread is to
+    /// look at it shortly (a doorbell written as the controller finishes
+    /// polling its ring can be lost, and the frame then waits for the
+    /// next one: a connection attempt's one SYN, a second).
+    fn arm_watch(&self) {
+        // Relaxed: the flag is a hint, and the lock held by the caller
+        // orders the frame itself.
+        if !self.watch.swap(true, Ordering::Relaxed) {
+            self.wake.wake_all();
+        }
+    }
+
+    /// The doorbell watch: rings again for a frame older than
+    /// [`WATCH_NS`], and stands down with the ring empty.
+    fn watch_doorbell(&self, ticks_per_ns: f64) {
+        let mut tx = self.tx.lock();
+        tx.reap(&self.port);
+        let Some(first) = tx.ring.oldest() else {
+            // A sender queuing a frame sets the flag again under this
+            // lock.
+            self.watch.store(false, Ordering::Relaxed);
+            *self.seen.lock() = None;
+            return;
+        };
+        // The same frame as at the last look is one nothing has taken
+        // since; a busy ring's oldest frame changes.
+        let me = (first, tx.stamp[first]);
+        let stuck = self.seen.lock().replace(me) == Some(me);
+        #[allow(clippy::cast_precision_loss, reason = "an age in ticks")]
+        let age_ns = sched::now().saturating_sub(tx.stamp[first]) as f64 / ticks_per_ns;
+        #[allow(clippy::cast_precision_loss, reason = "a period in nanoseconds")]
+        if stuck && age_ns > WATCH_NS as f64 {
+            self.chip.kick_tx();
+            let n = self.rekicks.fetch_add(1, Ordering::Relaxed) + 1;
+            if n <= 8 {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let ms = (age_ns / 1e6) as u64;
+                self.log(format_args!(
+                    "transmit doorbell rung again for a frame {ms} ms old ({n} so far)"
+                ));
+            }
+        }
+    }
+
     /// The once-a-second tick (`rge_tick`): retries a failed
     /// reinitialization, checks the controller still answers, follows
     /// the link, reaps sent frames and counts the watchdog down, and
@@ -625,10 +684,13 @@ impl Shared {
             u32::try_from(padded).unwrap_or(u32::MAX),
         );
         let Tx { ring, descs, .. } = &mut *tx;
-        ring.push(descs, &ring::Hal, &[seg], ext, 0)
+        let first = ring
+            .push(descs, &ring::Hal, &[seg], ext, 0)
             .map_err(|_| NoBufs)?;
+        tx.stamp[first] = sched::now();
         tx.wd.queued();
         self.chip.kick_tx();
+        self.arm_watch();
         Ok(())
     }
 
@@ -691,8 +753,10 @@ impl Shared {
             return Err(NoBufs);
         };
         tx.sent[first] = Some(data);
+        tx.stamp[first] = sched::now();
         tx.wd.queued();
         self.chip.kick_tx();
+        self.arm_watch();
         Ok(())
     }
 
@@ -892,6 +956,7 @@ impl Driver for Rge {
             slots: tx_slots,
             sent: (0..DESCS).map(|_| None).collect(),
             wd: TxWatchdog::default(),
+            stamp: alloc::vec![0u64; ring::DESCS],
         };
         let (rx_bus, tx_bus) = (rx.descs.0.bus_addr(), tx.descs.0.bus_addr());
         // `rge_init_locked`: from a stopped chip, with fresh rings, as a
@@ -944,6 +1009,9 @@ impl Driver for Rge {
                     },
                 ),
                 wake: WaitQueue::new(),
+                watch: AtomicBool::new(false),
+                rekicks: AtomicU64::new(0),
+                seen: SpinLock::new(None),
             }),
             line: SpinLock::new(Some(line)),
             ticker: SpinLock::new(None),
@@ -969,12 +1037,37 @@ impl Driver for Rge {
             .priority(sched::Priority::KERNEL)
             .spawn(move |s| {
                 let stopped = || tick.state() == State::Stopped;
+                let mut last_tick = sched::now_ns();
+                // The clock's ticks in a nanosecond, from two readings
+                // (the platform's rate is not asked of a driver).
+                let (t0, n0) = (sched::now(), sched::now_ns());
+                let mut ticks_per_ns = 1.0;
                 loop {
-                    bus::manager().wait_timeout(s, &tick.wake, &mut { stopped }, TICK_NS);
+                    let armed = tick.watch.load(Ordering::Relaxed);
+                    let period = if armed { WATCH_NS } else { TICK_NS };
+                    // A sleep planned for the tick ends when the watch is
+                    // armed: a wake between the decision and the sleep
+                    // would otherwise be lost.
+                    let mut done = || stopped() || (!armed && tick.watch.load(Ordering::Relaxed));
+                    bus::manager().wait_timeout(s, &tick.wake, &mut done, period);
                     if stopped() {
                         break;
                     }
-                    tick.tick(s);
+                    let now = sched::now_ns();
+                    if now.saturating_sub(n0) > 1_000_000 {
+                        #[allow(clippy::cast_precision_loss, reason = "a rate")]
+                        {
+                            ticks_per_ns =
+                                sched::now().saturating_sub(t0) as f64 / (now - n0) as f64;
+                        }
+                    }
+                    if tick.watch.load(Ordering::Relaxed) {
+                        tick.watch_doorbell(ticks_per_ns);
+                    }
+                    if now.saturating_sub(last_tick) >= TICK_NS {
+                        last_tick = now;
+                        tick.tick(s);
+                    }
                 }
             })
             .map_err(|_| AttachError::NoMemory)?;

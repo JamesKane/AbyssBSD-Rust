@@ -656,17 +656,28 @@ fn send(
     {
         return net::ether::output_frame(vnet, i.index, link, i.flags, Some(Family::Inet), m);
     }
-    let mut guard = vnet.net.lock();
-    // The way out changes only the frame queues and the link-layer table.
-    net::output::output(
-        guard.data_path(),
-        i.index,
-        Family::Inet,
-        nexthop,
-        is_gw,
-        m,
-        net::uptime(),
-    )
+    // The way out changes only the frame queues and the link-layer table;
+    // an Ethernet frame comes out to be sent with the lock let go, not by
+    // the guard's release from the queue.
+    let direct = {
+        let mut guard = vnet.net.lock();
+        net::output::output_direct(
+            guard.data_path(),
+            i.index,
+            Family::Inet,
+            nexthop,
+            is_gw,
+            m,
+            net::uptime(),
+        )?
+    };
+    // As when the guard's release sent it: the device's refusal (a full
+    // ring) is a lost frame, which TCP recovers from, not an error for
+    // the sender (whose `ENOBUFS` handling waits for a timer).
+    if let Some(d) = direct {
+        let _ = net::ether::output_frame(vnet, i.index, &d.link, d.flags, None, d.m);
+    }
+    Ok(())
 }
 
 /// `in_delayed_cksum`: the transport checksum the device would have
