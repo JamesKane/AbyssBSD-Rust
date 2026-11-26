@@ -1142,8 +1142,8 @@ and of M-G.6.
 
 | | start | now | FreeBSD |
 |---|---|---|---|
-| glmark2 score, three full runs | 9,913 / 9,934 / 9,931 | 11,864 / 11,854 / 11,839 | 10,796 / 10,729 / 10,938 |
-| geometric mean of the 32 tests' frames per second against FreeBSD | 0.928 | **1.077** | 1 |
+| glmark2 score, three full runs | 9,913 / 9,934 / 9,931 | 11,879 / 11,872 / 11,873 | 10,796 / 10,729 / 10,938 |
+| geometric mean of the 32 tests' frames per second against FreeBSD | 0.928 | **1.082** | 1 |
 | `drm.submit.gfx`, submit and wait (ns) | 13,077 | 7,580 | 7,570 |
 | `drm.submit.gfx.batch`, per job of 1,000 queued (ns) | 7,900 | 3,430 | 7,700 |
 | `drm.submit.compute` (ns) | 50,029,499 | 8,096 | 7,575 |
@@ -1197,8 +1197,20 @@ one word, more when the engine is busy) was behind most of it:
   reset; a new mapping into unused space needs none). Measured by comparing against the FreeBSD run, with the
   clocks, memory placement and page-table setup ruled out first.
 
-Where AbyssBSD is still behind (ratio of frames per second): `refract` 0.93, `shadow` 0.97, `terrain` 0.98,
-`buffer` (map update) 0.98. Open, in this order:
+- **Large pages for the translation cache.** A buffer's pages were scattered single frames (268 of 37,251 mapped
+  pages happened to be aligned runs), each page table entry its own cache entry. A buffer's pages are now made, when
+  the client maps it, as the largest aligned runs of consecutive frames up to 2 MiB (`Object::populate_runs`,
+  `PageOps::alloc_block`, `PhysAllocator::alloc_block_as_pages`, each page still freed alone), and the page-table
+  builder gives each run that is aligned in the address space and in memory the entry field `FRAGMENT` = log2 of
+  its pages (`Space::map`; the specification, 05 section 3.3: the cache holds the run as one entry and assumes the
+  frames consecutive, so only a physically contiguous, aligned run may have it). 37,222 of 37,251 pages are in
+  fragments in a glmark2 run. `refract` 882 to 943 fps, `shadow` 8,942 to 9,074 (FreeBSD 947, 9,186), the glmark2
+  mean 11,852 to 11,875. (The 2 MiB entry that needs no page table, `PDE_IS_PTE`, is not used.) Tried and dropped:
+  not waiting for the previous job before the next on the graphics ring (no change); the specification says the
+  reference does not, and relies on the end-of-job cache write-back and the client's own packets.
+
+Where AbyssBSD is still behind (ratio of frames per second): `buffer` (map update) 0.97 and `shadow` 0.99; every
+other test is at or above FreeBSD. Open, in this order:
 
 1. **Render targets in video memory** (`drm-kmod` places the buffers Mesa asks for in video memory in it): the
    pool takes every request for video memory, which needs a shared buffer in video memory to be usable: export
