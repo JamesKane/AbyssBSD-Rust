@@ -896,7 +896,7 @@ pub fn cpu_id() -> CpuId {
 /// (DSB ST).
 pub mod dma {
     #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-    use core::sync::atomic::{Ordering, compiler_fence, fence};
+    use core::sync::atomic::{Ordering, fence};
 
     /// Orders earlier writes to DMA memory before later ones, as a device
     /// sees them: a descriptor's fields before the word that gives it to
@@ -935,9 +935,21 @@ pub mod dma {
         unsafe {
             core::arch::asm!("dsb st", options(nostack, preserves_flags));
         }
-        #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        // SAFETY: a barrier; no memory or register effects. x86 keeps
+        // stores in program order, uncached register writes included, so
+        // what the doorbell needs is that the descriptor stores have left
+        // the store buffer first: `sfence`, which costs a fraction of
+        // `mfence` (FreeBSD's `wmb()` on amd64 is a compiler barrier).
+        unsafe {
+            core::arch::asm!("sfence", options(nostack, preserves_flags));
+        }
+        #[cfg(not(any(
+            all(target_arch = "aarch64", target_os = "none"),
+            all(target_arch = "x86_64", target_os = "none")
+        )))]
         {
-            compiler_fence(Ordering::SeqCst);
+            core::sync::atomic::compiler_fence(Ordering::SeqCst);
             fence(Ordering::SeqCst);
         }
     }

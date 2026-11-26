@@ -542,6 +542,14 @@ stock 15.1. Open:
   a capture on the peer and timers in the driver; the older kernel has the same loss, rarer). The tick
   thread now looks every millisecond while frames are in flight and rings again for one nothing has taken
   (`watch_doorbell`): 10 of 10 runs clean, `tcp.connect.net` 0.935.
+  `udp` needs `udp.tx.small` at about 800 ns (1.14: the other three are 1.00, 0.98 and 0.97); it is at
+  905 (sender-side `iperf3`, 3000 MHz). On the hardware the profile puts about 300 ns of each packet in
+  `rge`'s `tx` spinlock section (the profiler's ticks land after the `sti`): the doorbell is an uncached
+  write. Tried: `sfence` for `mfence` before the doorbell, the watch flag tested before it is swapped,
+  a push count for a clock read: 914 to 906 ns. Taking transmit-complete interrupts away: 937 (slower; the
+  sender must reap), so the interrupt thread is not what holds it. Left: the stack's own small items
+  (`bpf` with the DHCP client's reader, route lookups, the uptime read), and sending without a doorbell
+  for a frame queued behind another (`xmit_more`).
   `fs.ufs.fsx` was 2.5: `ftruncate` zeroed and moved fragments on the disk, synchronously;
   it now clears and carries them in the page cache (`truncate_new`), as FreeBSD's `ffs_truncate` works in
   the buffer cache: 0.75, and `fs.ufs` 0.837. Mapped writes (`msync`) are still twice stock's cost in

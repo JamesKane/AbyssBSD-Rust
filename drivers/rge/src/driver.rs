@@ -200,9 +200,11 @@ struct Tx {
     sent: Vec<Option<Mapped<Vec<u8>, dir::ToDevice>>>,
     /// `sc_watchdog`.
     wd: TxWatchdog,
-    /// When each in-flight frame was pushed (the clock's own ticks), by
-    /// its first descriptor, for the doorbell watch.
+    /// Which push each in-flight frame was, by its first descriptor, for
+    /// the doorbell watch (a count, not a clock read, for every packet).
     stamp: Vec<u64>,
+    /// Frames pushed so far.
+    pushes: u64,
 }
 
 impl Tx {
@@ -267,7 +269,7 @@ pub struct Shared {
     /// Frames the watch had to ring for again.
     rekicks: AtomicU64,
     /// The oldest frame in flight at the watch's last look (its first
-    /// descriptor and push time), to tell a stuck frame from a busy ring.
+    /// descriptor and push count), to tell a stuck frame from a busy ring.
     seen: SpinLock<Option<(usize, u64)>>,
 }
 
@@ -467,14 +469,16 @@ impl Shared {
     fn arm_watch(&self) {
         // Relaxed: the flag is a hint, and the lock held by the caller
         // orders the frame itself.
-        if !self.watch.swap(true, Ordering::Relaxed) {
+        if !self.watch.load(Ordering::Relaxed) && !self.watch.swap(true, Ordering::Relaxed) {
             self.wake.wake_all();
         }
     }
 
-    /// The doorbell watch: rings again for a frame older than
-    /// [`WATCH_NS`], and stands down with the ring empty.
-    fn watch_doorbell(&self, ticks_per_ns: f64) {
+    /// The doorbell watch, once every [`WATCH_NS`] while frames are in
+    /// flight: rings again if the oldest is the one it saw last time (so
+    /// nothing has taken it for that long), and stands down with the ring
+    /// empty.
+    fn watch_doorbell(&self) {
         let mut tx = self.tx.lock();
         tx.reap(&self.port);
         let Some(first) = tx.ring.oldest() else {
@@ -484,21 +488,14 @@ impl Shared {
             *self.seen.lock() = None;
             return;
         };
-        // The same frame as at the last look is one nothing has taken
-        // since; a busy ring's oldest frame changes.
+        // A busy ring's oldest frame changes from look to look.
         let me = (first, tx.stamp[first]);
-        let stuck = self.seen.lock().replace(me) == Some(me);
-        #[allow(clippy::cast_precision_loss, reason = "an age in ticks")]
-        let age_ns = sched::now().saturating_sub(tx.stamp[first]) as f64 / ticks_per_ns;
-        #[allow(clippy::cast_precision_loss, reason = "a period in nanoseconds")]
-        if stuck && age_ns > WATCH_NS as f64 {
+        if self.seen.lock().replace(me) == Some(me) {
             self.chip.kick_tx();
             let n = self.rekicks.fetch_add(1, Ordering::Relaxed) + 1;
             if n <= 8 {
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let ms = (age_ns / 1e6) as u64;
                 self.log(format_args!(
-                    "transmit doorbell rung again for a frame {ms} ms old ({n} so far)"
+                    "transmit doorbell rung again for a frame left in the ring ({n} so far)"
                 ));
             }
         }
@@ -687,7 +684,8 @@ impl Shared {
         let first = ring
             .push(descs, &ring::Hal, &[seg], ext, 0)
             .map_err(|_| NoBufs)?;
-        tx.stamp[first] = sched::now();
+        tx.pushes += 1;
+        tx.stamp[first] = tx.pushes;
         tx.wd.queued();
         self.chip.kick_tx();
         self.arm_watch();
@@ -753,7 +751,8 @@ impl Shared {
             return Err(NoBufs);
         };
         tx.sent[first] = Some(data);
-        tx.stamp[first] = sched::now();
+        tx.pushes += 1;
+        tx.stamp[first] = tx.pushes;
         tx.wd.queued();
         self.chip.kick_tx();
         self.arm_watch();
@@ -957,6 +956,7 @@ impl Driver for Rge {
             sent: (0..DESCS).map(|_| None).collect(),
             wd: TxWatchdog::default(),
             stamp: alloc::vec![0u64; ring::DESCS],
+            pushes: 0,
         };
         let (rx_bus, tx_bus) = (rx.descs.0.bus_addr(), tx.descs.0.bus_addr());
         // `rge_init_locked`: from a stopped chip, with fresh rings, as a
@@ -1038,10 +1038,6 @@ impl Driver for Rge {
             .spawn(move |s| {
                 let stopped = || tick.state() == State::Stopped;
                 let mut last_tick = sched::now_ns();
-                // The clock's ticks in a nanosecond, from two readings
-                // (the platform's rate is not asked of a driver).
-                let (t0, n0) = (sched::now(), sched::now_ns());
-                let mut ticks_per_ns = 1.0;
                 loop {
                     let armed = tick.watch.load(Ordering::Relaxed);
                     let period = if armed { WATCH_NS } else { TICK_NS };
@@ -1054,15 +1050,8 @@ impl Driver for Rge {
                         break;
                     }
                     let now = sched::now_ns();
-                    if now.saturating_sub(n0) > 1_000_000 {
-                        #[allow(clippy::cast_precision_loss, reason = "a rate")]
-                        {
-                            ticks_per_ns =
-                                sched::now().saturating_sub(t0) as f64 / (now - n0) as f64;
-                        }
-                    }
                     if tick.watch.load(Ordering::Relaxed) {
-                        tick.watch_doorbell(ticks_per_ns);
+                        tick.watch_doorbell();
                     }
                     if now.saturating_sub(last_tick) >= TICK_NS {
                         last_tick = now;
