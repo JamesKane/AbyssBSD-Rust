@@ -1240,3 +1240,48 @@ The regression programs (`amdrender`, `amdsync`, `amdprime`, `amdhang`) pass on 
 tests, `cargo xtask check` and the x86_64 and aarch64 boot cases do. The hot-plug interrupt, whose ring is now in
 system memory too, was not exercised again (frame-start and fence entries do come through it).
 
+
+## 17. Panthor on the Sky1 (M-G.5)
+
+The Immortalis-G720 (`CIXH5000`), written from the clean-room specification in
+`~/Projects/OS/chinese-wall/specs/panthor` (section 11 for the Sky1). Nothing permissive covers it:
+FreeBSD's base has no Mali driver, and the board's FreeBSD runs the drm-kmod port, which is not
+read.
+
+**What the board's FreeBSD showed** (`tests/corpus/opi6p/freebsd/dmesg.boot.txt`, 2026-11-09), which
+settles three of the specification's open questions:
+
+- `GPU_ID` = `0xC8700008`: architecture 12.8, revision 7, product major 0, version 0.0, status 8
+  (11 §11.1 left the revision fields open);
+- `L2_FEATURES` `0x8130306`, `TILER_FEATURES` `0x809`, `MEM_FEATURES` `0x301`, `MMU_FEATURES`
+  `0x2830` (48-bit GPU addresses, 40-bit physical), `AS_PRESENT` `0xff` (eight address spaces);
+- `shader_present` `0x550555` (all ten cores, no harvesting), one L2 slice, one tiler (11 §11.9);
+- the `arch12.8` firmware reports **interface 3.13.0** (11 §11.3): below 4.0, so the board uses the
+  older endpoint-request and halt layouts. The driver still keys them on the version it reads;
+- the core clock at 900 MHz.
+
+**Platform facts from the DSDT and IORT** (`tests/corpus/opi6p/freebsd/acpidump-dt.txt`): the GPU has
+no IORT entry, so it is not behind the SMMU (its own MMU walks physical addresses, up to 40 bits);
+`_CCA` is 1, which specification 11 §11.7 says is wrong for sharing with the display, so CPU-side
+memory is treated as non-coherent. Its power resource `GPUP` (`CIXH5001`) only writes the RCSU's
+clock-gating bits; the power domain (SCMI domain 21 on Trusted Firmware's SMC agent, shared memory at
+`0x84380000`, in reserved memory) is the driver's to switch (Sky1 SoC specification 01 §1.3). Clocks
+`gpu_clk_core` (31), `gpu_clk_stacks` (32), `gpu_clk_200M` (272), `gpu_clk_400M` (30); resets
+`gpu_reset` (9) and `gpu_rcsu_reset` (119). The `pbha` data extension's `int_id_override` pairs pack
+into the specification's `SYSC_ALLOC` words.
+
+**Steps.** Each ends on the board, with the boot that first powers the GPU announced beforehand (a
+hang costs a power cycle):
+
+1. `lib/panthor`: the register map, identification, soft reset, L2 power, cache flushes, interrupt
+   blocks, and the Sky1's harvesting and system-cache values, host-tested against a model. **Built.**
+2. `drivers/panthor`: the ACPI glue (two windows, RCSU first; three positional interrupts; clocks;
+   the reset pulse; the SMC call for power domain 21). Exit: `panthor0` attaches with FreeBSD's
+   description and reports the identification above.
+3. Address space 0, the firmware image (`arm/mali/arch12.8/mali_csffw.bin`, installed on the
+   board, never committed), and the MCU boot. Exit: interface 3.13.0 read back.
+4. The global, group and stream interfaces; the scheduler; tiler heaps; buffer objects.
+5. The render node's ioctls, then Mesa's panvk and panfrost from the 15.1 packages. Before this
+   step: which Mesa the packages carry and whether it has the CSF drivers, how it finds a platform
+   render node on FreeBSD (`hw.dri` under the board's FreeBSD), and the display name it pairs
+   with (§15 question 5).
