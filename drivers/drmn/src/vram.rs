@@ -11,9 +11,11 @@ use sync::SpinLock;
 
 /// Where the pool starts and ends in video memory, in bytes: after the
 /// driver's own areas (the last, the fence pages, end below 200 MiB) and
-/// before the security processor's trusted memory zone (480 MiB).
+/// at the end of the window the processor has onto video memory (the card's
+/// first BAR is 256 MiB; the security processor's trusted memory zone is at
+/// 480 MiB, past it).
 pub(crate) const POOL_START: u64 = 224 << 20;
-pub(crate) const POOL_END: u64 = 472 << 20;
+pub(crate) const POOL_END: u64 = 256 << 20;
 
 const PAGE: u64 = 4096;
 

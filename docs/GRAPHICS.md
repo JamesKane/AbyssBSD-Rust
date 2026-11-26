@@ -1179,7 +1179,7 @@ one word, more when the engine is busy) was behind most of it:
   high-poly` went from 6,904 to 9,080 frames per second (FreeBSD 8,717). A first attempt that cleared the
   snoop bit of every large buffer with the processor's mappings still write-back made the engines read stale
   command buffers: the two sides have to change together.
-- **A pool of video memory for buffers** (`drivers/drmn/src/vram.rs`: 248 MiB, from 224 to 472 MiB of the 512,
+- **A pool of video memory for buffers** (`drivers/drmn/src/vram.rs`: 32 MiB, from 224 to 256 MiB of the 512,
   first fit; `Object::device_at`, `Gem::new_device`): a buffer asked for in video memory *and* marked local
   (`AMDGPU_GEM_CREATE_VM_ALWAYS_VALID`, not shared) lives there, mapped write-combined for the processor,
   cleared when made, addressed by the engines as video memory, not exportable (`EOPNOTSUPP`) and not scanned
@@ -1190,12 +1190,16 @@ one word, more when the engine is busy) was behind most of it:
 Where AbyssBSD is still behind (ratio of frames per second): `shadow` 0.88, `refract` 0.92, `desktop shadow`
 0.94, `buffer` (map update) 0.95. The first two render to textures. Open, in this order:
 
-1. **Render targets in video memory** (`drm-kmod` places the buffers Mesa asks for in video memory in it): the
-   pool takes every request for video memory, which needs a shared buffer in video memory to be usable: export
-   as a dma-buf (the importer maps it as video memory too, works on the same device), mapping by the processor
-   (write-combined, works), and scan-out straight from video memory (the display reads it as its own memory; the
-   card's flip takes a video memory address) or a copy by reading it back (`Gem::with_page` refuses a device
-   buffer now).
+1. **Render targets in video memory: tried, no effect.** The pool (`vram.rs`) is 32 MiB, not the 248 first
+   thought: the processor's window onto video memory (BAR 0) is 256 MiB, the driver's own structures take the
+   first 224, and a buffer past the window cannot be mapped (the first build placed buffers up to 472 MiB and
+   `refract` failed at once; a placement outside the window now falls back to system memory). With every
+   request for video memory the pool could serve placed there (42 buffers in a `shadow`/`refract`/`desktop
+   shadow` run, exportable, scanned out in place from video memory) `shadow` stayed at 8,114 frames per second
+   (FreeBSD 9,186), `refract` at 876 (947) and `desktop shadow` at 5,980 (6,346). Placement is not the gap; that
+   variant was dropped (the pool takes only buffers marked local, as before). The power firmware shows the
+   graphics clock at 2,200 MHz and the memory clock at 3,300 MHz under `refract`; FreeBSD's clocks under the
+   same test were not looked at, and are the next thing to compare.
 2. `drm.bo.create1m` is 2.2 times slower: a mapping's pages are made one write fault at a time (FreeBSD makes the
    buffer whole at creation and maps neighbors).
 3. `drm.submit.compute.batch`: 1,000 jobs queued behind each other wait for the previous fence, which the engine

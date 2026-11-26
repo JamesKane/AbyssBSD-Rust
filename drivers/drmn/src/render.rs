@@ -661,8 +661,12 @@ impl Render {
                 self.vram_asked_shared.fetch_add(1, Ordering::Relaxed);
             }
         }
+        // (Only where the processor's window onto video memory reaches.)
+        let window = amd.gpu_arc()?.vram_len().unwrap_or(0) as u64;
         let block = if asked && local && size <= self.vram.total() / 4 {
-            self.vram.alloc(size)
+            self.vram
+                .alloc(size)
+                .filter(|b| b.offset() + size <= window)
         } else {
             None
         };
@@ -670,13 +674,9 @@ impl Render {
             Some(block) => {
                 let gpu = amd.gpu_arc()?;
                 let bar = gpu.vram_phys().ok_or(Errno::ENXIO)?;
-                let end = usize::try_from(block.offset() + size).map_err(|_| Errno::EINVAL)?;
-                if gpu.vram_len().is_none_or(|len| len < end) {
-                    return Err(Errno::ENXIO);
-                }
                 // What an earlier buffer left there must not be read.
-                for at in (block.offset()..block.offset() + size).step_by(4) {
-                    gpu.vram_write32(usize::try_from(at).unwrap_or(0), 0);
+                for at in (block.offset()..block.offset() + size).step_by(8) {
+                    gpu.vram_write64(usize::try_from(at).unwrap_or(0), 0);
                 }
                 let made = cx.new_device_gem(size, vm::Pfn((bar + block.offset()) >> 12), block)?;
                 self.vram_made.fetch_add(1, Ordering::Relaxed);
@@ -1349,8 +1349,8 @@ impl Render {
     }
 }
 
-impl RenderApi for Render {
-    fn ioctl(&self, cx: &IoctlCx<'_>, nr: u8, arg: &mut [u8]) -> Result<usize, Errno> {
+impl Render {
+    fn ioctl_inner(&self, cx: &IoctlCx<'_>, nr: u8, arg: &mut [u8]) -> Result<usize, Errno> {
         let amd = self.amd()?;
         // The graphics block starts with the first request.
         amd.ensure_gfx(cx.sleepable())?;
@@ -1528,6 +1528,21 @@ impl RenderApi for Render {
             n if is_user_queue(n) => Err(Errno::EOPNOTSUPP),
             _ => Err(Errno::ENOTTY),
         }
+    }
+}
+
+impl RenderApi for Render {
+    fn ioctl(&self, cx: &IoctlCx<'_>, nr: u8, arg: &mut [u8]) -> Result<usize, Errno> {
+        let r = self.ioctl_inner(cx, nr, arg);
+        if let (Err(e), Ok(amd)) = (&r, self.amd()) {
+            // A refusal of a request that is not a submission or a wait
+            // (those say their own).
+            let n = nr - abi::drm::DRM_COMMAND_BASE;
+            if n != cmd::CS && n != cmd::WAIT_CS {
+                amd.log(format_args!("render: request {n:#x} refused: {e:?}"));
+            }
+        }
+        r
     }
 
     fn file_closed(&self, file: u64) {
