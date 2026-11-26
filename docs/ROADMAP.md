@@ -550,6 +550,18 @@ stock 15.1. Open:
   sender must reap), so the interrupt thread is not what holds it. Left: the stack's own small items
   (`bpf` with the DHCP client's reader, route lookups, the uptime read), and sending without a doorbell
   for a frame queued behind another (`xmit_more`).
+  **sig, syscall, vm (2026-11-26, audited against FreeBSD's source):** `p4` at 3000 MHz went from
+  `sig.deliver` 1.23 to 1.13, `getpid` 1.06 to 1.04, `vm.fault.anon` 1.13 to 1.07, `vm.fault.cow` 1.13 to
+  1.08, `vm.mmap` 1.06 to 1.05 (frame filled in place, `sigreturn` without a save and a second zeroing,
+  one tree walk per insert, a bare `cli` on the syscall exit). The deltas that remain are design
+  differences, not tuning: (1) FreeBSD's FPU is lazy (`fpstate_drop` on delivery, a copy and no `xrstor`
+  on `sigreturn`, a reload only if user code touches the FPU) where ours loads eagerly both ways
+  (60 to 110 ns); (2) an object's pages are a `BTreeMap` walked twice and locked three times per fault,
+  where FreeBSD does one `pctrie` descent in one hold, and `munmap` teardown sits in `vm.fault.anon`'s
+  timing; a fixed-leaf radix tree would fix both; the copy-on-write chain walk clones an `Arc` and
+  relocks per level; (3) the system call's three nested Rust frames, the `Call` struct through memory,
+  and the thread pointer chain walked three times (about 8 cycles). The stock side's pin did not hold in
+  2 of 3 runs once (36 ns `getpid`): check `freq=` in the logs against the numbers.
   `fs.ufs.fsx` was 2.5: `ftruncate` zeroed and moved fragments on the disk, synchronously;
   it now clears and carries them in the page cache (`truncate_new`), as FreeBSD's `ffs_truncate` works in
   the buffer cache: 0.75, and `fs.ufs` 0.837. Mapped writes (`msync`) are still twice stock's cost in

@@ -161,6 +161,7 @@ pub(crate) const fn to_u16(n: usize) -> u16 {
 mod hal_hooks {
     const _: hal::IrqDisableFn = abyss_hal_irq_disable;
     const _: hal::IrqEnableFn = abyss_hal_irq_enable;
+    const _: hal::IrqMaskFn = abyss_hal_irq_mask;
     const _: hal::CpuIdFn = abyss_hal_cpu_id;
     const _: hal::ContextInitFn = abyss_hal_context_init;
     const _: hal::CpuLocalFn = abyss_hal_cpu_local;
@@ -188,6 +189,12 @@ mod hal_hooks {
     #[unsafe(no_mangle)]
     fn abyss_hal_irq_disable() -> bool {
         crate::cpu::save_disable_interrupts()
+    }
+
+    #[unsafe(no_mangle)]
+    fn abyss_hal_irq_mask() {
+        crate::cpu::disable_interrupts();
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 
     #[unsafe(no_mangle)]

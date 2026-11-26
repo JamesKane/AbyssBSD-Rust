@@ -1239,7 +1239,7 @@ impl Object {
         if let Some(d) = self.device {
             return Self::device_page(d, index).map(Found::Top);
         }
-        if self.pager.is_some() {
+        let mut next = if self.pager.is_some() {
             if let Some(pfn) = self.page_or_fill(index, fill)? {
                 return Ok(Found::Top(pfn));
             }
@@ -1254,13 +1254,23 @@ impl Object {
                     .backing
                     .as_ref()
                     .is_some_and(|(b, _)| Arc::strong_count(b) == 1 && b.pager.is_none());
+            // What it shadows is read in the same hold as the miss: none
+            // for an anonymous page's first fault, which then takes the
+            // lock only once more, to insert.
+            // (Not when about to fold: the count of the shadowed object
+            // is what says nothing else holds it.)
+            let backing = if foldable {
+                None
+            } else {
+                inner.backing.clone()
+            };
             drop(inner);
             if foldable {
                 self.collapse();
                 return self.lookup(index, false, fill);
             }
-        }
-        let mut next = self.backing();
+            backing
+        };
         let mut index = index;
         while let Some((object, off)) = next {
             index += off;
@@ -1502,13 +1512,19 @@ impl Object {
     /// there first (then that page wins and this one is freed).
     fn insert_filled(&self, index: PageIndex, new: Pfn) -> Pfn {
         let mut inner = self.inner.lock();
-        if let Some(&Page { pfn, .. }) = inner.pages.get(&index) {
-            drop(inner);
-            self.pages_ops.free(new);
-            return pfn;
+        // One walk of the tree for the look and the insert.
+        match inner.pages.entry(index) {
+            Entry::Occupied(held) => {
+                let pfn = held.get().pfn;
+                drop(inner);
+                self.pages_ops.free(new);
+                pfn
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(Page::new(new));
+                new
+            }
         }
-        inner.pages.insert(index, Page::new(new));
-        new
     }
 
     /// How many pages to fill from `index` on: the read-ahead window when
@@ -1570,13 +1586,19 @@ impl Object {
             self.pages_ops.uncache(new);
         }
         let mut inner = self.inner.lock();
-        if let Some(&Page { pfn, .. }) = inner.pages.get(&index) {
-            drop(inner);
-            self.pages_ops.free(new);
-            return Some(pfn);
+        // One walk of the tree for the look and the insert.
+        match inner.pages.entry(index) {
+            Entry::Occupied(held) => {
+                let pfn = held.get().pfn;
+                drop(inner);
+                self.pages_ops.free(new);
+                Some(pfn)
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(Page::new(new));
+                Some(new)
+            }
         }
-        inner.pages.insert(index, Page::new(new));
-        Some(new)
     }
 
     /// Page `index` for a write that covers it whole: one held already

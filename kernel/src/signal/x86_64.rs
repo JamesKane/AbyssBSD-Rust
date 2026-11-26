@@ -76,82 +76,84 @@ fn xsave() -> bool {
     crate::arch::fpu::describe().1 != 0
 }
 
-/// The thread's registers as an `mcontext_t`, with the FPU's legacy part.
-fn mcontext(f: &TrapFrame, fpu: &FpuImage) -> McontextX86 {
-    let mut fpstate = FpState::default();
-    fpstate.0.copy_from_slice(&fpu.bytes()[..LEGACY]);
+/// The thread's registers as an `mcontext_t`, with the FPU's legacy part,
+/// written into `mc` (a zeroed one) where it lies: a frame is a kilobyte
+/// and more, and built in pieces and moved it costs several copies.
+fn fill_mcontext(mc: &mut McontextX86, f: &TrapFrame, fpu: &FpuImage) {
     let ds = crate::arch::user::USER_DS;
-    McontextX86 {
-        mc_rdi: f.rdi,
-        mc_rsi: f.rsi,
-        mc_rdx: f.rdx,
-        mc_rcx: f.rcx,
-        mc_r8: f.r8,
-        mc_r9: f.r9,
-        mc_rax: f.rax,
-        mc_rbx: f.rbx,
-        mc_rbp: f.rbp,
-        mc_r10: f.r10,
-        mc_r11: f.r11,
-        mc_r12: f.r12,
-        mc_r13: f.r13,
-        mc_r14: f.r14,
-        mc_r15: f.r15,
-        mc_trapno: if f.vector == crate::arch::trap::SYSCALL_VECTOR {
-            T_SYSCALL
-        } else {
-            0
-        },
-        mc_fs: ds,
-        mc_gs: ds,
-        mc_es: ds,
-        mc_ds: ds,
-        mc_flags: MC_HASSEGS,
-        mc_err: f.error,
-        mc_rip: f.rip,
-        mc_cs: f.cs,
-        mc_rflags: f.rflags,
-        mc_rsp: f.rsp,
-        mc_ss: f.ss,
-        mc_len: size_of::<McontextX86>() as i64,
-        mc_fpformat: MC_FPFMT_XMM,
-        mc_ownedfp: MC_FPOWNED_FPU,
-        mc_fpstate: fpstate,
-        mc_fsbase: hal::user::tls(),
-        mc_gsbase: hal::user::tls2(),
-        ..McontextX86::default()
-    }
+    mc.mc_fpstate.0.copy_from_slice(&fpu.bytes()[..LEGACY]);
+    mc.mc_rdi = f.rdi;
+    mc.mc_rsi = f.rsi;
+    mc.mc_rdx = f.rdx;
+    mc.mc_rcx = f.rcx;
+    mc.mc_r8 = f.r8;
+    mc.mc_r9 = f.r9;
+    mc.mc_rax = f.rax;
+    mc.mc_rbx = f.rbx;
+    mc.mc_rbp = f.rbp;
+    mc.mc_r10 = f.r10;
+    mc.mc_r11 = f.r11;
+    mc.mc_r12 = f.r12;
+    mc.mc_r13 = f.r13;
+    mc.mc_r14 = f.r14;
+    mc.mc_r15 = f.r15;
+    mc.mc_trapno = if f.vector == crate::arch::trap::SYSCALL_VECTOR {
+        T_SYSCALL
+    } else {
+        0
+    };
+    mc.mc_fs = ds;
+    mc.mc_gs = ds;
+    mc.mc_es = ds;
+    mc.mc_ds = ds;
+    mc.mc_flags = MC_HASSEGS;
+    mc.mc_err = f.error;
+    mc.mc_rip = f.rip;
+    mc.mc_cs = f.cs;
+    mc.mc_rflags = f.rflags;
+    mc.mc_rsp = f.rsp;
+    mc.mc_ss = f.ss;
+    mc.mc_len = size_of::<McontextX86>() as i64;
+    mc.mc_fpformat = MC_FPFMT_XMM;
+    mc.mc_ownedfp = MC_FPOWNED_FPU;
+    mc.mc_fsbase = hal::user::tls();
+    mc.mc_gsbase = hal::user::tls2();
+}
+
+/// [`fill_mcontext`] into a new one.
+fn mcontext(f: &TrapFrame, fpu: &FpuImage) -> McontextX86 {
+    let mut mc = McontextX86::default();
+    fill_mcontext(&mut mc, f, fpu);
+    mc
 }
 
 /// Builds the handler's frame and points `frame` at the trampoline.
 pub(super) fn sendsig(frame: &mut TrapFrame, d: &Delivery<'_>) -> Result<(), ()> {
     let fpu = FpuImage::saved().ok_or(())?;
     let (alt, uc_stack) = d.stack(frame.rsp);
-    let mut mc = mcontext(frame, &fpu);
-    mc.mc_onstack = u64::from(uc_stack.ss_flags == abi::signal::SS_ONSTACK);
+    // The frame is filled where it lies, then written once.
+    let mut sf = SigframeX86::default();
+    fill_mcontext(&mut sf.sf_uc.uc_mcontext, frame, &fpu);
+    sf.sf_uc.uc_mcontext.mc_onstack = u64::from(uc_stack.ss_flags == abi::signal::SS_ONSTACK);
     let mut sp = alt.unwrap_or(frame.rsp.wrapping_sub(REDZONE));
     let xstate = if xsave() {
         &fpu.bytes()[LEGACY..]
     } else {
         &[][..]
     };
+    let mut xstate_at = 0;
     if !xstate.is_empty() {
         sp = sp.wrapping_sub(xstate.len() as u64) & !63;
+        xstate_at = sp;
+        let mc = &mut sf.sf_uc.uc_mcontext;
         mc.mc_xfpustate = sp;
         mc.mc_xfpustate_len = xstate.len() as u64;
         mc.mc_flags |= MC_HASFPXSTATE;
     }
     let sfp = sp.wrapping_sub(size_of::<SigframeX86>() as u64) & !15;
-    let mut sf = SigframeX86 {
-        sf_ahu: d.action.sa_handler,
-        sf_uc: Ucontext {
-            uc_sigmask: d.mask,
-            uc_mcontext: mc,
-            uc_stack,
-            ..Ucontext::default()
-        },
-        ..SigframeX86::default()
-    };
+    sf.sf_ahu = d.action.sa_handler;
+    sf.sf_uc.uc_sigmask = d.mask;
+    sf.sf_uc.uc_stack = uc_stack;
     frame.rdi = u64::from(d.sig);
     frame.rdx = sfp + offset_of!(SigframeX86, sf_uc) as u64;
     frame.rcx = d.info.si_addr;
@@ -167,7 +169,7 @@ pub(super) fn sendsig(frame: &mut TrapFrame, d: &Delivery<'_>) -> Result<(), ()>
         .write(&sf)
         .map_err(|_| ())?;
     if !xstate.is_empty() {
-        copy_out(mc.mc_xfpustate, xstate).map_err(|_| ())?;
+        copy_out(xstate_at, xstate).map_err(|_| ())?;
     }
     // The handler starts with a clean FPU (FreeBSD's `fpstate_drop`).
     FpuImage::load_initial().ok_or(())?;
@@ -277,10 +279,13 @@ fn fpu_image(mc: &McontextX86) -> Result<Option<FpuImage>, Errno> {
         0x10000 => return Ok(None),
         _ => return Err(Errno::EINVAL),
     }
-    let mut img = FpuImage::saved().ok_or(Errno::ENOMEM)?;
-    let mask = mxcsr_mask(&img);
-    img.reset();
+    // The mask is the CPU's, the same every time: read once.
+    let mask = mxcsr_mask_known()?;
+    // Every byte is the context's or zero (not the registers' as they are
+    // now: nothing here needs a save of them).
+    let mut img = FpuImage::zeroed().ok_or(Errno::ENOMEM)?;
     if mc.mc_ownedfp == MC_FPOWNED_NONE {
+        img.reset();
         return Ok(Some(img));
     }
     let bytes = img.bytes_mut();
@@ -316,6 +321,21 @@ fn fpu_image(mc: &McontextX86) -> Result<Option<FpuImage>, Errno> {
         bytes[LEGACY + 8..LEGACY + HEADER].fill(0);
     }
     Ok(Some(img))
+}
+
+/// [`mxcsr_mask`] of this CPU, saved the first time.
+fn mxcsr_mask_known() -> Result<u32, Errno> {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    static MASK: AtomicU32 = AtomicU32::new(0);
+    // Relaxed: a constant of the CPU; a race writes the same value twice.
+    let known = MASK.load(Ordering::Relaxed);
+    if known != 0 {
+        return Ok(known);
+    }
+    let img = FpuImage::saved().ok_or(Errno::ENOMEM)?;
+    let mask = mxcsr_mask(&img);
+    MASK.store(mask, Ordering::Relaxed);
+    Ok(mask)
 }
 
 /// The MXCSR bits the CPU accepts (FXSAVE's `MXCSR_MASK`; 0 means the

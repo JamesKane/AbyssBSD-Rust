@@ -317,7 +317,7 @@ pub(crate) fn entry(frame: &mut TrapFrame) {
         crate::proc::vfork_wait(&s);
         crate::ptrace::vfork_done(&s);
     }
-    let _ = hal::irq::disable();
+    hal::irq::mask();
 }
 
 /// The second result register as the call left it (`td_retval[1]`).

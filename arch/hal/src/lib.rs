@@ -657,6 +657,9 @@ pub type SetCurrentThreadFn = fn(*const ());
 pub type IrqDisableFn = fn() -> bool;
 /// Signature of `abyss_hal_irq_enable`: unmasks interrupts on this CPU.
 pub type IrqEnableFn = fn();
+/// Signature of `abyss_hal_irq_mask`: masks interrupts on this CPU, with
+/// no state to give back.
+pub type IrqMaskFn = fn();
 /// Signature of `abyss_hal_cpu_id`: the current CPU's number.
 pub type CpuIdFn = fn() -> u32;
 
@@ -664,6 +667,7 @@ pub type CpuIdFn = fn() -> u32;
 unsafe extern "Rust" {
     fn abyss_hal_irq_disable() -> bool;
     fn abyss_hal_irq_enable();
+    fn abyss_hal_irq_mask();
     fn abyss_hal_cpu_id() -> u32;
     fn abyss_hal_context_init(c: &mut Context, stack_top: u64, entry: ThreadEntry, arg: usize);
     fn abyss_hal_cpu_local() -> *mut ();
@@ -839,6 +843,18 @@ pub mod irq {
         #[cfg(not(target_os = "none"))]
         let were_enabled = false;
         Saved { were_enabled }
+    }
+
+    /// Masks interrupts and keeps nothing: for the end of a system call,
+    /// which goes back to user mode with them on whatever they were (a
+    /// bare `cli`, not the flags' save [`disable`] makes).
+    #[inline]
+    pub fn mask() {
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        unsafe {
+            super::abyss_hal_irq_mask();
+        }
     }
 
     /// Restores the state [`disable`] saved.
