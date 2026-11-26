@@ -1407,9 +1407,11 @@ hang costs a power cycle):
        - fastfetch naming the GPU;
        - glmark2's jellyfish reporting the same renderer.
 
-     That is evidence for the kernel, not the stock-package acceptance. The decision (2026-11-25):
-     test harness only, the stock exit recorded as not met until libdrm describes platform devices
-     upstream.
+     That is evidence for the kernel, not the stock-package acceptance. The decision (user,
+     2026-11-25): the patched libdrm is what development and testing use. The patch goes upstream
+     later; until libdrm describes platform devices, AbyssBSD will likely carry its own libdrm,
+     as a recorded deviation from the stock-package rule. Until then the stock exit stays
+     recorded as not met.
    - **Offsets are global across cards.** The first Sway run drew the background right and every
      window as garbage, on screen and in the capture. kmsro imports komeda's scanout buffers into
      panthor's file, and a PRIME import keeps the exporter's mmap offset. With one offset space
