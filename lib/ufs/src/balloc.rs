@@ -35,6 +35,12 @@ pub struct NewSpace {
     /// Fragments grown in place or moved, whose old contents the caller
     /// carries over.
     pub moved: Vec<Moved>,
+    /// File byte ranges inside blocks the file keeps that must read as
+    /// zeros from now on ([`Ufs::truncate_new`]: the rest of a block past
+    /// a new end, the part of an old last block a longer file now
+    /// reaches). The caller zeroes them in its page cache and writes them
+    /// later, leaving the other bytes of those pages as they are.
+    pub cleared: Vec<(u64, u64)>,
 }
 
 /// A fragment grown or moved: the file's bytes `at..at + len` are now
@@ -509,6 +515,41 @@ impl<B: BlockIo> Ufs<B> {
         reserve: Reserve,
         metadata: bool,
     ) -> Result<(), Error> {
+        self.truncate_in(cx, sum, ino, ip, length, reserve, metadata, None)
+    }
+
+    /// As [`Self::truncate`] for a regular file whose caller keeps the
+    /// file's data in a page cache (as FreeBSD's `ffs_truncate` works in
+    /// the buffer cache, writing later): nothing is zeroed on the disk.
+    /// New blocks, fragments grown or moved, and the ranges that must read
+    /// as zeros go into `new` for the caller to put in its pages, with the
+    /// inode and the summary still held (see [`Self::balloc_new`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn truncate_new(
+        &self,
+        cx: &B::Cx,
+        sum: &mut Summary,
+        ino: u32,
+        ip: &mut Inode,
+        length: u64,
+        reserve: Reserve,
+        new: &mut NewSpace,
+    ) -> Result<(), Error> {
+        self.truncate_in(cx, sum, ino, ip, length, reserve, false, Some(new))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn truncate_in(
+        &self,
+        cx: &B::Cx,
+        sum: &mut Summary,
+        ino: u32,
+        ip: &mut Inode,
+        length: u64,
+        reserve: Reserve,
+        metadata: bool,
+        mut new: Option<&mut NewSpace>,
+    ) -> Result<(), Error> {
         let sb = &self.sb;
         let bsize = u64::from(sb.bsize);
         let fsize = u64::from(sb.fsize);
@@ -523,13 +564,21 @@ impl<B: BlockIo> Ufs<B> {
             let lbn = last / bsize;
             let old = ip.size;
             let before = self.bmap(cx, ip, lbn)?;
-            let addr = self.balloc(cx, sum, ino, ip, last, 1, reserve, before == 0, metadata)?;
+            let addr = match new.as_deref_mut() {
+                Some(n) => {
+                    self.balloc_in(cx, sum, ino, ip, last, 1, reserve, false, false, Some(n))?
+                }
+                None => self.balloc(cx, sum, ino, ip, last, 1, reserve, before == 0, metadata)?,
+            };
             // An existing block that now holds more of the file: what lay
             // past the old end reads as zeros.
             if before != 0 && !metadata && old / bsize == lbn {
                 let space = u64::from(sb.block_size(length, lbn));
                 let from = old % bsize;
-                self.zero_data(cx, addr * fsize + from, space - from)?;
+                match new.as_deref_mut() {
+                    Some(n) => n.cleared.push((lbn * bsize + from, space - from)),
+                    None => self.zero_data(cx, addr * fsize + from, space - from)?,
+                }
             }
             ip.size = length;
             return Ok(());
@@ -544,10 +593,34 @@ impl<B: BlockIo> Ufs<B> {
             let lbn = (length - 1) / bsize;
             let blkno = self.bmap(cx, ip, lbn)?;
             if blkno == 0 || offset != 0 {
-                let addr = self.balloc(cx, sum, ino, ip, length - 1, 1, reserve, true, metadata)?;
+                let addr = match new.as_deref_mut() {
+                    Some(n) => self.balloc_in(
+                        cx,
+                        sum,
+                        ino,
+                        ip,
+                        length - 1,
+                        1,
+                        reserve,
+                        false,
+                        false,
+                        Some(n),
+                    )?,
+                    None => {
+                        self.balloc(cx, sum, ino, ip, length - 1, 1, reserve, true, metadata)?
+                    }
+                };
                 let oldspace = u64::from(sb.block_size(ip.size, lbn));
                 if offset != 0 && !metadata {
-                    self.zero_data(cx, addr * fsize + offset, oldspace - offset)?;
+                    match new {
+                        // What stays of the block, past the new end: the
+                        // fragments past that go (below).
+                        Some(n) => {
+                            let kept = u64::from(sb.block_size(length, lbn));
+                            n.cleared.push((lbn * bsize + offset, kept - offset));
+                        }
+                        None => self.zero_data(cx, addr * fsize + offset, oldspace - offset)?,
+                    }
                 }
                 if lbn < NDADDR {
                     let newspace = u64::from(sb.block_size(length, lbn));

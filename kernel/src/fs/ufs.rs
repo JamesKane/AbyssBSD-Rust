@@ -1314,16 +1314,36 @@ impl Node for UfsNode {
             let mut attempt = 0;
             loop {
                 let mut sum = sum.lock(s);
-                match shared.ufs.truncate(
-                    s,
-                    &mut sum,
-                    self.cell.ino,
-                    &mut st.ip,
-                    size,
-                    Reserve::Allowed,
-                    false,
-                ) {
-                    Ok(()) => break,
+                // A file with pages: its new and cleared space goes in
+                // them, not on the disk.
+                let mut new = ufs::NewSpace::default();
+                let r = match &self.object {
+                    Some(_) => shared.ufs.truncate_new(
+                        s,
+                        &mut sum,
+                        self.cell.ino,
+                        &mut st.ip,
+                        size,
+                        Reserve::Allowed,
+                        &mut new,
+                    ),
+                    None => shared.ufs.truncate(
+                        s,
+                        &mut sum,
+                        self.cell.ino,
+                        &mut st.ip,
+                        size,
+                        Reserve::Allowed,
+                        false,
+                    ),
+                };
+                match r {
+                    Ok(()) => {
+                        if let Some(o) = &self.object {
+                            apply_new_space(s, &shared, o, &st.ip, &new)?;
+                        }
+                        break;
+                    }
                     Err(ufs::Error::NoSpace) if attempt == 0 => attempt += 1,
                     Err(e) => return Err(errno(e)),
                 }
@@ -1655,6 +1675,69 @@ fn carry_moved(
             });
         }
         object.mark_dirty(page);
+    }
+    Ok(())
+}
+
+/// Puts what `truncate_new` left for the page cache into `object`, with
+/// the inode and the summary held (as for [`carry_moved`]): fragments
+/// grown or moved carried over; the pages of new blocks held, zero, and
+/// dirty, to be written later; and the ranges of kept blocks that must
+/// read as zeros zeroed in their pages, which are marked dirty too (as
+/// `ffs_truncate` zeroes a buffer and `bdwrite`s it). A page not in memory
+/// that such a range covers only in part is not read in: the range is
+/// zeroed on the disk, where the page's bytes still are.
+fn apply_new_space(
+    s: &Sleepable,
+    shared: &Shared,
+    object: &Object,
+    ip: &ufs::Inode,
+    new: &ufs::NewSpace,
+) -> Result<(), Errno> {
+    for m in &new.moved {
+        carry_moved(s, shared, object, m)?;
+    }
+    let sb = shared.ufs.superblock();
+    let (bsize, fsize) = (u64::from(sb.bsize), u64::from(sb.fsize));
+    let ranges = new
+        .zeroed
+        .iter()
+        .map(|&r| (r, true))
+        .chain(new.cleared.iter().map(|&r| (r, false)));
+    for ((at, len), fresh) in ranges {
+        let end = at + len;
+        for page in at / PAGE..end.div_ceil(PAGE) {
+            let (lo, hi) = (at.max(page * PAGE), end.min((page + 1) * PAGE));
+            let part = usize::try_from(lo - page * PAGE).map_err(|_| Errno::EIO)?
+                ..usize::try_from(hi - page * PAGE).map_err(|_| Errno::EIO)?;
+            let pfn = match object.page_here(page) {
+                Some(pfn) => pfn,
+                // A new block's pages start from zeros, whole.
+                None if fresh => object.page_for_overwrite(page).map_err(|_| Errno::ENOMEM)?,
+                None if part.len() == PAGE_LEN => {
+                    object.page_for_overwrite(page).map_err(|_| Errno::ENOMEM)?
+                }
+                None => {
+                    // The rest of the page is what the disk has.
+                    let lbn = lo / bsize;
+                    let addr = shared.ufs.bmap(s, ip, lbn).map_err(errno)?;
+                    if addr != 0 {
+                        let zeros = alloc::vec![0u8; part.len()];
+                        ufs::BlockIo::write_data(
+                            shared.ufs.io(),
+                            s,
+                            addr * fsize + lo % bsize,
+                            &zeros,
+                        )
+                        .map_err(|_| Errno::EIO)?;
+                    }
+                    continue;
+                }
+            };
+            object.forget_synced(page);
+            object.access(pfn, &mut |p| p[part.clone()].fill(0));
+            object.mark_dirty(page);
+        }
     }
     Ok(())
 }
