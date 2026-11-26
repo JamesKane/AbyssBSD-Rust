@@ -363,7 +363,10 @@ impl Driver for Komeda {
         }
         // The card exists for userland from here.
         match drm::register(self.card.clone()) {
-            Ok(n) => *self.node.lock() = Some(n),
+            Ok(n) => {
+                crate::dri::publish(cx.sleepable(), n.unit(), false, "platform:komeda", true);
+                *self.node.lock() = Some(n);
+            }
             Err(_) => return Err(AttachError::Device("registering the card")),
         }
         // What the connector sees, for the console log, and the screen it

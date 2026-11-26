@@ -12,12 +12,15 @@ name = "panthor_driver"
 abi = { path = "../../lib/abi" }
 bus = { path = "../../sys/bus" }
 devtree = { path = "../../lib/devtree" }
+drm = { path = "../../sys/drm" }
 hal = { path = "../../arch/hal" }
+irq = { path = "../../sys/irq" }
 panthor = { path = "../../lib/panthor" }
 regs = { path = "../../lib/regs" }
 sched = { path = "../../sys/sched" }
 sync = { path = "../../sys/sync" }
 sysctl = { path = "../../sys/sysctl" }
+vfs = { path = "../../sys/vfs" }
 vm = { path = "../../sys/vm" }
 
 [lints]

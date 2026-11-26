@@ -19,6 +19,7 @@ extern crate std;
 
 pub mod card;
 pub mod discover;
+mod dri;
 pub mod format;
 pub mod hw;
 pub mod komeda;

@@ -29,11 +29,16 @@ const SECTIONS: usize = 16;
 /// Doorbell 0: the global interface (02 §2.9).
 const DOORBELL_GLOBAL: usize = 0x8_0000;
 /// JOB interrupt bit 31: the global interface (02 §2.6), the firmware's boot signal.
-const JOB_GLOBAL: u32 = 1 << 31;
+pub(crate) const JOB_GLOBAL: u32 = 1 << 31;
+/// Where the host's own MCU objects start: past the interface section, inside the window
+/// (05 §5.3.1).
+const MCU_HOST_VA: u64 = 0x0500_0000;
+/// The window's end.
+pub(crate) const MCU_HOST_END: u64 = 0x0800_0000;
 
 /// The page tables, in device memory.
 pub(crate) struct TableMem<'a> {
-    tag: &'a DmaTag,
+    pub(crate) tag: &'a DmaTag,
     pub(crate) pages: Vec<DmaCoherent<u64>>,
 }
 
@@ -62,7 +67,7 @@ impl Tables for TableMem<'_> {
 }
 
 /// The shared section.
-struct SharedMem<'a>(&'a DmaCoherent<u8>);
+pub(crate) struct SharedMem<'a>(pub(crate) &'a DmaCoherent<u8>);
 
 impl Shared for SharedMem<'_> {
     fn len(&self) -> usize {
@@ -80,10 +85,17 @@ impl Shared for SharedMem<'_> {
 pub(crate) struct Booted {
     pub(crate) iface: Iface,
     // Kept for the MCU's life: it runs from them.
-    #[allow(dead_code)]
-    tables: Vec<DmaCoherent<u64>>,
-    #[allow(dead_code)]
-    sections: Vec<DmaCoherent<u8>>,
+    pub(crate) tables: Vec<DmaCoherent<u64>>,
+    pub(crate) sections: Vec<DmaCoherent<u8>>,
+    /// The MCU address space's root table.
+    pub(crate) root: u64,
+    /// Which of `sections` is the interface section.
+    pub(crate) shared: usize,
+    /// The next free MCU address for the host's own objects (05 §5.3.1: from the window at
+    /// `0x04000000`, after the interface section).
+    pub(crate) next_va: u64,
+    /// MCU ranges given back.
+    pub(crate) free_va: Vec<(u64, u64)>,
     pub(crate) git_sha: String,
 }
 
@@ -194,6 +206,10 @@ pub(crate) fn boot(
         Ok(iface) => Ok(Booted {
             iface,
             tables: t.pages,
+            root,
+            shared: shared_index.unwrap_or(0),
+            next_va: MCU_HOST_VA,
+            free_va: Vec::new(),
             sections,
             git_sha,
         }),
@@ -201,6 +217,10 @@ pub(crate) fn boot(
             let held = Booted {
                 iface: Iface::default(),
                 tables: t.pages,
+                root,
+                shared: 0,
+                next_va: MCU_HOST_VA,
+                free_va: Vec::new(),
                 sections,
                 git_sha,
             };
@@ -323,7 +343,7 @@ impl Booted {
 }
 
 /// Rings doorbell 0, after the shared memory's writes (05 §5.6.3 step 4).
-fn ring(gpu: &Window) {
+pub(crate) fn ring(gpu: &Window) {
     hal::dma::doorbell_barrier();
     gpu.write32(DOORBELL_GLOBAL, 1);
 }

@@ -890,6 +890,7 @@ dependencies = [
  "sched",
  "sky1-dp",
  "sync",
+ "sysctl",
  "vm",
 ]
 
@@ -979,12 +980,15 @@ dependencies = [
  "abi",
  "bus",
  "devtree",
+ "drm",
  "hal",
+ "irq",
  "panthor",
  "regs",
  "sched",
  "sync",
  "sysctl",
+ "vfs",
  "vm",
 ]
 

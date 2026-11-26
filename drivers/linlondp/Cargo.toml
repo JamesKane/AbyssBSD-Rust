@@ -20,6 +20,7 @@ drm-fourcc = { path = "../../lib/drm-fourcc" }
 kms-check = { path = "../../lib/kms-check" }
 sched = { path = "../../sys/sched" }
 sync = { path = "../../sys/sync" }
+sysctl = { path = "../../sys/sysctl" }
 
 [dev-dependencies]
 aml = { path = "../../lib/aml" }

@@ -19,24 +19,32 @@
 
 extern crate alloc;
 
+mod dri;
 mod mcu;
+mod mem;
+mod render;
+mod uapi;
+mod work;
 
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use abi::errno::Errno;
 use bus::provider::{ClockHandle, Micros, PerfLevel, PowerVote, ProviderError, ResetHandle};
 use bus::{
-    AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, MmioGrant, ResourceError, StartCx,
-    StopCx, StopReason,
+    AttachCx, AttachError, Driver, DriverDecl, Ident, Ids, IrqLine, MmioGrant, ResourceError,
+    StartCx, StopCx, StopReason,
 };
 use devtree::ids::AcpiId;
+use irq::Filter;
 use panthor::id::Info;
 use panthor::{Delay, Regs, control, id, sky1};
 use regs::Bytes;
+use sched::IrqCx;
+use sched::lock::{LockClass, Mutex};
 use sched::{Sleepable, Thread, WaitQueue};
 use sync::{Once, SpinLock};
 use vm::dma::{Coherency, DmaConstraints, DmaTag};
@@ -91,68 +99,202 @@ impl Delay for Spin {
     }
 }
 
-/// What the attached GPU and its thread share.
-struct Gpu {
+/// What the attached GPU, its thread, its interrupts and its card share.
+pub(crate) struct Dev {
     unit: u32,
-    regs: Window,
-    tag: DmaTag,
-    info: Info,
+    pub(crate) regs: Window,
+    pub(crate) tag: DmaTag,
+    pub(crate) info: Info,
     core_hz: u64,
-    /// A boot asked for, not yet run.
+    /// The system counter's rate, which the GPU's timestamp counts at (measured at attach).
+    pub(crate) timer_hz: u64,
+    /// A boot asked for, not yet run; files closed, not yet cleaned up; the thread's exit.
     requested: AtomicBool,
+    closed: SpinLock<Vec<u64>>,
     exit: AtomicBool,
     queue: WaitQueue,
-    /// The booted firmware, or why the last boot failed.
-    state: SpinLock<Result<Option<mcu::Booted>, &'static str>>,
+    /// The firmware and the GPU's work.
+    pub(crate) core: Mutex<work::Core>,
+    /// Why the firmware did not boot, once it failed; what `dev.panthor.N.mcu` says.
+    boot_failed: SpinLock<Option<&'static str>>,
+    status: SpinLock<String>,
+    /// Woken when jobs may have finished; and the waiters that asked to be told.
+    pub(crate) done: WaitQueue,
+    pub(crate) wakers: SpinLock<Vec<Arc<dyn vfs::event::Wake>>>,
+    /// The MMU fault bits the interrupt thread unmasks when it is done.
+    pub(crate) mmu_mask: AtomicU32,
+    /// The page userspace maps for the flush ID.
+    pub(crate) flush_page: Once<Arc<vm::object::Object>>,
 }
 
-impl Gpu {
-    fn log(&self, args: core::fmt::Arguments<'_>) {
+static CORE_LOCK: LockClass = LockClass::new("panthor core", 410);
+
+/// The GPU-control events the interrupt takes (03 §3.8.4, without the cache-flush completion,
+/// which the flushes poll for).
+const GPU_EVENTS: u32 = panthor::regs::INT_FAULT | panthor::regs::INT_PROTM_FAULT;
+
+impl Dev {
+    pub(crate) fn log(&self, args: core::fmt::Arguments<'_>) {
         bus::manager().log(format_args!("panthor{}: {args}", self.unit));
     }
 
-    fn report(&self) -> String {
-        match &*self.state.lock() {
-            Ok(None) => "MCU not started".into(),
-            Ok(Some(b)) => alloc::format!(
-                "MCU running, interface {}, {} groups, firmware {}",
-                b.iface.version,
-                b.iface.groups,
-                b.git_sha
-            ),
-            Err(why) => alloc::format!("MCU boot failed: {why}"),
+    fn status(&self) -> String {
+        if let Some(why) = *self.boot_failed.lock() {
+            return alloc::format!("MCU boot failed: {why}");
+        }
+        self.status.lock().clone()
+    }
+
+    /// Boots the firmware if it is not running yet (on the caller's thread: the image is read
+    /// from the root file system).
+    pub(crate) fn ensure_booted(&self, s: &Sleepable) -> Result<(), Errno> {
+        if self.boot_failed.lock().is_some() {
+            return Err(Errno::ENODEV);
+        }
+        let mut core = self.core.lock(s);
+        if core.fw.is_some() {
+            return Ok(());
+        }
+        match mcu::boot(s, &self.regs, &self.tag, &self.info, self.core_hz, &|a| {
+            self.log(a)
+        }) {
+            Ok(b) => {
+                *self.status.lock() = alloc::format!(
+                    "MCU running, interface {}, {} groups, firmware {}",
+                    b.iface.version,
+                    b.iface.groups,
+                    b.git_sha
+                );
+                core.fw = Some(b);
+                // The firmware's events from here on come through the JOB interrupt.
+                control::unmask_block(&self.regs, panthor::regs::JOB_INT, u32::MAX);
+                Ok(())
+            }
+            Err(why) => {
+                self.log(format_args!("MCU boot failed: {why}"));
+                *self.boot_failed.lock() = Some(why);
+                Err(Errno::ENODEV)
+            }
+        }
+    }
+
+    /// A file closed: its objects go on the driver's thread.
+    pub(crate) fn close_file(&self, file: u64) {
+        self.closed.lock().push(file);
+        self.queue.wake_all();
+    }
+
+    /// The firmware's liveness (05 §5.8): a ping, answered within 100 ms.
+    fn ping(&self, s: &Sleepable) {
+        let core = self.core.lock(s);
+        let Some(fw) = core.fw.as_ref() else {
+            return;
+        };
+        let sh = mcu::SharedMem(&fw.sections[fw.shared]);
+        panthor::csf::ping(&sh, &fw.iface);
+        mcu::ring(&self.regs);
+        for _ in 0..10_000 {
+            if panthor::csf::acked(&sh, &fw.iface, panthor::csf::REQ_PING) {
+                return;
+            }
+            bus::manager().delay_us(10);
+        }
+        self.log(format_args!(
+            "the firmware did not answer a ping (MCU_STATUS {})",
+            self.regs.read32(panthor::regs::MCU_STATUS)
+        ));
+    }
+}
+
+/// The driver's thread: a requested boot, closed files, and the ping every 12 seconds.
+fn worker(d: &Dev, s: &Sleepable) {
+    let mut last_ping = sched::now_ns();
+    loop {
+        let mut stop = || {
+            d.requested.load(Ordering::Acquire)
+                || d.exit.load(Ordering::Acquire)
+                || !d.closed.lock().is_empty()
+        };
+        bus::manager().wait_timeout(s, &d.queue, &mut stop, 12_000_000_000);
+        if d.exit.load(Ordering::Acquire) {
+            return;
+        }
+        if d.requested.swap(false, Ordering::AcqRel) {
+            let _ = d.ensure_booted(s);
+        }
+        let closed: Vec<u64> = core::mem::take(&mut *d.closed.lock());
+        if !closed.is_empty() {
+            let mut core = d.core.lock(s);
+            for f in closed {
+                d.file_closed(&mut core, f);
+            }
+        }
+        if sched::now_ns() - last_ping >= 12_000_000_000 {
+            d.ping(s);
+            last_ping = sched::now_ns();
         }
     }
 }
 
-/// The driver's thread: runs a requested boot.
-fn worker(g: &Gpu, s: &Sleepable) {
-    loop {
-        g.queue.wait_until(s, || {
-            g.requested.load(Ordering::Acquire) || g.exit.load(Ordering::Acquire)
-        });
-        if g.exit.load(Ordering::Acquire) {
-            return;
-        }
-        g.requested.store(false, Ordering::Release);
-        if !matches!(*g.state.lock(), Ok(None)) {
-            g.log(format_args!(
-                "the MCU was already started (or failed): reboot to try again"
-            ));
-            continue;
-        }
-        let r = mcu::boot(s, &g.regs, &g.tag, &g.info, g.core_hz, &|a| g.log(a));
-        if let Err(why) = &r {
-            g.log(format_args!("MCU boot failed: {why}"));
-        }
-        *g.state.lock() = r.map(Some);
+/// The interrupt blocks, by line: `_CRS` interrupt 0 is JOB, 1 MMU, 2 GPU (11 §11.4).
+const BLOCKS: [usize; 3] = [
+    panthor::regs::JOB_INT,
+    panthor::regs::MMU_INT,
+    panthor::regs::GPU_INT,
+];
+
+/// The filter (03 §3.8.2): not ours if the block has nothing pending; else the block is masked
+/// so the level line drops, and the thread runs.
+fn irq_filter(p: &Panthor, line: usize, _: &IrqCx) -> Filter {
+    let block = BLOCKS[line];
+    if p.dev.regs.read32(block + panthor::regs::INT_STAT) == 0 {
+        return Filter::Stray;
     }
+    p.dev.regs.write32(block + panthor::regs::INT_MASK, 0);
+    Filter::Schedule
+}
+
+/// The thread: each pending event is cleared before it is handled, then the block unmasked.
+fn irq_thread(p: &Panthor, line: usize, s: &Sleepable) {
+    let d = &p.dev;
+    let block = BLOCKS[line];
+    let enabled = || match line {
+        0 => u32::MAX,
+        1 => d.mmu_mask.load(Ordering::Acquire),
+        _ => GPU_EVENTS,
+    };
+    loop {
+        let bits = d.regs.read32(block + panthor::regs::INT_RAWSTAT) & enabled();
+        if bits == 0 {
+            break;
+        }
+        d.regs.write32(block + panthor::regs::INT_CLEAR, bits);
+        if line == 1 {
+            // The faulting slots are stopped first, without the core lock: a request holding it
+            // may be waiting for the firmware, which the fault keeps from answering (04 §4.9.1).
+            d.mmu_mask.fetch_and(!(bits & 0xFFFF), Ordering::AcqRel);
+            d.stop_faulted(bits);
+        }
+        let mut core = d.core.lock(s);
+        match line {
+            0 => d.job_events(&mut core, bits),
+            1 => d.mmu_events(&mut core, bits),
+            _ => d.log(format_args!(
+                "GPU fault: status {:#x} at {:#x}",
+                d.regs.read32(panthor::regs::GPU_FAULT_STATUS),
+                d.regs.read64(panthor::regs::GPU_FAULT_ADDR)
+            )),
+        }
+    }
+    d.regs.write32(block + panthor::regs::INT_MASK, enabled());
 }
 
 /// A `panthorN` instance.
 pub struct Panthor {
-    gpu: Arc<Gpu>,
+    dev: Arc<Dev>,
     thread: SpinLock<Option<Arc<Thread>>>,
+    lines: SpinLock<Vec<IrqLine>>,
+    card: SpinLock<Option<Arc<drm::card::Card>>>,
     _domain: PowerVote,
     _clocks: Vec<ClockHandle>,
     _reset: Option<ResetHandle>,
@@ -162,7 +304,7 @@ pub struct Panthor {
 impl core::fmt::Debug for Panthor {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Panthor")
-            .field("gpu_id", &self.gpu.info.gpu_id)
+            .field("gpu_id", &self.dev.info.gpu_id)
             .finish_non_exhaustive()
     }
 }
@@ -271,19 +413,42 @@ impl Driver for Panthor {
             coherency: Coherency::NonCoherent,
             ..DmaConstraints::UNLIMITED
         })?;
+        // The interrupts, by position: JOB, MMU, GPU (11 §11.4).
+        let mut lines = Vec::new();
+        for k in 0..3 {
+            lines.push(cx.irq(k)?);
+        }
+        // The system counter's rate: the GPU timestamp's ticks over 10 ms.
+        let (t0, n0) = (gpu.read_counter(panthor::regs::TIMESTAMP), sched::now_ns());
+        bus::manager().delay_us(10_000);
+        let (t1, n1) = (gpu.read_counter(panthor::regs::TIMESTAMP), sched::now_ns());
+        let hz = (t1.wrapping_sub(t0)).saturating_mul(1_000_000_000) / (n1 - n0).max(1);
+        // To the nearest MHz: the counter runs at a round rate.
+        let timer_hz = (hz + 500_000) / 1_000_000 * 1_000_000;
+        log(format_args!("timestamp counter at {timer_hz} Hz"));
         Ok(Self {
-            gpu: Arc::new(Gpu {
+            dev: Arc::new(Dev {
                 unit,
                 regs: gpu,
                 tag,
                 info,
                 core_hz: rate,
+                timer_hz,
                 requested: AtomicBool::new(false),
+                closed: SpinLock::new(Vec::new()),
                 exit: AtomicBool::new(false),
                 queue: WaitQueue::new(),
-                state: SpinLock::new(Ok(None)),
+                core: Mutex::new(&CORE_LOCK, work::Core::new(info.as_present)),
+                boot_failed: SpinLock::new(None),
+                status: SpinLock::new("MCU not started".into()),
+                done: WaitQueue::new(),
+                wakers: SpinLock::new(Vec::new()),
+                mmu_mask: AtomicU32::new(1),
+                flush_page: Once::new(),
             }),
             thread: SpinLock::new(None),
+            lines: SpinLock::new(lines),
+            card: SpinLock::new(None),
             _domain: domain,
             _clocks: clocks,
             _reset: reset,
@@ -292,14 +457,31 @@ impl Driver for Panthor {
     }
 
     fn start(&self, cx: &mut StartCx<'_, Self>) -> Result<(), AttachError> {
-        let g = Arc::clone(&self.gpu);
-        let t = sched::Builder::new("panthor")
+        let d = Arc::clone(&self.dev);
+        let th = sched::Builder::new("panthor")
             .priority(sched::Priority::KERNEL)
-            .spawn(move |s| worker(&g, s))
+            .spawn(move |s| worker(&d, s))
             .map_err(|_| AttachError::NoMemory)?;
-        *self.thread.lock() = Some(t);
-        let unit = self.gpu.unit;
-        let (boot, report) = (Arc::clone(&self.gpu), Arc::clone(&self.gpu));
+        *self.thread.lock() = Some(th);
+        // Every block masked until there is something to take (03 §3.8.3).
+        for b in BLOCKS {
+            control::mask_block(&self.dev.regs, b);
+        }
+        let lines: Vec<IrqLine> = core::mem::take(&mut *self.lines.lock());
+        for (k, line) in lines.into_iter().enumerate() {
+            cx.interrupt(line, Some(irq_filter), Some(irq_thread), k)?;
+        }
+        control::unmask_block(&self.dev.regs, panthor::regs::GPU_INT, GPU_EVENTS);
+        // The render node.
+        match drm::register(Arc::new(render::Render(Arc::clone(&self.dev)))) {
+            Ok(card) => {
+                dri::publish(cx.sleepable(), card.unit(), true, "platform:panthor", false);
+                *self.card.lock() = Some(card);
+            }
+            Err(e) => self.dev.log(format_args!("no render node: {e:?}")),
+        }
+        let unit = self.dev.unit;
+        let (boot, report) = (Arc::clone(&self.dev), Arc::clone(&self.dev));
         bus::manager().sysctl(cx.sleepable(), &mut |t| {
             let Some(node) = bus::device_node(t, Self::NAME, unit) else {
                 return;
@@ -310,7 +492,7 @@ impl Driver for Panthor {
                 sysctl::Number::Auto,
                 "mcu",
                 "Where the GPU's microcontroller is",
-                sysctl::Value::Str(Box::new(move |out| out.push_str(&r.report()))),
+                sysctl::Value::Str(Box::new(move |out| out.push_str(&r.status()))),
             );
             let b = Arc::clone(&boot);
             let _ = t.add_writable(
@@ -334,19 +516,22 @@ impl Driver for Panthor {
 
     fn stop(&self, cx: &mut StopCx<'_>, _: StopReason) {
         let s = cx.sleepable();
-        // The thread first: a boot in progress finishes (or fails and tears itself down)
-        // before anything it uses goes.
-        self.gpu.exit.store(true, Ordering::Release);
-        self.gpu.queue.wake_all();
+        // The render node first: no new requests.
+        if let Some(card) = self.card.lock().take() {
+            card.unregister(s);
+        }
+        // The thread: a boot or a cleanup in progress finishes before anything it uses goes.
+        self.dev.exit.store(true, Ordering::Release);
+        self.dev.queue.wake_all();
         let t = self.thread.lock().take();
         if let Some(t) = t {
             t.join(s);
         }
         // Then a running MCU is stopped and its memory freed (05 §5.7.4), before the clocks,
         // the domain vote and the register grants are released with the instance.
-        let booted = core::mem::replace(&mut *self.gpu.state.lock(), Ok(None));
-        if let Ok(Some(b)) = booted {
-            b.shut_down(&self.gpu.regs, &|a| self.gpu.log(a));
+        let booted = self.dev.core.lock(s).fw.take();
+        if let Some(b) = booted {
+            b.shut_down(&self.dev.regs, &|a| self.dev.log(a));
         }
     }
 }
