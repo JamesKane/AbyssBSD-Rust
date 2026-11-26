@@ -287,6 +287,17 @@ pub(crate) struct Render {
     guilty: SpinLock<Vec<u32>>,
     /// The pool of video memory for buffers, and how many were made there,
     /// how many asked for it, and how many of those could be shared.
+    /// When an address space's translations last changed (a mapping made or
+    /// removed, a file opened or closed), as a count; and for each engine the
+    /// address space and count its last job switched to. A job whose address
+    /// space is the one the engine already has, with nothing changed since,
+    /// needs no switch and no flush of the translation caches (which cost
+    /// every job its translations, and the next its walks).
+    vm_epoch: AtomicU64,
+    ring_vm: SpinLock<[Option<(u32, u64)>; ENGINES]>,
+    /// Jobs that skipped the switch, and jobs that made it.
+    vm_skipped: AtomicU64,
+    vm_flushed: AtomicU64,
     vram: Arc<crate::vram::VramPool>,
     vram_made: AtomicU64,
     vram_asked: AtomicU64,
@@ -338,6 +349,10 @@ impl Render {
                 },
             }),
             vram: crate::vram::VramPool::new(crate::vram::POOL_START, crate::vram::POOL_END),
+            vm_epoch: AtomicU64::new(1),
+            ring_vm: SpinLock::new([None; ENGINES]),
+            vm_skipped: AtomicU64::new(0),
+            vm_flushed: AtomicU64::new(0),
             vram_made: AtomicU64::new(0),
             vram_asked: AtomicU64::new(0),
             vram_asked_shared: AtomicU64::new(0),
@@ -351,9 +366,11 @@ impl Render {
     /// What the submissions looked like, for the `render` sysctl.
     pub(crate) fn summary(&self) -> alloc::string::String {
         alloc::format!(
-            "{} submissions, {} with a buffer list, {} with inline buffer handles, {} ring resets, {} deadline hints; \
+            "{} submissions ({} switched address space, {} did not), {} with a buffer list, {} with inline buffer handles, {} ring resets, {} deadline hints; \
              buffer requests: {} ({} write-combined, {} MiB of them; {} local); {} asked for video memory ({} that could be shared), {} made there, {} KiB of {} KiB in use",
             self.cs_count.load(Ordering::Relaxed),
+            self.vm_flushed.load(Ordering::Relaxed),
+            self.vm_skipped.load(Ordering::Relaxed),
             self.cs_with_list.load(Ordering::Relaxed),
             self.cs_with_handles.load(Ordering::Relaxed),
             self.resets.load(Ordering::Relaxed),
@@ -466,6 +483,7 @@ impl Render {
             d.complete(&gpu, self.last_seq(Engine::Dma));
         }
         self.resets.fetch_add(1, Ordering::AcqRel);
+        self.vm_changed();
         *self.watch.lock() = [None; ENGINES];
         self.queue.wake_all();
     }
@@ -544,6 +562,7 @@ impl Render {
         let ctx = self.last_ctx_of.lock()[engine.index()];
         self.guilty.lock().push(ctx);
         self.resets.fetch_add(1, Ordering::AcqRel);
+        self.vm_changed();
         self.queue.wake_all();
         log(format_args!(
             "render: {engine:?}: ring {}; jobs up to {last} completed",
@@ -562,6 +581,32 @@ impl Render {
             &mut || self.done(amd, engine, seq).unwrap_or(true),
             ns,
         );
+    }
+
+    /// Whether a job in address space `vmid` on `engine` must switch to it
+    /// and flush the translation caches first, and the count of changes it
+    /// was decided at.
+    fn vm_check(&self, engine: Engine, vmid: u32) -> (bool, u64) {
+        let epoch = self.vm_epoch.load(Ordering::Acquire);
+        let flush = self.ring_vm.lock()[engine.index()] != Some((vmid, epoch));
+        (flush, epoch)
+    }
+
+    /// The job was put on the ring: remember what the engine's address space
+    /// is.
+    fn vm_done(&self, engine: Engine, vmid: u32, epoch: u64, flushed: bool) {
+        if flushed {
+            self.ring_vm.lock()[engine.index()] = Some((vmid, epoch));
+            self.vm_flushed.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.vm_skipped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Every engine's next job switches address space: after a mapping
+    /// changed, or a ring or the chip was reset.
+    fn vm_changed(&self) {
+        self.vm_epoch.fetch_add(1, Ordering::AcqRel);
     }
 
     fn amd(&self) -> Result<Arc<Amd>, Errno> {
@@ -603,6 +648,7 @@ impl Render {
                     fence_pages: false,
                 },
             );
+            self.vm_changed();
         }
         let State { files, count, .. } = &mut *st;
         let fs = files.get_mut(&file).ok_or(Errno::ENODEV)?;
@@ -773,20 +819,25 @@ impl Render {
                     });
                     Ok(())
                 })?;
+                self.vm_changed();
                 Ok(0)
             }
-            uapi::va_op::UNMAP => self.with_file(&amd, cx.file_id(), |fs, _| {
-                let at = fs
-                    .maps
-                    .iter()
-                    .position(|m| m.va == r.va_address && m.pages == pages)
-                    .ok_or(Errno::EINVAL)?;
-                fs.space
-                    .unmap(r.va_address, pages)
-                    .map_err(|_| Errno::EINVAL)?;
-                fs.maps.remove(at);
-                Ok(0)
-            }),
+            uapi::va_op::UNMAP => {
+                let done = self.with_file(&amd, cx.file_id(), |fs, _| {
+                    let at = fs
+                        .maps
+                        .iter()
+                        .position(|m| m.va == r.va_address && m.pages == pages)
+                        .ok_or(Errno::EINVAL)?;
+                    fs.space
+                        .unmap(r.va_address, pages)
+                        .map_err(|_| Errno::EINVAL)?;
+                    fs.maps.remove(at);
+                    Ok(0)
+                });
+                self.vm_changed();
+                done
+            }
             _ => Err(Errno::EINVAL),
         }
     }
@@ -1001,6 +1052,7 @@ impl Render {
                     )
                     .map_err(|_| Errno::ENOMEM)?;
                 fs.fence_pages = true;
+                self.vm_changed();
             }
             // A fence word's buffer is named by handle, not by address: it is
             // mapped here, once, if the client did not map it itself.
@@ -1023,6 +1075,7 @@ impl Render {
                                 })
                                 .map_err(|_| Errno::ENOMEM)?;
                             fs.kernel_next += pages * 4096;
+                            self.vm_changed();
                             fs.maps.push(Mapping {
                                 va,
                                 pages,
@@ -1067,7 +1120,10 @@ impl Render {
                     4,
                     true,
                 );
-                p.0.extend(amdgpu::gmc::ring_vm_flush(vmid, root, false, 0).0);
+                let (flush, epoch) = self.vm_check(engine, vmid);
+                if flush {
+                    p.0.extend(amdgpu::gmc::ring_vm_flush(vmid, root, false, 0).0);
+                }
                 let switched = self.last_ctx.swap(ctx_id, Ordering::AcqRel) != ctx_id;
                 p.context_control(if switched { 0x0101_8003 } else { 0 });
                 p.frame_control(false);
@@ -1103,6 +1159,7 @@ impl Render {
                     return Err(e);
                 }
                 self.seq.store(seq, Ordering::Release);
+                self.vm_done(engine, vmid, epoch, flush);
                 break seq;
             },
             Engine::Dma => loop {
@@ -1204,7 +1261,10 @@ impl Render {
                 if gfx.compute_finished(&gpu, r).wrapping_sub(last) >= 0x8000_0000 {
                     p.wait_mem(3, gfx.compute_seq_address(r), last, 0xffff_ffff, 4, false);
                 }
-                p.0.extend(amdgpu::gmc::ring_vm_flush_on(vmid, root, false, 4 + r, false).0);
+                let (flush, epoch) = self.vm_check(engine, vmid);
+                if flush {
+                    p.0.extend(amdgpu::gmc::ring_vm_flush_on(vmid, root, false, 4 + r, false).0);
+                }
                 for ib in &ibs {
                     p.indirect_buffer(extended(ib.va_start), ib.ib_bytes / 4, vmid, true);
                 }
@@ -1234,6 +1294,7 @@ impl Render {
                     return Err(e);
                 }
                 self.comp_seq[r].store(seq, Ordering::Release);
+                self.vm_done(engine, vmid, epoch, flush);
                 break seq;
             },
         };
@@ -1531,6 +1592,7 @@ impl RenderApi for Render {
     }
 
     fn file_closed(&self, file: u64) {
+        self.vm_changed();
         let mut st = self.state.lock();
         if let Some(mut fs) = st.files.remove(&file) {
             st.slots[fs.slot] = false;
