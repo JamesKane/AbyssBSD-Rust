@@ -3020,6 +3020,38 @@ fn new_obj(f: &Arc<crate::Open>) -> u32 {
 }
 
 #[test]
+fn a_timeline_waits_only_for_what_has_not_finished() {
+    // A renderer's timeline gains a point a frame. Those that finished
+    // are not part of a later wait (each frame's wait would grow with the
+    // frames before it) and are not kept, but the query still reports the
+    // last of them.
+    let c = card(true, true);
+    let f = open(&c);
+    let h = new_obj(&f);
+    let obj = f.syncobjs.lock().get(h).unwrap();
+    for p in 1..=2000 {
+        obj.add_point(p, Arc::new(crate::Done)).unwrap();
+    }
+    let gate = Arc::new(Gate::default());
+    let as_fence = gate.clone() as Arc<dyn crate::Fence>;
+    obj.add_point(2001, Arc::clone(&as_fence)).unwrap();
+    let wait = obj.find(2001).unwrap().unwrap();
+    assert!(
+        Arc::ptr_eq(&wait, &as_fence),
+        "the wait is the open fence alone"
+    );
+    assert!(obj.find(1500).unwrap().unwrap().signaled());
+    assert_eq!(obj.query(false), 2000);
+    // Past the old limit of kept points: finished ones keep going.
+    gate.finish();
+    for p in 2002..=6000 {
+        obj.add_point(p, Arc::new(crate::Done)).unwrap();
+    }
+    assert_eq!(obj.query(false), 6000);
+    c.unregister(&s());
+}
+
+#[test]
 fn a_timeline_object_signals_waits_and_answers_queries() {
     let c = card(true, true);
     let f = open(&c);

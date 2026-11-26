@@ -56,6 +56,19 @@ const MAX_POINTS: usize = 4096;
 /// nanoseconds.
 const SUBMIT_WAIT_NS: u64 = 10_000_000_000;
 
+/// Drops a timeline's leading points that finished, all but the latest of
+/// them (the query reports it).
+fn drop_finished(points: &mut BTreeMap<u64, Arc<dyn Fence>>) {
+    let done: Vec<u64> = points
+        .iter()
+        .take_while(|(_, f)| f.signaled())
+        .map(|(k, _)| *k)
+        .collect();
+    for k in done.iter().take(done.len().saturating_sub(1)) {
+        points.remove(k);
+    }
+}
+
 /// Something that finishes once: a submission's completion.
 pub trait Fence: Send + Sync {
     /// Whether it has finished.
@@ -224,19 +237,14 @@ impl SyncObj {
                 return Err(Errno::EINVAL);
             }
             // Points that finished, with everything before them, are not
-            // needed; keep the latest of them for the query.
+            // needed; keep the latest of them for the query. Dropped at every
+            // new point, not only at the limit: a wait's fence is everything
+            // up to its point, so the finished ones a timeline keeps make
+            // every later wait and query longer (a renderer's timeline gains
+            // a point per frame).
+            drop_finished(points);
             if points.len() >= MAX_POINTS {
-                let done = points
-                    .iter()
-                    .take_while(|(_, f)| f.signaled())
-                    .map(|(k, _)| *k)
-                    .collect::<Vec<_>>();
-                for k in done.iter().take(done.len().saturating_sub(1)) {
-                    points.remove(k);
-                }
-                if points.len() >= MAX_POINTS {
-                    return Err(Errno::ENOSPC);
-                }
+                return Err(Errno::ENOSPC);
             }
             points.insert(point, fence);
         }
@@ -272,9 +280,15 @@ impl SyncObj {
                 let Some(upto) = upto else {
                     return Ok(None);
                 };
-                let list: Vec<Arc<dyn Fence>> =
-                    points.range(..=upto).map(|(_, f)| Arc::clone(f)).collect();
+                // A fence that finished stays finished: only the others are
+                // waited for, and the point's own when all have.
+                let list: Vec<Arc<dyn Fence>> = points
+                    .range(..=upto)
+                    .filter(|(_, f)| !f.signaled())
+                    .map(|(_, f)| Arc::clone(f))
+                    .collect();
                 Ok(Some(match list.as_slice() {
+                    [] => Arc::clone(&points[&upto]),
                     [one] => Arc::clone(one),
                     _ => Arc::new(All(list)),
                 }))
