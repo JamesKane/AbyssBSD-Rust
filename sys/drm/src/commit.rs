@@ -111,6 +111,9 @@ impl Kms {
                         .and_then(|v| i32::try_from(v).map_err(|_| Errno::EINVAL).map(|_| v))?
                 }
                 x if x == s.plane_type || x == s.in_formats => return Err(Errno::EINVAL),
+                // Taken by the atomic call, which waits for it (a state
+                // does not keep it); set any other way it does nothing.
+                x if x == s.in_fence_fd => {}
                 _ => {
                     let at = self.extra_slot(&self.planes[i].props, p.extra.len(), prop)?;
                     p.extra[at] = self.check_extra(prop, value)?;

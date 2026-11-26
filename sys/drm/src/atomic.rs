@@ -19,6 +19,9 @@ use crate::kms::{Kms, PlaneKind, PlaneSt, PropId, State};
 /// The most objects, and properties in all, one atomic call may carry.
 const MAX_OBJS: u32 = 1024;
 const MAX_PROPS: u64 = 16384;
+/// How long a commit waits for a plane's fence: a job that does not finish
+/// in this time is a hung one (the driver resets its ring after 2 s).
+const IN_FENCE_WAIT_NS: u64 = 10_000_000_000;
 
 fn kms_of(f: &Open) -> Result<&Kms, Errno> {
     f.card.driver().kms().ok_or(Errno::ENOTTY)
@@ -95,12 +98,31 @@ pub(crate) fn atomic(f: &Open, s: &Sleepable, a: &mut DrmModeAtomic) -> Result<u
 
     let mut new = k.state();
     let mut at = 0;
+    // The fences the new buffers wait for (`IN_FENCE_FD` of the planes).
+    let mut waits = Vec::new();
     for (obj, count) in objs.iter().zip(&counts) {
         let end = at + usize::try_from(*count).map_err(|_| Errno::EINVAL)?;
         for j in at..end {
+            if PropId(props[j]) == k.std.in_fence_fd && k.plane_index(ObjId(*obj)).is_some() {
+                let fd = i32::try_from(values[j].cast_signed()).map_err(|_| Errno::EINVAL)?;
+                if fd >= 0 {
+                    let env = crate::env().ok_or(Errno::ENXIO)?;
+                    waits.push((env.import_syncfile)(s, fd)?.fence());
+                }
+                continue;
+            }
             k.set_prop(&mut new, ObjId(*obj), PropId(props[j]), values[j])?;
         }
         at = end;
+    }
+    // The renderers' work on the buffers finishes before they are shown
+    // (a test does not wait: it shows nothing).
+    if a.flags & DRM_MODE_ATOMIC_TEST_ONLY == 0 {
+        for fence in &waits {
+            if !fence.wait(s, IN_FENCE_WAIT_NS) {
+                return Err(Errno::ETIMEDOUT);
+            }
+        }
     }
     k.commit(
         f,

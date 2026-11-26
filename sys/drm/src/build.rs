@@ -191,6 +191,7 @@ impl KmsBuilder {
                 ),
             ],
             in_formats: add("IN_FORMATS", PropKind::Blob, true, false),
+            in_fence_fd: add("IN_FENCE_FD", i32r, false, true),
             active: add("ACTIVE", PropKind::Range { min: 0, max: 1 }, false, true),
             mode_id: add("MODE_ID", PropKind::Blob, false, true),
             dpms: add("DPMS", PropKind::Enum(DPMS), false, false),
@@ -215,6 +216,7 @@ impl KmsBuilder {
             std.dst[2],
             std.dst[3],
             std.in_formats,
+            std.in_fence_fd,
         ];
         let std_crtc = [std.active, std.mode_id];
         let std_conn = [std.dpms, std.edid, std.conn_crtc_id];

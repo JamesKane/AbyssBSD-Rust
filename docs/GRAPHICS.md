@@ -1005,7 +1005,7 @@ reboot (always set `BootNext` first so the board does not boot Fedora).
   other than 1080p60); they are copied.
 - Sound over HDMI through the sound engine (`/dev/dsp`, docs/AUDIO.md); the Navi 22 (Z690-A) bring-up; the half-speed-after-reset cause (§16.8).
 - Render targets in video memory, the compute rings' dependency wait through system memory, buffers made whole at
-  creation so a mapping does not fault page by page, and `IN_FENCE_FD` on the planes (all §16.15).
+  creation so a mapping does not fault page by page, (all §16.15).
 
 ### 16.11 HDMI audio: the stream half
 
@@ -1201,11 +1201,13 @@ Where AbyssBSD is still behind (ratio of frames per second): `shadow` 0.88, `ref
 3. `drm.submit.compute.batch`: 1,000 jobs queued behind each other wait for the previous fence, which the engine
    polls in system memory (33 us a job against 8 us when the word was in video memory); a job queue that is
    shallow is unaffected. A compute job could wait on a copy of the word in video memory.
-4. **Sway with the `gles2` renderer does not start**: wlroots commits with an explicit-sync fence now that the
-   render node advertises native fence sync (§16.12), and the planes have no `IN_FENCE_FD` property
-   (`Plane 2 is missing the IN_FENCE_FD property`, then `Backend commit failed`); the `pixman` renderer is
-   unaffected. The planes need `IN_FENCE_FD` (and the CRTC `OUT_FENCE_PTR`): an atomic commit waits for the sync
-   file's fences before flipping. Found while testing this work; not caused by it.
+4. **Sway with the `gles2` renderer did not start**, and now does: wlroots commits with an explicit-sync fence now
+   that the render node advertises native fence sync (§16.12), and the planes had no `IN_FENCE_FD` property
+   (`Plane 2 is missing the IN_FENCE_FD property`, then `Backend commit failed`). Each plane now has it
+   (`sys/drm/src/atomic.rs`: a signed range, the atomic call turns the descriptor into the sync file's fence and
+   waits for it, up to 10 s, before the commit; it is never held in the state and reads back -1). Verified on the
+   X870E: Sway 1.12 with `gles2` and the glmark2 jellyfish, drawn correctly (watched), 1,759 frames scanned out
+   in place in 30 s. Not built: `OUT_FENCE_PTR` on the display controller (wlroots goes without).
 
 The regression programs (`amdrender`, `amdsync`, `amdprime`, `amdhang`) pass on the final build, and the host
 tests, `cargo xtask check` and the x86_64 and aarch64 boot cases do. The hot-plug interrupt, whose ring is now in

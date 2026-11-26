@@ -1043,6 +1043,7 @@ fn plane_properties_and_in_formats() {
             "CRTC_W",
             "CRTC_H",
             "IN_FORMATS",
+            "IN_FENCE_FD",
             "zpos"
         ]
     );
@@ -2725,6 +2726,13 @@ impl crate::Fence for Gate {
     fn signaled(&self) -> bool {
         self.open.load(std::sync::atomic::Ordering::SeqCst)
     }
+    fn wait(&self, _s: &sched::Sleepable, ns: u64) -> bool {
+        let end = std::time::Instant::now() + std::time::Duration::from_nanos(ns);
+        while !self.signaled() && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        self.signaled()
+    }
     fn register(&self, w: &Arc<dyn vfs::event::Wake>) {
         self.wakers.lock().unwrap().push(Arc::clone(w));
     }
@@ -2741,6 +2749,61 @@ impl vfs::event::Wake for Counter {
     fn wake(&self) {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+#[test]
+fn a_plane_waits_for_its_in_fence_before_the_commit_and_reads_back_minus_one() {
+    let (c, calls) = card_logged();
+    let f = open(&c);
+    let i = ids(&f);
+    ctl(
+        &f,
+        DRM_IOCTL_SET_CLIENT_CAP,
+        &DrmSetClientCap {
+            capability: DRM_CLIENT_CAP_ATOMIC,
+            value: 1,
+        },
+    )
+    .unwrap();
+    let fb = make_fb(&f, 1920, 1080);
+    let p = DRM_MODE_OBJECT_PLANE;
+    let in_fence = pid(&f, i.primary, p, "IN_FENCE_FD");
+    let modeset = DRM_MODE_ATOMIC_ALLOW_MODESET;
+    let with = |fd: i64| {
+        let mut changes = light(&f, &i, fb);
+        changes[2].1.push((in_fence, fd.cast_unsigned()));
+        changes
+    };
+    // A descriptor that names nothing is refused, and nothing is committed.
+    assert_eq!(atomic(&f, modeset, 0, &with(77)).err(), Some(Errno::EBADF));
+    assert!(take(&calls).is_empty());
+    // A fence still running holds the commit until it finishes.
+    let gate = Arc::new(Gate::default());
+    let sf = crate::SyncFile::new(std::vec![gate.clone() as Arc<dyn crate::Fence>]);
+    let fd = {
+        let mut t = SYNC_FILES.lock().unwrap();
+        t.push(sf);
+        200 + i64::try_from(t.len()).unwrap()
+    };
+    let opener = gate.clone();
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        opener.finish();
+    });
+    let before = std::time::Instant::now();
+    atomic(&f, modeset, 0, &with(fd)).unwrap();
+    assert!(before.elapsed() >= std::time::Duration::from_millis(40));
+    assert!(crate::Fence::signaled(&*gate));
+    t.join().unwrap();
+    assert!(!take(&calls).is_empty(), "the commit went through");
+    // The state does not keep it.
+    let v = props_of(&f, i.primary, p)
+        .iter()
+        .find(|(_, _, n)| n == "IN_FENCE_FD")
+        .unwrap()
+        .1;
+    assert_eq!(v.cast_signed(), -1);
+    c.unregister(&s());
 }
 
 #[test]
