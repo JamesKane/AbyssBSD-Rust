@@ -1,0 +1,36 @@
+perf on the Ryzen 9 7900X / X870E: AbyssBSD 4b1c64c vs FreeBSD 15.1-RELEASE GENERIC (stock)
+3 FreeBSD runs, 3 AbyssBSD runs; FreeBSD 15.1 userland on both
+
+freebsd: side=freebsd ident=GENERIC 15.1-RELEASE
+freebsd: cpu0 freq=3000 cx=C1
+freebsd: processes=50 load={ 0.13 0.03 0.01 }
+abyss: side=abyss ident=ABYSSBSD 15.1-RELEASE
+abyss: cpu0 freq=2994 cx=none
+abyss: processes=30 load={ 0.06 0.01 0.00 }
+
+core class all, AbyssBSD 4b1c64c vs FreeBSD 15.1-RELEASE GENERIC (stock), 3/3 runs
+ratio = median(AbyssBSD) / median(FreeBSD); pass <= 1.02; noisy = FreeBSD CV > 1%
+
+benchmark                     FreeBSD       AbyssBSD   ratio  95% CI              CV  verdict
+io.null.write              94.1 ns/op     91.0 ns/op   0.967  [0.861, 0.983]   4.7%  Noisy
+io.zero.read              176.8 ns/op    173.3 ns/op   0.980  [0.939, 0.997]   2.5%  Noisy
+pipe.bw                  6529.0 ns/op   6978.2 ns/op   1.069  [1.059, 1.324]   1.1%  Noisy
+pipe.pingpong            3866.1 ns/op   1741.1 ns/op   0.450  [0.446, 0.455]   0.8%  Win
+proc.exec               57494.8 ns/op  52379.8 ns/op   0.911  [0.827, 0.945]   5.6%  Noisy
+proc.fork               15895.3 ns/op  16795.6 ns/op   1.057  [1.001, 1.070]   0.4%  Slower
+proc.vfork_exec         64116.2 ns/op  59277.8 ns/op   0.925  [0.848, 0.952]   5.1%  Noisy
+sig.deliver              1080.0 ns/op    936.3 ns/op   0.867  [0.862, 0.875]   0.2%  Win
+syscall.getpid             64.7 ns/op     65.2 ns/op   1.008  [0.843, 1.020]   4.9%  Noisy
+vm.fault.anon             611.1 ns/op    568.6 ns/op   0.930  [0.913, 0.946]   1.3%  Noisy
+vm.fault.cow              668.6 ns/op    609.5 ns/op   0.912  [0.886, 0.936]   2.2%  Noisy
+vm.mmap                   277.3 ns/op    282.3 ns/op   1.018  [0.911, 1.054]   3.6%  Noisy
+
+geometric mean ratio 0.906; 0 pass, 2 win, 1 slower, 9 noisy, 0 missing
+
+components (gate: geometric mean <= 1.02):
+io                       2 benchmarks   0.974  pass
+pipe                     2 benchmarks   0.694  pass
+proc                     3 benchmarks   0.962  pass
+sig                      1 benchmarks   0.867  pass
+syscall                  1 benchmarks   1.008  pass
+vm                       3 benchmarks   0.952  pass

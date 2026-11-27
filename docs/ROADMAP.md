@@ -584,6 +584,16 @@ stock 15.1. Open:
   made `sendfile` 1.67x, 30 us with the 40 us gap brought it back to 1.000. Measured only on the RTL8125D;
   the RTL8126, `igc` and `virtio-net` do not poll. Left: software LRO for the per-segment stack cost
   (`tcp.cpu.rx` 1.35x, `tcp.cpu.tx` 1.4 to 1.6x and noisy, `tcp.rr.net.p50` 1.06x).
+  **vm passes (2026-11-27):** split in userland on both kernels at 3000 MHz, the gap was in the new
+  page's path: not teardown (`munmap` 27 ns a page against stock's 46), not superpages (stock with
+  `vm.pmap.pg_ps_enabled=0` scored the same), not the shared fault path (a write fault on a resident
+  page matched). Timers with a fence after the zero (else `rep stosb`'s store drain lands on the next
+  locked instruction) put the object's `BTreeMap` at 205 cycles a lookup and 371 an insert. An
+  object's pages are now in `lib/radix`, a 16-way radix tree as FreeBSD's `pctrie`: anonymous fault
+  629 to 550 ns (stock 580), copy-on-write 704 to 615 (stock 665). `p4` (3 runs): every component
+  passes, `vm` 0.952, geometric mean 0.906. The stock side's pin had been a no-op when cpufreq
+  believed it already at 3000 MHz (the package boosted to 5.47 GHz): the runners write another level
+  first; older stock columns are suspect unless `getpid` is about 64 ns.
   **sig, syscall, vm (2026-11-26, audited against FreeBSD's source):** `p4` at 3000 MHz went from
   `sig.deliver` 1.23 to 1.13, `getpid` 1.06 to 1.04, `vm.fault.anon` 1.13 to 1.07, `vm.fault.cow` 1.13 to
   1.08, `vm.mmap` 1.06 to 1.05 (frame filled in place, `sigreturn` without a save and a second zeroing,
