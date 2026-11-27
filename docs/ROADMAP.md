@@ -568,6 +568,11 @@ stock 15.1. Open:
   and `sigreturn` copies into the area; exec drops; firmware calls use `sched::simd`; ptrace and core
   dumps materialize the area. `p4` (3 runs): `sig.deliver` 1.13 to 0.878, `getpid` 0.92, `proc` 1.009;
   `vm` 1.046 is the one component left over the gate (`fault.anon` 1.07, `fault.cow` 1.08). Still to
+  do for `vm` (measured on the machine with rdtsc probes, since removed): the page tree is not the gap
+  (`insert` under the lock 220 cycles of 1400 in `fault::resolve`); allocating the page is 870, of which
+  zeroing a cold page 510 (330 hot): the 64 MiB region is freed to the buddy allocator past the 64-page
+  per-CPU cache, so pages come back cold. A 1024-page cache (refills and drains of 64) took `fault.anon` 428
+  to 406-416 ns unpinned and `vm` 1.046 to 1.039 pinned; `fault.cow` (1.08) is still to be probed. Still to
   do for `sig`: build the frame from the thread's area without the extra copies. `xsaveopt` is not used.
   `fs.ufs.fsx` was 2.5: `ftruncate` zeroed and moved fragments on the disk, synchronously;
   it now clears and carries them in the page cache (`truncate_new`), as FreeBSD's `ffs_truncate` works in

@@ -596,9 +596,9 @@ pub struct PageMagazine {
 
 impl PageMagazine {
     /// Pages a magazine holds.
-    pub const CAPACITY: usize = 64;
+    pub const CAPACITY: usize = 1024;
     /// Pages moved to or from the buddy allocator at a time.
-    pub const BATCH: usize = Self::CAPACITY / 2;
+    pub const BATCH: usize = 64;
 
     /// An empty magazine.
     #[must_use]
@@ -922,8 +922,8 @@ mod tests {
 
     #[test]
     fn magazine_batches() {
-        with(&[seg(0, 256, 0)], |a| {
-            a.add_free(Pfn(0), Pfn(256));
+        with(&[seg(0, 4096, 0)], |a| {
+            a.add_free(Pfn(0), Pfn(4096));
             let total = a.stats().free;
             let mut m = PageMagazine::new();
             assert_eq!(m.pop(), None);
@@ -935,7 +935,9 @@ mod tests {
                 m.push(p).unwrap();
             }
             // Fill to capacity, then the next push is refused.
-            m.refill(a, DomainId(0));
+            while m.len() < PageMagazine::CAPACITY {
+                m.refill(a, DomainId(0));
+            }
             assert_eq!(m.len(), PageMagazine::CAPACITY);
             let extra = a.alloc(Order::ZERO, DomainId(0)).unwrap();
             assert_eq!(m.push(extra), Err(extra));
