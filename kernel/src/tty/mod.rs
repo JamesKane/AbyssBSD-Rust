@@ -226,6 +226,26 @@ impl Output<'_> {
     }
 }
 
+/// Stores `v` in a mirror unless it is there already, returning what was
+/// there if it changed. Release: a waiter that sees a mirror sees the
+/// state it mirrors.
+fn set_usize(a: &AtomicUsize, v: usize) -> Option<usize> {
+    let old = a.load(Ordering::Relaxed);
+    (old != v).then(|| {
+        a.store(v, Ordering::Release);
+        old
+    })
+}
+
+/// [`set_usize`] for a flag: whether it changed.
+fn set_bool(a: &AtomicBool, v: bool) -> bool {
+    let changed = a.load(Ordering::Relaxed) != v;
+    if changed {
+        a.store(v, Ordering::Release);
+    }
+    changed
+}
+
 /// Writes all queued output with `f`, for devices that write at once.
 fn drain_with(out: &mut Output<'_>, f: &mut dyn FnMut(&[u8])) {
     let mut buf = [0u8; 1024];
@@ -609,24 +629,40 @@ impl Tty {
     /// Updates the wait-condition mirrors from the state, and tells
     /// pollers.
     fn mirror(&self, st: &State) {
-        self.zombie.store(st.zombie, Ordering::Release);
-        self.gone.store(st.gone, Ordering::Release);
-        self.mirror_disc(&st.d);
+        self.mirror_with(
+            &st.d,
+            set_bool(&self.zombie, st.zombie) | set_bool(&self.gone, st.gone),
+        );
     }
 
     /// The mirrors of the discipline's state. Sleepers' conditions read
     /// them, so they are set before any wakeup.
+    ///
+    /// A mirror is stored only when it changes: a writer queues output a
+    /// chunk at a time, mirroring after each under the terminal's lock,
+    /// and a store of what is already there would still take the line
+    /// from the CPU reading the other side. The terminal's pollers and
+    /// knotes hear only of a change in what they look at (input ready,
+    /// room to write, or output stopped); data arriving and room freed
+    /// wake them as FreeBSD's `tty_wakeup` does ([`Tty::wakeup`]).
     fn mirror_disc(&self, d: &Discipline) {
-        // Release: a waiter that sees a mirror sees the state it mirrors.
-        self.readable.store(d.readable(), Ordering::Release);
-        self.ready.store(d.read_poll(), Ordering::Release);
-        self.out_room.store(d.output_room(), Ordering::Release);
+        self.mirror_with(d, false);
+    }
+
+    /// [`Tty::mirror_disc`], notifying also if `seen`.
+    fn mirror_with(&self, d: &Discipline, mut seen: bool) {
+        seen |= set_bool(&self.readable, d.readable());
+        seen |= set_usize(&self.ready, d.read_poll()).is_some();
+        let room = d.output_room();
+        seen |= set_usize(&self.out_room, room).is_some_and(|old| (old == 0) != (room == 0));
         let used = if d.stopped() { 0 } else { d.output_len() };
-        self.out_used.store(used, Ordering::Release);
-        self.in_room.store(d.input_room(), Ordering::Release);
-        self.hiwat_out.store(d.hiwat_out(), Ordering::Release);
-        self.stopped.store(d.stopped(), Ordering::Release);
-        self.notify.notify(0);
+        set_usize(&self.out_used, used);
+        set_usize(&self.in_room, d.input_room());
+        set_bool(&self.hiwat_out, d.hiwat_out());
+        seen |= set_bool(&self.stopped, d.stopped());
+        if seen {
+            self.notify.notify(0);
+        }
     }
 
     /// Wakes readers, writers, or both (`tty_wakeup`).
