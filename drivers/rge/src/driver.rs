@@ -84,9 +84,9 @@ const TICK_NS: u64 = 1_000_000_000;
 /// reads the status again) while frames keep coming. A busy receiver then
 /// takes a few frames at a time for one interrupt's cost in register
 /// reads, as a controller's interrupt timer would give.
-const POLL_NS: u64 = 100_000;
-const POLL_GAP_NS: u64 = 300_000;
-const POLL_MAX: u32 = 16;
+const POLL_NS: u64 = 30_000;
+const POLL_GAP_NS: u64 = 40_000;
+const POLL_MAX: u32 = 64;
 /// How often the doorbell watch looks while frames are in flight, and how
 /// old the oldest may be before it rings again. A frame takes some tens of
 /// microseconds to go; one older than this has been left in the ring.
@@ -431,22 +431,13 @@ impl Shared {
     fn service(&self, s: &Sleepable) {
         let mut g = self.core.lock(s);
         let mut link = false;
-        // After a pass that took what the acknowledgement showed, the
-        // controller is unmasked without reading its status again (a read
-        // of the device costs about as much as the pass's frames): what
-        // arrived meanwhile is taken after the unmask.
-        let mut settled = false;
         let begin = sched::now_ns();
         let busy = begin.saturating_sub(self.last_end.load(Ordering::Relaxed)) < POLL_GAP_NS;
         loop {
             if self.state() != State::Running {
                 break;
             }
-            let st = if core::mem::take(&mut settled) {
-                0
-            } else {
-                self.chip.ack()
-            };
+            let st = self.chip.ack();
             if !health::responding(st) {
                 self.gone();
                 link = true;
@@ -522,8 +513,6 @@ impl Shared {
                             sched::yield_now();
                         }
                     }
-                } else {
-                    settled = true;
                 }
             }
         }
