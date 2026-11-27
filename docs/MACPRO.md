@@ -63,13 +63,13 @@ heatsink cooled by one fan:
   `FS! `). From a cold boot under 5 min of 24-thread CPU load it held GPU 64→68.5 °C and CPU 76 °C,
   with the fan at about 2600, as macOS does.
 - `spa5` sensor decoding (per-GPU rail power `PG0R`/`PG1R`, system power `PSTR`): `dc9ade6fabec`.
-- The platform-limit hook: fork `eaeaeea29cca` (`asmc_plimit.c`) and drm-kmod `e7da0f18f5`. It
+- The platform-limit hook: fork `eaeaeea29cca` (`asmc_plimit.c`) and drm-kmod `6730343fad`. It
   polls `MSLT` every 2 s and fires an event handler (`platform_power_limit`). It turns off only after 15 zero samples (30 s),
   because `MSLT` flickers to 0 for about 50 s at onset and each flip cost the GPUs a state switch.
   The GPU driver then forces its thermal (lowest) state.
   Later fixes in both trees:
   - fork `421c666bda5a`: the "on" event is re-sent on every sample while on;
-  - drm-kmod `c4c437dcf4`: a limit already on when SI DPM starts is applied.
+  - drm-kmod `e90c912900`: a limit already on when SI DPM starts is applied.
 
   Both cover the same case: a GPU driver that loads while the SMC holds the limit latched, which
   it does across a warm reboot, would otherwise run unlimited until the release. Our `asmc`
@@ -347,7 +347,7 @@ When the owner hands the machine over:
 The fork's work is ongoing (the GPU light-load comparison is not done, and the platform-limit
 hook's hysteresis was still being tuned). Before MP3's `asmc` work and again before MP4:
 - read `git -C ../AbyssBSD/src log -- sys/dev/asmc` and `git -C ../AbyssBSD/kmod/drm log` since
-  the hashes in §2 (newest on 2026-11-27: `421c666bda5a` and `c4c437dcf4`);
+  the hashes in §2 (newest on 2026-11-27: `421c666bda5a` and `e90c912900`);
 - update §2 and HARDWARE.md §9 with what changed, by hash;
 - take its logs from `../abyss-swift-vm` (`macpro-thermal.log`, `fbsd-keys-*.txt`,
   `macos-keys-*.txt`) as the fake SMC's data.
