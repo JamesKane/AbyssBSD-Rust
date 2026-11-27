@@ -820,6 +820,7 @@ dependencies = [
  "pt",
  "random",
  "regs",
+ "rge",
  "sbsa-gwdt",
  "sched",
  "security",
@@ -1012,6 +1013,10 @@ version = "0.0.0"
 dependencies = [
  "addr",
 ]
+
+[[package]]
+name = "radix"
+version = "0.0.0"
 
 [[package]]
 name = "random"
@@ -1506,6 +1511,7 @@ version = "0.0.0"
 dependencies = [
  "addr",
  "hal",
+ "radix",
  "regs",
  "sync",
 ]

@@ -31,12 +31,12 @@
 //! Behavior reference: sys/vm/vm_object.c (shadow chains and collapse).
 
 use alloc::boxed::Box;
-use alloc::collections::btree_map::Entry;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+use radix::{Entry, RadixMap};
 use sync::PreemptLock;
 
 use crate::Pfn;
@@ -742,7 +742,7 @@ impl Page {
 }
 
 struct Inner {
-    pages: BTreeMap<PageIndex, Page>,
+    pages: RadixMap<Page>,
     /// How many of `pages` are dirty.
     dirty_n: usize,
     /// Every dirty page's index lies in `dirty_lo..dirty_hi`, clean ones'
@@ -758,7 +758,7 @@ struct Inner {
 impl Inner {
     const fn new(backing: Option<(Arc<Object>, PageIndex)>) -> Self {
         Self {
-            pages: BTreeMap::new(),
+            pages: RadixMap::new(),
             dirty_n: 0,
             dirty_lo: 0,
             dirty_hi: 0,
@@ -816,7 +816,7 @@ impl Inner {
         let most = usize::try_from(span.end - span.start).unwrap_or(usize::MAX);
         let mut out = Vec::with_capacity(self.dirty_n.min(most));
         let mut cleaned = 0;
-        for (&i, p) in self.pages.range_mut(span) {
+        for (i, p) in self.pages.range_mut(span) {
             if p.dirty {
                 if !p.mapped_writable {
                     p.dirty = false;
@@ -835,7 +835,7 @@ impl Inner {
             return;
         }
         let (mut lo, mut hi, mut added) = (0, 0, 0);
-        for (&i, p) in self.pages.range_mut(start..end) {
+        for (i, p) in self.pages.range_mut(start..end) {
             if !p.dirty {
                 p.dirty = true;
                 if added == 0 {
@@ -1018,11 +1018,11 @@ impl Object {
                 let held = {
                     let mut inner = self.inner.lock();
                     match inner.pages.entry(at + k) {
-                        alloc::collections::btree_map::Entry::Vacant(e) => {
+                        Entry::Vacant(e) => {
                             e.insert(Page::new(pfn));
                             false
                         }
-                        alloc::collections::btree_map::Entry::Occupied(_) => true,
+                        Entry::Occupied(_) => true,
                     }
                 };
                 if held {
@@ -1148,7 +1148,7 @@ impl Object {
                 }
                 let pages = &mut inner.pages;
                 let room = DROP_BATCH.min(want - r.freed);
-                for (&i, &Page { pfn, dirty, .. }) in pages.range(from..) {
+                for (i, &Page { pfn, dirty, .. }) in pages.range(from..) {
                     r.scanned += 1;
                     if !dirty {
                         batch[k] = (i, pfn);
@@ -1467,7 +1467,7 @@ impl Object {
                 .pages
                 .range(next..end)
                 .next()
-                .map_or(end, |(&i, _)| i);
+                .map_or(end, |(i, _)| i);
             if end <= next {
                 return;
             }
@@ -1527,7 +1527,7 @@ impl Object {
     /// there first (then that page wins and this one is freed).
     fn insert_filled(&self, index: PageIndex, new: Pfn) -> Pfn {
         let mut inner = self.inner.lock();
-        // One walk of the tree for the look and the insert.
+        // The look and the insert under one hold of the lock.
         match inner.pages.entry(index) {
             Entry::Occupied(held) => {
                 let pfn = held.get().pfn;
@@ -1566,7 +1566,7 @@ impl Object {
             .pages
             .range(index + 1..end)
             .next()
-            .map_or(end, |(&i, _)| i);
+            .map_or(end, |(i, _)| i);
         drop(inner);
         let run = end.saturating_sub(index).max(1);
         self.ra_window.store(run, Ordering::Relaxed);
@@ -1601,7 +1601,7 @@ impl Object {
             self.pages_ops.uncache(new);
         }
         let mut inner = self.inner.lock();
-        // One walk of the tree for the look and the insert.
+        // The look and the insert under one hold of the lock.
         match inner.pages.entry(index) {
             Entry::Occupied(held) => {
                 let pfn = held.get().pfn;
@@ -1787,7 +1787,7 @@ impl Object {
             });
             return;
         }
-        for (&i, p) in inner.pages.range_mut(first..end) {
+        for (i, p) in inner.pages.range_mut(first..end) {
             p.synced = false;
             if let Some(slot) = usize::try_from(i - first).ok().and_then(|k| out.get_mut(k)) {
                 *slot = Some(p.pfn);
@@ -1811,7 +1811,7 @@ impl Object {
         let tracks = self.tracks_dirty();
         let mut inner = self.inner.lock();
         let (mut lo, mut hi, mut added) = (0, 0, 0);
-        for (&i, p) in inner.pages.range_mut(first..end) {
+        for (i, p) in inner.pages.range_mut(first..end) {
             p.synced = false;
             if tracks && !p.dirty {
                 p.dirty = true;
