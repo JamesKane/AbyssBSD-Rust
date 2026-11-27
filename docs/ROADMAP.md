@@ -576,7 +576,9 @@ stock 15.1. Open:
   the rest, 365, the lookup through the shadow): the lookup now reads the shadowed object with the shadow's
   lock held (one cycle, no clone). Six pinned runs: `fault.anon` 1.039, `fault.cow` 1.067, `mmap` 1.008, `vm`
   1.037, the one component of `p4` still over the gate; the rest pass (`sig` 0.889, `syscall` 0.993, `proc`
-  0.959). Still to
+  0.959). Tried and dropped: taking a run from the high end of a merged block (the pages freed last,
+  which should be the warm ones): no change (`fault.anon` 409-416 ns, `fault.cow` 453-473), so page reuse
+  order is not the gap; a 4096-page cache was no better than 1024. Still to
   do for `sig`: build the frame from the thread's area without the extra copies. `xsaveopt` is not used.
   `fs.ufs.fsx` was 2.5: `ftruncate` zeroed and moved fragments on the disk, synchronously;
   it now clears and carries them in the page cache (`truncate_new`), as FreeBSD's `ffs_truncate` works in
