@@ -95,6 +95,16 @@ impl Source for Chain {
     }
 
     fn read(&self, off: usize, dst: &mut [u8]) -> bool {
+        // Most packets are in their first mbuf: a program's loads of a few
+        // bytes each come straight from it, without the walk of the chain.
+        if let Some(b) = self
+            .first()
+            .and_then(|f| f.get(off..))
+            .and_then(|t| t.get(..dst.len()))
+        {
+            dst.copy_from_slice(b);
+            return true;
+        }
         off.checked_add(dst.len())
             .is_some_and(|e| e <= Chain::len(self))
             && self.copy_out(off, dst) == dst.len()

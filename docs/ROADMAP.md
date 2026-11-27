@@ -550,6 +550,24 @@ stock 15.1. Open:
   sender must reap), so the interrupt thread is not what holds it. Left: the stack's own small items
   (`bpf` with the DHCP client's reader, route lookups, the uptime read), and sending without a doorbell
   for a frame queued behind another (`xmit_more`).
+  **Cached way out (2026-11-27):** timestamp-counter probes through the whole send (one clock read per
+  mark, so the slots add up; 3000 MHz, 993 ns a packet with them in) put 740 ns in the kernel's send and
+  250 outside it, no stage over 14%: the driver's `bpf` tap 100 ns (the DHCP client's filter ran through
+  `Chain::copy_out` a few bytes a load), the network lock with the neighbor search 79, the route lookup
+  under the epoch 51, the IP header 40 + 33, the mbuf and headers 88, the socket and PCB locks 56. The
+  doorbell is a posted write that the next locked instruction waits for (about 80 ns): ringing it every
+  fourth packet raised the rate 10%, but moving it last in the driver only moved the wait to the
+  descriptor's reference drop at the system call's exit (stock's `fdrop` has it too), so it is no gain
+  without removing every locked instruction after it. The FreeBSD design that does cut the stack's share:
+  `udp_send` on a connected socket passes `inp_route` to `ip_output`, which keeps the route and the
+  neighbor (`ro_lle`) and checks them against the FIB's and the table's generation. A datagram socket
+  now keeps its last way out (`TxRoute`: interface, MTU, offloads, the neighbor's address and expiry, and
+  the device) and sends to the same address from it while the tables' generation (counted when a holder
+  of the network lock changes them; the way out, which only touches ARP's counts, does not) is the one it
+  found and the neighbor is unexpired; the entry's `used` flag, which ARP's timer reads, is set without
+  the lock. No route lookup, epoch section, network lock or neighbor search per datagram, and the
+  driver's `Arc` clone is gone from that path: `udp.tx.small` 905 to 767 ns (10.4 million datagrams in 8 s).
+  TCP's output still takes the full path.
   **sig, syscall, vm (2026-11-26, audited against FreeBSD's source):** `p4` at 3000 MHz went from
   `sig.deliver` 1.23 to 1.13, `getpid` 1.06 to 1.04, `vm.fault.anon` 1.13 to 1.07, `vm.fault.cow` 1.13 to
   1.08, `vm.mmap` 1.06 to 1.05 (frame filled in place, `sigreturn` without a save and a second zeroing,

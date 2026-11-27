@@ -164,10 +164,18 @@ pub(crate) fn send(
                             })?;
                         so.send_dgram_chain(data, to, &cred_of(s), ctl)
                     } else {
-                        let mut data = alloc::vec![0u8; len];
-                        let n = uio.copy_in(&mut data)?;
-                        data.truncate(n);
-                        so.send_dgram_ctl(&data, to, &cred_of(s), ctl)
+                        // A small datagram is copied to the stack: no
+                        // buffer to allocate, zero and free.
+                        let mut small = [0u8; 256];
+                        let mut big;
+                        let data: &mut [u8] = if len <= small.len() {
+                            &mut small[..len]
+                        } else {
+                            big = alloc::vec![0u8; len];
+                            &mut big
+                        };
+                        let n = uio.copy_in(data)?;
+                        so.send_dgram_ctl(&data[..n], to, &cred_of(s), ctl)
                     }
                 }
             }
