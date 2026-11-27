@@ -14,7 +14,7 @@
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use sync::SpinLock;
 
@@ -83,6 +83,9 @@ pub struct NetLock {
     /// [`Net::hash_outbound`] as of the last change, a plain word for
     /// every packet (`V_fib_hash_outbound`).
     hash_outbound: AtomicBool,
+    /// How many times a holder changed the tables (the view was remade):
+    /// what a sender's cached route and neighbor are valid for.
+    generation: AtomicU64,
 }
 
 impl core::fmt::Debug for NetLock {
@@ -97,9 +100,19 @@ impl NetLock {
         Self {
             view: crate::view::Published::new(crate::view::View::of(&net)),
             hash_outbound: AtomicBool::new(net.hash_outbound),
+            generation: AtomicU64::new(0),
             net: sync::PreemptLock::new(net),
             listeners: SpinLock::new(Vec::new()),
         }
+    }
+
+    /// The count of changes to the tables: a route or a neighbor found
+    /// when it was `g` is as it was for as long as it still is `g`. Read
+    /// with the lock held to date what the lock's tables say.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        // Acquire: what the changes did is seen with the count.
+        self.generation.load(Ordering::Acquire)
     }
 
     /// Takes the writers' lock.
@@ -235,6 +248,8 @@ impl Drop for NetGuard<'_> {
                 let g = &mut **g;
                 if self.changed {
                     self.owner.view.replace(crate::view::View::of(g));
+                    // Release: after the changes it counts.
+                    self.owner.generation.fetch_add(1, Ordering::Release);
                     // Relaxed: see `NetLock::hash_outbound`.
                     self.owner
                         .hash_outbound

@@ -492,6 +492,9 @@ pub(crate) struct Inner {
     pub(crate) tls_tx: Option<::ktls::Layout>,
     /// A receiving TLS session (`so_rcv.sb_tls_info`).
     pub(crate) tls_rx: Option<alloc::boxed::Box<tls::Rx>>,
+    /// A datagram socket's way out as the last send found it
+    /// (`inp_route`); a send takes it for as long as it sends.
+    pub(crate) txroute: Option<ip::TxRoute>,
 }
 
 /// An internet socket (FreeBSD's `struct socket` with its `inpcb` and,
@@ -639,6 +642,7 @@ impl Socket {
                 groups6: Vec::new(),
                 tls_tx: None,
                 tls_rx: None,
+                txroute: None,
             }),
             rd: Notify::new(),
             wr: Notify::new(),

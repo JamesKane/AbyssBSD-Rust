@@ -650,17 +650,20 @@ fn send(
     nexthop: &[u8; 16],
     is_gw: bool,
     m: Packet,
-) -> Result<(), Errno> {
+) -> Result<Option<Found>, Errno> {
     if i.ty == IFT_LOOP
         && let Some(link) = &i.link.0
     {
-        return net::ether::output_frame(vnet, i.index, link, i.flags, Some(Family::Inet), m);
+        return net::ether::output_frame(vnet, i.index, link, i.flags, Some(Family::Inet), m)
+            .map(|()| None);
     }
     // The way out changes only the frame queues and the link-layer table;
     // an Ethernet frame comes out to be sent with the lock let go, not by
     // the guard's release from the queue.
+    let era;
     let direct = {
         let mut guard = vnet.net.lock();
+        era = vnet.net.generation();
         net::output::output_direct(
             guard.data_path(),
             i.index,
@@ -674,10 +677,123 @@ fn send(
     // As when the guard's release sent it: the device's refusal (a full
     // ring) is a lost frame, which TCP recovers from, not an error for
     // the sender (whose `ENOBUFS` handling waits for a timer).
-    if let Some(d) = direct {
-        let _ = net::ether::output_frame(vnet, i.index, &d.link, d.flags, None, d.m);
+    let Some(d) = direct else {
+        return Ok(None);
+    };
+    let found = d.neighbor.map(|neighbor| Found {
+        era,
+        link: Arc::clone(&d.link),
+        neighbor,
+    });
+    let _ = net::ether::output_frame(vnet, i.index, &d.link, d.flags, None, d.m);
+    Ok(found)
+}
+
+/// What a send found out about the way to an address, as the next
+/// frame needs it (`inp_route` with its `ro_lle`): the neighbor and the
+/// device, as of the generation of the tables.
+struct Found {
+    era: u64,
+    link: Arc<dyn net::link::Link>,
+    neighbor: net::output::Neighbor,
+}
+
+/// A socket's memory of its last datagram's way out (`inp_route`):
+/// good for another to the same address while the tables are as they
+/// were and the neighbor has not expired.
+pub(crate) struct TxRoute {
+    dst: [u8; 4],
+    fib: u16,
+    flowid: u32,
+    ifindex: u16,
+    mtu: u32,
+    assist: u32,
+    found: Found,
+}
+
+impl core::fmt::Debug for TxRoute {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TxRoute").finish_non_exhaustive()
     }
-    Ok(())
+}
+
+/// [`output_parsed`] for a sender that keeps its way out between
+/// datagrams: the same frame out of what `route` holds when it is still
+/// good, else by the full path, which leaves it what it found.
+pub(crate) fn output_cached(
+    vnet: &Arc<Vnet>,
+    mut m: Packet,
+    ip: Ip,
+    o: &Opts,
+    route: &mut Option<TxRoute>,
+) -> Result<(), Errno> {
+    let st = state::of(vnet);
+    if let Some(c) = route.as_ref()
+        && o.flags == 0
+        && o.mcast.is_none()
+        && !o.router_alert
+        && o.pcp.is_none()
+        && c.dst == ip.dst
+        && c.fib == o.fib
+        && c.flowid == o.flowid
+        && ip.src != [0; 4]
+        && !is_loopback4(&ip.src)
+        && usize::from(ip.len) <= c.mtu as usize
+        && m.hdr.csum_flags & csum::IP_TSO == 0
+        && c.found.neighbor.ifflags & (iff::UP | iff::RUNNING) == iff::UP | iff::RUNNING
+        && c.found.era == vnet.net.generation()
+        && (c.found.neighbor.expire == u64::MAX || net::uptime() < c.found.neighbor.expire)
+    {
+        let mut ip = ip;
+        ip.v = VERSION;
+        ip.hl = 20;
+        fill_id(st, &mut ip);
+        st.ipstat.inc(ips::LOCALOUT);
+        m.hdr.flags &= !flags::BCAST;
+        m.hdr.csum_flags |= csum::IP;
+        if m.hdr.csum_flags & (csum::IP_UDP | csum::IP_TCP) & !c.assist != 0 {
+            delayed_cksum(&mut m, HDR_LEN);
+        }
+        let sum = c.assist & csum::IP == 0;
+        if sum {
+            m.hdr.csum_flags &= !csum::IP;
+        }
+        m.data
+            .copy_in(0, &header_bytes(&ip, &[], sum))
+            .map_err(|_| Errno::ENOBUFS)?;
+        let nb = &c.found.neighbor;
+        net::ether::encap(
+            &mut m,
+            &net::ether::Header {
+                dst: nb.dst,
+                src: nb.src,
+                ty: net::ether::ty::IP,
+            },
+        )?;
+        // Relaxed: ARP's timer reads it later, under the lock.
+        nb.used.store(true, Ordering::Relaxed);
+        let _ = net::ether::output_frame(vnet, c.ifindex, &c.found.link, nb.ifflags, None, m);
+        return Ok(());
+    }
+    let (fib, flowid, dst) = (o.fib, o.flowid, ip.dst);
+    match output_full(vnet, m, ip, o) {
+        Ok(found) => {
+            *route = found.map(|(ifindex, mtu, assist, found)| TxRoute {
+                dst,
+                fib,
+                flowid,
+                ifindex,
+                mtu,
+                assist,
+                found,
+            });
+            Ok(())
+        }
+        Err(e) => {
+            *route = None;
+            Err(e)
+        }
+    }
 }
 
 /// `in_delayed_cksum`: the transport checksum the device would have
@@ -744,12 +860,17 @@ pub fn output(vnet: &Arc<Vnet>, mut m: Packet, o: &Opts) -> Result<(), Errno> {
 /// [`output`] of a packet whose header its caller built as `ip` (the
 /// 20 bytes for it already at the front of `m`, written here), as
 /// `tcp_output` fills in the header `ip_output` sends: not read back.
-pub(crate) fn output_parsed(
+pub(crate) fn output_parsed(vnet: &Arc<Vnet>, m: Packet, ip: Ip, o: &Opts) -> Result<(), Errno> {
+    output_full(vnet, m, ip, o).map(|_| ())
+}
+
+/// [`output_parsed`], and what it learned of the way out.
+fn output_full(
     vnet: &Arc<Vnet>,
     mut m: Packet,
     mut ip: Ip,
     o: &Opts,
-) -> Result<(), Errno> {
+) -> Result<Option<(u16, u32, u32, Found)>, Errno> {
     let st = state::of(vnet);
     if o.flags & (out::FORWARDING | out::RAWOUTPUT) == 0 {
         ip.v = VERSION;
@@ -782,7 +903,7 @@ pub(crate) fn output_parsed(
     let section = net::view::enter();
     let n = vnet.net.view(&section);
     let Some(p) = path(n, st, &mut ip, o)? else {
-        return Ok(());
+        return Ok(None);
     };
     let i = n.by_index(p.ifindex).ok_or(Errno::EHOSTUNREACH)?;
     let (ifflags, assist) = (i.flags, hwassist(i));
@@ -814,7 +935,7 @@ pub(crate) fn output_parsed(
         // Not to the wire with TTL 0, nor out of a loopback interface:
         // the copy above was it.
         if ip.ttl == 0 || ifflags & iff::LOOPBACK != 0 {
-            return Ok(());
+            return Ok(None);
         }
     } else {
         if ip.src == [0; 4] {
@@ -863,7 +984,20 @@ pub(crate) fn output_parsed(
         m.data
             .copy_in(0, &header_bytes(&ip, opts, sum))
             .map_err(|_| Errno::ENOBUFS)?;
-        return send(vnet, i, &nexthop, is_gw, m);
+        let found = send(vnet, i, &nexthop, is_gw, m)?;
+        // What the next datagram to this address can go by: a plain
+        // unicast one, no options, no segmentation offload.
+        let plain = o.flags == 0
+            && o.mcast.is_none()
+            && !o.router_alert
+            && o.pcp.is_none()
+            && !p.bcast
+            && !tso
+            && opts.is_empty()
+            && !is_multicast4(&ip.dst);
+        return Ok(found
+            .filter(|_| plain)
+            .map(|f| (p.ifindex, p.mtu, assist, f)));
     }
     if ip.off & DF != 0 {
         st.ipstat.inc(ips::CANTFRAG);
@@ -873,13 +1007,13 @@ pub(crate) fn output_parsed(
     let mut r = Ok(());
     for f in frags {
         if r.is_ok() {
-            r = send(vnet, i, &nexthop, is_gw, f);
+            r = send(vnet, i, &nexthop, is_gw, f).map(|_| ());
         }
     }
     if r.is_ok() {
         st.ipstat.inc(ips::FRAGMENTED);
     }
-    r
+    r.map(|()| None)
 }
 
 /// `ip_optcopy`: the options a fragment after the first carries (those

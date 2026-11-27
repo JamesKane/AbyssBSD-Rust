@@ -533,7 +533,7 @@ pub fn resolve(
         return Err(Errno::EINVAL);
     };
     if e.flags & lle::VALID != 0 && (e.flags & lle::STATIC != 0 || e.expire > now) {
-        e.used = true;
+        e.used.store(true, core::sync::atomic::Ordering::Relaxed);
         return Ok(Resolved::Addr(e.lladdr));
     }
     let renew = e.asked == 0 || e.expire != now;
@@ -581,13 +581,13 @@ pub fn tick(n: &mut Net, now: u64) {
         match e.state {
             state::REACHABLE => {
                 // Ask the data path whether it is still used.
-                e.used = false;
+                e.used.store(false, core::sync::atomic::Ordering::Relaxed);
                 e.state = state::VERIFY;
                 e.timer = Some(now + c.rexmit);
                 return true;
             }
             state::VERIFY => {
-                if e.used && e.preempt > 0 {
+                if e.used.load(core::sync::atomic::Ordering::Relaxed) && e.preempt > 0 {
                     e.preempt -= 1;
                     e.timer = Some(now + c.rexmit);
                     ask.push((e.ifindex, v4_of(&e.addr)));

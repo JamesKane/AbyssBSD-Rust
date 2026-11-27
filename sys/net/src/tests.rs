@@ -620,3 +620,71 @@ fn netlink_notifications_name_their_groups() {
     .unwrap();
     assert_eq!((g, u16::from_ne_bytes([m[4], m[5]])), (group::LINK, 17));
 }
+
+/// A sender may keep a resolved neighbor for as long as the generation
+/// of the tables is the one it found it at: a change through the lock
+/// moves it, the way out (`data_path`) does not.
+#[test]
+fn a_neighbor_is_good_until_the_tables_change() {
+    use crate::addr::from_v4;
+    use crate::lltable::{Lle, lle};
+    use crate::output::output_direct;
+
+    let v = Vnet::new(0);
+    clone::create(&v, b"epair", &ctx()).unwrap();
+    up(&v, b"epair0a");
+    let index = v.net.lock().by_name(b"epair0a").unwrap().index;
+    let src = v.net.lock().by_name(b"epair0a").unwrap().lladdr.unwrap();
+    let nexthop = from_v4([10, 9, 9, 2]);
+    let mac = [2, 0, 0, 0, 0, 9];
+    let mut e = Lle::new(Family::Inet, nexthop, index, lle::STATIC);
+    e.set_lladdr(mac);
+    v.net.lock().lle_link(e);
+
+    let g0 = v.net.generation();
+    let send = |v: &Arc<Vnet>| {
+        let mut m = packet(&[0u8; 28]);
+        m.hdr.flags = 0;
+        let mut guard = v.net.lock();
+        output_direct(
+            guard.data_path(),
+            index,
+            Family::Inet,
+            &nexthop,
+            false,
+            m,
+            5,
+        )
+        .unwrap()
+        .unwrap()
+    };
+    let d = send(&v);
+    let nb = d.neighbor.expect("a static entry is kept");
+    assert_eq!((nb.dst, nb.src, nb.expire), (mac, src, u64::MAX));
+    assert_eq!(v.net.generation(), g0, "the way out is not a change");
+
+    // A new address for the neighbor is a change.
+    let mut e = Lle::new(Family::Inet, nexthop, index, lle::STATIC);
+    e.set_lladdr([2, 0, 0, 0, 0, 10]);
+    v.net.lock().lle_link(e);
+    assert_eq!(v.net.generation(), g0 + 1);
+    let d = send(&v);
+    assert_eq!(d.neighbor.unwrap().dst, [2, 0, 0, 0, 0, 10]);
+
+    // A broadcast frame is none to keep.
+    let mut m = packet(&[0u8; 28]);
+    m.hdr.flags = mbuf::flags::BCAST;
+    let mut guard = v.net.lock();
+    let d = output_direct(
+        guard.data_path(),
+        index,
+        Family::Inet,
+        &nexthop,
+        false,
+        m,
+        5,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(d.neighbor.is_none());
+}

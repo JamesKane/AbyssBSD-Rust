@@ -285,7 +285,7 @@ impl Socket {
             }
             return self.raw_send(&bytes, to, cred);
         }
-        let (connected, ipo) = {
+        let (connected, ipo, mut route) = {
             let mut i = self.inner.lock();
             if i.snd.cant {
                 return Err(Errno::EPIPE);
@@ -296,7 +296,7 @@ impl Socket {
             if data.len() > i.snd.hiwat as usize {
                 return Err(Errno::EMSGSIZE);
             }
-            (i.state & ss::ISCONNECTED != 0, i.ip)
+            (i.state & ss::ISCONNECTED != 0, i.ip, i.txroute.take())
         };
         // `IP_MULTICAST_IF`'s interface, looked at before the table's lock
         // (none unless it is set).
@@ -430,9 +430,9 @@ impl Socket {
         };
         let n = data.len();
         if family == Family::Inet {
-            return self
-                .udp_output4(data, &src, &dst, ctl.tos, ipo, pflags)
-                .map(|()| n);
+            let r = self.udp_output4(data, &src, &dst, ctl.tos, ipo, pflags, &mut route);
+            self.inner.lock().txroute = route;
+            return r.map(|()| n);
         }
         self.udp_output6(data, src, dst, connected, flow, &ctl)
             .map(|()| n)
@@ -671,6 +671,10 @@ impl Socket {
     /// finishes it (`CSUM_UDP`), through `ip_output`.
     /// `udp_send`'s IPv4 path, with the socket's IP options and PCB flags
     /// as the send found them.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "udp_send's, and the way out kept"
+    )]
     fn udp_output4(
         &self,
         data: Payload<'_>,
@@ -679,6 +683,7 @@ impl Socket {
         tos: Option<u8>,
         ipo: crate::IpOpts,
         flags: i32,
+        route: &mut Option<ip::TxRoute>,
     ) -> Result<(), Errno> {
         let st = crate::state::of(&self.vnet);
         let ulen = HDR + data.len();
@@ -735,7 +740,7 @@ impl Socket {
             o.flags |= ip::out::SENDONES;
         }
         st.udpstat.inc(udps::OPACKETS);
-        ip::output(&self.vnet, m, &o)
+        ip::output_cached(&self.vnet, m, h, &o, route)
     }
 
     /// Its multicast choices (`inp_moptions`): `IP_MULTICAST_IF`'s

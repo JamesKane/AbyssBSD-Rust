@@ -18,6 +18,7 @@ use crate::addr::{In6, v4_of};
 use crate::arp::{self, Resolved};
 use crate::ether::{self, Header};
 use crate::ifnet::Net;
+use crate::lltable::lle;
 use crate::netisr::Proto;
 
 /// Sends packet `m` of `family` out of interface `ifindex` towards
@@ -49,6 +50,25 @@ pub struct Direct {
     pub link: alloc::sync::Arc<dyn crate::link::Link>,
     pub flags: u32,
     pub m: Packet,
+    /// An IPv4 unicast frame's next hop as the table had it, for a
+    /// sender to send the next frame to the same address without it
+    /// (`inp_route`'s `ro_lle`).
+    pub neighbor: Option<Neighbor>,
+}
+
+/// A resolved neighbor, valid while the tables are as they were
+/// ([`crate::announce::NetLock::generation`]) and until `expire`.
+#[derive(Debug, Clone)]
+pub struct Neighbor {
+    /// The interface's flags and link-layer address.
+    pub ifflags: u32,
+    pub src: [u8; 6],
+    /// The neighbor's link-layer address.
+    pub dst: [u8; 6],
+    /// Seconds of uptime it is good until, `u64::MAX` for a static entry.
+    pub expire: u64,
+    /// Set on each use, for ARP's timer to see (`r_skip_req`).
+    pub used: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
 }
 
 impl core::fmt::Debug for Direct {
@@ -134,6 +154,29 @@ fn output_in(
                 Family::Inet => ether::ty::IP,
                 Family::Inet6 => ether::ty::IPV6,
             };
+            // What the next frame to this address needs, if the entry is
+            // one `arp::resolve` takes as it is.
+            let neighbor = (direct
+                && family == Family::Inet
+                && m.hdr.flags & (flags::BCAST | flags::MCAST) == 0)
+                .then(|| n.lle(ifindex, Family::Inet, nexthop))
+                .flatten()
+                .filter(|e| {
+                    e.flags & lle::VALID != 0
+                        && (e.flags & lle::STATIC != 0 || e.expire > now)
+                        && e.lladdr == dst
+                })
+                .map(|e| Neighbor {
+                    ifflags,
+                    src,
+                    dst,
+                    expire: if e.flags & lle::STATIC != 0 {
+                        u64::MAX
+                    } else {
+                        e.expire
+                    },
+                    used: alloc::sync::Arc::clone(&e.used),
+                });
             // A broadcast on a simplex interface does not come back from
             // the wire: a copy goes up as if it had (`if_simloop`).
             if m.hdr.flags & flags::BCAST != 0
@@ -163,6 +206,7 @@ fn output_in(
                     link,
                     flags: i.flags,
                     m,
+                    neighbor,
                 }));
             }
             n.txq.push((ifindex, None, m));

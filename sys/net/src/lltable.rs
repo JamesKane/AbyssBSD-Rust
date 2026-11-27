@@ -13,7 +13,9 @@
 //! `lltable_delete_addr`, `lltable_prefix_free`), sys/netinet/in.c
 //! (`in_lltable_*`), sys/netinet6/in6.c (`in6_lltable_*`).
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::AtomicBool;
 
 use abi::errno::Errno;
 use abi::inet::AF_LINK;
@@ -71,7 +73,9 @@ pub struct Lle {
     /// When its timer fires, seconds of uptime (`lle_timer`).
     pub timer: Option<u64>,
     /// Used since the timer last asked (`r_skip_req`'s feedback).
-    pub used: bool,
+    /// Shared with a sender's cached route, which sets it without the
+    /// lock.
+    pub used: Arc<AtomicBool>,
     /// ND: the neighbor is a router (`ln_router`).
     pub router: bool,
     /// ND: when its timer fires, nanoseconds of the protocols' clock, 0
@@ -106,7 +110,7 @@ impl Lle {
             },
             hold: Vec::new(),
             timer: None,
-            used: false,
+            used: Arc::new(AtomicBool::new(false)),
             router: false,
             ntimer: 0,
             hit: 0,
