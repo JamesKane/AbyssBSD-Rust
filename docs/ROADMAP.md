@@ -595,6 +595,17 @@ stock 15.1. Open:
   server took 10,900 retransmissions in 5 s (the peer saw holes; neither NIC dropped), 365 Mbit/s
   against 2 Gbit/s. Why stock survives folding is open, and is the way to `tcp.cpu.tx` (1.31). `p7`
   (3 runs): every component passes, geometric mean 0.849, `tcp.cpu.rx` 1.50 to 0.89.
+  **pty passes (2026-11-27):** `pty.relay` was 1.31. The harness's stdin is at end of file, so the
+  relay's `poll` returns at once on both kernels and it never sleeps there; it is the bottleneck,
+  100% busy. Profiled (ours `abyss.prof`, stock `lockstat` and DTrace), it spun a third of its time
+  on the terminal's lock: the writer took it per 256-byte chunk and, its copy between chunks short,
+  took it again before the backing-off relay looked. Stock's writer spins about as often as its
+  reader. A writer's output and a master's read now move 1 KB per hold: 8.7 to 6.6 us per 4 KB.
+  FreeBSD's granularity (256, a block per read) gave 12.0, and taking blocks off to copy unlocked
+  (`ttyoutq_read_uio`) 10.2: each hold is a handoff. Also as FreeBSD: a master's read wakes writers
+  once at its end, `poll` on pipes, terminals and masters registers only when nothing is ready (the
+  other poll routines still register always), and mirrors notify only on a change. `p6` (3 runs):
+  `pty.relay` 1.001, `pty.raw` 0.461, every component passes (pty 0.755).
   **vm passes (2026-11-27):** split in userland on both kernels at 3000 MHz, the gap was in the new
   page's path: not teardown (`munmap` 27 ns a page against stock's 46), not superpages (stock with
   `vm.pmap.pg_ps_enabled=0` scored the same), not the shared fault path (a write fault on a resident
