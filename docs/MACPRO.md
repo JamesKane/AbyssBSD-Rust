@@ -67,6 +67,13 @@ heatsink cooled by one fan:
   polls `MSLT` every 2 s and fires an event handler (`platform_power_limit`). It turns off only after 15 zero samples (30 s),
   because `MSLT` flickers to 0 for about 50 s at onset and each flip cost the GPUs a state switch.
   The GPU driver then forces its thermal (lowest) state.
+  Later fixes in both trees:
+  - fork `421c666bda5a`: the "on" event is re-sent on every sample while on;
+  - drm-kmod `c4c437dcf4`: a limit already on when SI DPM starts is applied.
+
+  Both cover the same case: a GPU driver that loads while the SMC holds the limit latched, which
+  it does across a warm reboot, would otherwise run unlimited until the release. Our `asmc`
+  therefore publishes the limit as state a late listener can read, not only as edges.
 - drm-kmod (AMD's MIT-licensed code): `b85c6d4327` keeps a device alive when UVD 3.1 firmware
   validation fails (the display GPU used to die with "Fatal error during GPU init").
   `3aadfdfe05` runs SI DPM levels at their VBIOS voltages. Upstream patched the leakage table
@@ -281,7 +288,7 @@ When the owner hands the machine over:
 The fork's work is ongoing (the GPU light-load comparison is not done, and the platform-limit
 hook's hysteresis was still being tuned). Before MP3's `asmc` work and again before MP4:
 - read `git -C ../AbyssBSD/src log -- sys/dev/asmc` and `git -C ../AbyssBSD/kmod/drm log` since
-  the hashes in §2 (`eaeaeea29cca` and `e7da0f18f5` are the newest);
+  the hashes in §2 (newest on 2026-11-27: `421c666bda5a` and `c4c437dcf4`);
 - update §2 and HARDWARE.md §9 with what changed, by hash;
 - take its logs from `../abyss-swift-vm` (`macpro-thermal.log`, `fbsd-keys-*.txt`,
   `macos-keys-*.txt`) as the fake SMC's data.

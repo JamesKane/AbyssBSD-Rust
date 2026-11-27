@@ -277,7 +277,10 @@ impl acpi::Ops for KernelAcpi {
 
     #[cfg(target_arch = "x86_64")]
     fn cpu_children(&self) -> &'static [(&'static str, &'static str)] {
-        &[("hwpstate_amd", "AMD CPU performance control")]
+        &[
+            ("coretemp", "CPU On-Die Thermal Sensors"),
+            ("hwpstate_amd", "AMD CPU performance control"),
+        ]
     }
 
     #[cfg(target_arch = "aarch64")]

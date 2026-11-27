@@ -31,6 +31,8 @@ mod boot;
 mod cam;
 mod capsicum;
 mod coredump;
+#[cfg(target_arch = "x86_64")]
+mod coretemp;
 mod cpuset;
 mod cred;
 mod devctl;

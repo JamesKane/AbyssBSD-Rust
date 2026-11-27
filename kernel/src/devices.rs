@@ -202,6 +202,8 @@ static TEST_DRIVERS: &[DriverDecl] = &[
 static KERNEL_DRIVERS: &[DriverDecl] = &[
     crate::efirtc::DRIVER,
     #[cfg(target_arch = "x86_64")]
+    crate::coretemp::DRIVER,
+    #[cfg(target_arch = "x86_64")]
     crate::hwpstate_amd::DRIVER,
 ];
 

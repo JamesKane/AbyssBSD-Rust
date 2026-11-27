@@ -137,6 +137,11 @@ pub const CHIPSETS: &[(u16, &str)] = &[
     (0x2918, "Intel ICH9 watchdog timer"),
     (0x3a16, "Intel ICH10R watchdog timer"),
     (0x3a18, "Intel ICH10 watchdog timer"),
+    // The C600-series (Patsburg) PCH of the Xeon E5 machines, the Mac Pro
+    // (Late 2013)'s C602J among them (docs/MACPRO.md MP3): ICH10's TCO
+    // version 2, PMBASE, RCBA and GCS (FreeBSD: ich_version 10, TCO 2).
+    (0x1d40, "Intel Patsburg watchdog timer"),
+    (0x1d41, "Intel Patsburg watchdog timer"),
 ];
 
 /// The device: its TCO timer and name.
@@ -256,6 +261,22 @@ mod tests {
                 _ => r[usize::from(off / 2)] = v,
             }
         }
+    }
+
+    #[test]
+    fn patsburg_is_a_tco_v2_chipset() {
+        for id in [0x1d40, 0x1d41] {
+            let entry = CHIPSETS.iter().find(|(d, _)| *d == id);
+            assert_eq!(
+                entry.map(|(_, n)| *n),
+                Some("Intel Patsburg watchdog timer"),
+                "{id:#x}"
+            );
+        }
+        let mut ids: alloc::vec::Vec<u16> = CHIPSETS.iter().map(|(d, _)| *d).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), CHIPSETS.len(), "no device twice");
     }
 
     #[test]
