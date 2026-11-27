@@ -379,6 +379,12 @@ impl Assembler {
         Assembled::Frame(buf, RxCsum::of(p.ext))
     }
 
+    /// Whether a frame is open: a piece has come that is not the last.
+    #[must_use]
+    pub fn open(&self) -> bool {
+        self.partial.is_some()
+    }
+
     /// Forgets a frame in progress (on reset).
     pub fn clear(&mut self) {
         self.partial = None;

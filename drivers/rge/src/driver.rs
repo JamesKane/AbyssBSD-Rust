@@ -38,6 +38,7 @@
 //!
 //! Behavior reference: sys/dev/rge/if_rge.c.
 
+use crate::ring::RxCsum;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -77,6 +78,15 @@ const ETHERMTU: u32 = 1500;
 const MAX_FRAME: usize = r::JUMBO_FRAMELEN as usize - ring::CRC_LEN;
 /// The tick's period (`callout_reset(..., hz, rge_tick, sc)`).
 const TICK_NS: u64 = 1_000_000_000;
+/// Receive mitigation: an interrupt that finds frames within
+/// [`POLL_GAP_NS`] of the last one's end keeps the controller masked and
+/// looks at the ring every [`POLL_NS`] (at most [`POLL_MAX`] times, then
+/// reads the status again) while frames keep coming. A busy receiver then
+/// takes a few frames at a time for one interrupt's cost in register
+/// reads, as a controller's interrupt timer would give.
+const POLL_NS: u64 = 100_000;
+const POLL_GAP_NS: u64 = 300_000;
+const POLL_MAX: u32 = 16;
 /// How often the doorbell watch looks while frames are in flight, and how
 /// old the oldest may be before it rings again. A frame takes some tens of
 /// microseconds to go; one older than this has been left in the ring.
@@ -190,6 +200,22 @@ impl Rx {
     }
 }
 
+/// A received frame's packet header: what the controller checked.
+fn rx_hdr(c: &RxCsum) -> PktHdr {
+    let mut hdr = PktHdr::default();
+    if c.ip_checked {
+        hdr.csum_flags |= csum::IP_CHECKED;
+    }
+    if c.ip_valid {
+        hdr.csum_flags |= csum::IP_VALID;
+    }
+    if c.l4_valid {
+        hdr.csum_flags |= csum::DATA_VALID | csum::PSEUDO_HDR;
+        hdr.csum_data = 0xffff;
+    }
+    hdr
+}
+
 struct Tx {
     ring: TxRing,
     descs: Descs,
@@ -263,6 +289,10 @@ pub struct Shared {
     core: Mutex<Core>,
     /// Wakes the tick thread to stop.
     wake: WaitQueue,
+    /// The interrupt thread's wait between looks at the ring.
+    pollq: WaitQueue,
+    /// When the last service ended (`sched::now_ns`).
+    last_end: core::sync::atomic::AtomicU64,
     /// Frames may be in flight that the controller has not been told of
     /// (or has missed): the tick thread looks every [`WATCH_NS`].
     watch: AtomicBool,
@@ -401,11 +431,22 @@ impl Shared {
     fn service(&self, s: &Sleepable) {
         let mut g = self.core.lock(s);
         let mut link = false;
+        // After a pass that took what the acknowledgement showed, the
+        // controller is unmasked without reading its status again (a read
+        // of the device costs about as much as the pass's frames): what
+        // arrived meanwhile is taken after the unmask.
+        let mut settled = false;
+        let begin = sched::now_ns();
+        let busy = begin.saturating_sub(self.last_end.load(Ordering::Relaxed)) < POLL_GAP_NS;
         loop {
             if self.state() != State::Running {
                 break;
             }
-            let st = self.chip.ack();
+            let st = if core::mem::take(&mut settled) {
+                0
+            } else {
+                self.chip.ack()
+            };
             if !health::responding(st) {
                 self.gone();
                 link = true;
@@ -433,8 +474,10 @@ impl Shared {
                 self.chip.mask();
                 continue;
             }
+            let mut took = 0;
             loop {
                 let (frames, more) = self.rx_take();
+                took += frames.len();
                 drop(g);
                 self.deliver(frames);
                 if more {
@@ -454,9 +497,38 @@ impl Shared {
                 self.log(format_args!("{}", health::MSG_SYSTEM_ERR));
                 self.reinit(&mut g);
                 link = true;
+            } else if st & r::ISR_LINKCHG == 0 {
+                if took > 0 && busy {
+                    // Masked still: look again shortly, without a status
+                    // read or an unmask in between.
+                    for _ in 0..POLL_MAX {
+                        drop(g);
+                        let mut stop = || self.state() != State::Running;
+                        bus::manager().wait_timeout(s, &self.pollq, &mut stop, POLL_NS);
+                        g = self.core.lock(s);
+                        if self.state() != State::Running {
+                            break;
+                        }
+                        let (frames, more) = self.rx_take();
+                        let got = frames.len();
+                        drop(g);
+                        self.deliver(frames);
+                        g = self.core.lock(s);
+                        self.tx.lock().reap(&self.port);
+                        if got == 0 {
+                            break;
+                        }
+                        if more {
+                            sched::yield_now();
+                        }
+                    }
+                } else {
+                    settled = true;
+                }
             }
         }
         drop(g);
+        self.last_end.store(sched::now_ns(), Ordering::Relaxed);
         if link {
             self.port.link_state(self.link_up());
         }
@@ -567,6 +639,26 @@ impl Shared {
                     break;
                 };
                 rx.taken += 1;
+                // A frame in one piece (the usual): from its slot straight
+                // into mbufs, one copy and no buffer between.
+                if p.first && p.last && !p.error && p.len > ring::CRC_LEN && !rx.asm.open() {
+                    let at = (p.slot % SLOTS_PER_CHUNK) * SLOT;
+                    let chunk = &rx.chunks[p.slot / SLOTS_PER_CHUNK];
+                    let made = Chain::fill(p.len - ring::CRC_LEN, |b, off| {
+                        chunk.copy_to_slice(at + off, b);
+                        Ok::<usize, NoBufs>(b.len())
+                    });
+                    let bus = slot_bus(&rx.chunks, p.slot);
+                    RxRing::post(&rx.descs, &ring::Hal, p.slot, bus);
+                    match made {
+                        Ok(data) => frames.push(Packet {
+                            hdr: rx_hdr(&RxCsum::of(p.ext)),
+                            data,
+                        }),
+                        Err(_) => self.port.stats.iqdrops.add(1),
+                    }
+                    continue;
+                }
                 rx.slot_copy(p.slot, &mut buf[..p.len]);
                 let bus = slot_bus(&rx.chunks, p.slot);
                 RxRing::post(&rx.descs, &ring::Hal, p.slot, bus);
@@ -578,18 +670,10 @@ impl Shared {
                             self.port.stats.iqdrops.add(1);
                             continue;
                         };
-                        let mut hdr = PktHdr::default();
-                        if c.ip_checked {
-                            hdr.csum_flags |= csum::IP_CHECKED;
-                        }
-                        if c.ip_valid {
-                            hdr.csum_flags |= csum::IP_VALID;
-                        }
-                        if c.l4_valid {
-                            hdr.csum_flags |= csum::DATA_VALID | csum::PSEUDO_HDR;
-                            hdr.csum_data = 0xffff;
-                        }
-                        frames.push(Packet { hdr, data });
+                        frames.push(Packet {
+                            hdr: rx_hdr(&c),
+                            data,
+                        });
                     }
                 }
             }
@@ -1009,6 +1093,8 @@ impl Driver for Rge {
                     },
                 ),
                 wake: WaitQueue::new(),
+                pollq: WaitQueue::new(),
+                last_end: core::sync::atomic::AtomicU64::new(0),
                 watch: AtomicBool::new(false),
                 rekicks: AtomicU64::new(0),
                 seen: SpinLock::new(None),
