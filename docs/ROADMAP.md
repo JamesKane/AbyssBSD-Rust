@@ -625,10 +625,24 @@ stock 15.1. Open:
   checksums rebuilt from each segment's own; `rge` offers `IFCAP_LRO` (on, as `re`), and since its
   30 µs poll rounds see about 2.5 frames, keeps a connection's frame across rounds for up to 100 µs
   (`tcp_lro_flush_inactive`'s mechanism), sending at each round what carries a PSH. 18 segments a
-  merge, one ACK per 23. Pure ACKs are not folded, unlike FreeBSD: folded, our sends to the build
-  server took 10,900 retransmissions in 5 s (the peer saw holes; neither NIC dropped), 365 Mbit/s
-  against 2 Gbit/s. Why stock survives folding is open, and is the way to `tcp.cpu.tx` (1.31). `p7`
+  merge, one ACK per 23. Pure ACKs were at first not folded: folded, our sends to the build server lost data. The cause was
+  `rge` (below), and they are folded now, as FreeBSD does. `p7`
   (3 runs): every component passes, geometric mean 0.849, `tcp.cpu.rx` 1.50 to 0.89.
+  **TSO, ACK folding, interrupts (2026-11-27):** `rge` refused every TSO frame longer than its 9,212-byte
+  jumbo frame: the length check came before the TSO branch and the tap, and `netstat` does not show
+  the driver's `oerrors`. Sending at a gigabit, 5,600 retransmissions in 10 s and TSO frames of two
+  segments; found by capturing both ends. A TSO frame is now held to the large send's limits (64,000
+  bytes, 64 segments): no retransmissions, 43 KB frames as stock's. With that, LRO folds pure ACKs
+  (434,000 ACK inputs to 147,000 in 10 s). The status register read costs about 3 us over the
+  chipset; it is read once per service episode now. `p7` (3 runs): `tcp.cpu.rx` 0.54, `tcp.cpu.tx`
+  1.38 (stock's CPU went down with ours), `udp` 1.028 (fails: `udp.tx.small` 1.14, bimodal by
+  placement). Open, the cause of both: stock's driver is Realtek's own (`if_re.ko` 1.102.01, from
+  `realtek-re-kmod`), which takes 11,000 interrupts a second sending small datagrams where `rge`
+  takes 140,000, its task thread on a CPU outside the class (15% of a CPU, ours 45%). It runs the
+  RTL8125D in the per-vector interrupt mapping (`INT_CFG0` bit 0, 0xD00 to 0xD18) with moderation
+  word 0x00140014 at 0xA00; in `rge`'s single-vector mapping that word does nothing. Also open: the
+  scheduler honours a CPU set of one CPU only (`uthread::bound`), and has no periodic balance
+  (ULE's `sched_balance`): a busy thread that starts beside the interrupt thread stays there.
   **pty passes (2026-11-27):** `pty.relay` was 1.31. The harness's stdin is at end of file, so the
   relay's `poll` returns at once on both kernels and it never sleeps there; it is the bottleneck,
   100% busy. Profiled (ours `abyss.prof`, stock `lockstat` and DTrace), it spun a third of its time
