@@ -4,14 +4,18 @@
 //! by index.
 //!
 //! Where FreeBSD retries without bound in time while holding a spin lock,
-//! every transaction here has a budget ([`BUDGET_US`]), and an SMC that
-//! exhausts it [`RETIRE_AFTER`] times in a row is retired: every later
-//! access fails at once with [`SmcError::Retired`], so a jammed SMC cannot
+//! every transaction here has a budget ([`BUDGET_US`]). An SMC that does
+//! not answer at all (a command never acknowledged on the ports, the memory
+//! window never ready) [`RETIRE_AFTER`] times in a row is set aside: every
+//! access fails at once with [`SmcError::Retired`] for [`BACKOFF_US`], then
+//! one is let through to see whether it is back. A jammed SMC so cannot
 //! stall the threads that read it (spec `apple-macpro6-1-thermal` §04
-//! item 5). Writes are checked against the key's length, and the length
-//! against [`MAX_VALUE`].
+//! item 5), and one that recovers is used again. A key the SMC lacks is
+//! not a stall: on the ports it ends in a timeout after an acknowledged
+//! command ([`SmcError::Timeout`]), in memory in an error code. Writes are
+//! checked against the key's length, and the length against [`MAX_VALUE`].
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use sync::SpinLock;
 
@@ -24,20 +28,28 @@ pub const MAX_VALUE: usize = 32;
 /// One transaction's time budget, retries included, in microseconds.
 pub const BUDGET_US: u64 = 200_000;
 
-/// Budgets exhausted in a row before the SMC is retired.
+/// Transactions in a row with no answer at all before the SMC is set
+/// aside.
 pub const RETIRE_AFTER: u32 = 3;
+
+/// How long an SMC set aside is left alone before one access is tried.
+pub const BACKOFF_US: u64 = 30_000_000;
 
 /// What failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SmcError {
-    /// The SMC did not answer within the budget.
+    /// The SMC took the command but did not finish it within the budget:
+    /// on the ports, what a key the SMC lacks looks like.
     Timeout,
+    /// The SMC did not take the command at all (no acknowledgement on the
+    /// ports, never ready in memory).
+    NoAnswer,
     /// The SMC answered with an error code (0x84: no such key).
     Refused(u8),
     /// A value longer than [`MAX_VALUE`], or not the key's length.
     Length,
-    /// The SMC exhausted its budget [`RETIRE_AFTER`] times in a row and is
-    /// no longer used.
+    /// The SMC gave [`SmcError::NoAnswer`] [`RETIRE_AFTER`] times in a row
+    /// and is left alone for [`BACKOFF_US`].
     Retired,
 }
 
@@ -144,8 +156,11 @@ enum Io<P, M> {
 pub struct Smc<P, M, C> {
     io: SpinLock<Io<P, M>>,
     clock: C,
-    /// Budgets exhausted in a row; [`RETIRE_AFTER`] or more is retired.
+    /// [`SmcError::NoAnswer`]s in a row; [`RETIRE_AFTER`] or more is set
+    /// aside.
     stalls: AtomicU32,
+    /// While set aside: when the next access may try it.
+    retry_at: AtomicU64,
 }
 
 impl<P, M, C> core::fmt::Debug for Smc<P, M, C> {
@@ -177,6 +192,7 @@ impl<P: PortIo, M: MmioIo, C: Clock> Smc<P, M, C> {
             io: SpinLock::new(Io::Mmio(m)),
             clock,
             stalls: AtomicU32::new(0),
+            retry_at: AtomicU64::new(0),
         })
     }
 
@@ -186,7 +202,13 @@ impl<P: PortIo, M: MmioIo, C: Clock> Smc<P, M, C> {
             io: SpinLock::new(Io::Port(p)),
             clock,
             stalls: AtomicU32::new(0),
+            retry_at: AtomicU64::new(0),
         }
+    }
+
+    /// The clock the SMC is timed by.
+    pub fn clock(&self) -> &C {
+        &self.clock
     }
 
     /// The window in use.
@@ -197,7 +219,8 @@ impl<P: PortIo, M: MmioIo, C: Clock> Smc<P, M, C> {
         }
     }
 
-    /// Whether the SMC has been retired.
+    /// Whether the SMC is set aside: it stopped answering, and has not
+    /// answered since.
     pub fn retired(&self) -> bool {
         self.stalls.load(Ordering::Acquire) >= RETIRE_AFTER
     }
@@ -207,7 +230,7 @@ impl<P: PortIo, M: MmioIo, C: Clock> Smc<P, M, C> {
         &self,
         f: impl FnOnce(&Io<P, M>, &Deadline<'_, C>) -> Result<T, SmcError>,
     ) -> Result<T, SmcError> {
-        if self.retired() {
+        if self.retired() && self.clock.now_us() < self.retry_at.load(Ordering::Acquire) {
             return Err(SmcError::Retired);
         }
         let io = self.io.lock();
@@ -217,11 +240,18 @@ impl<P: PortIo, M: MmioIo, C: Clock> Smc<P, M, C> {
         };
         let r = f(&io, &d);
         drop(io);
-        match r {
-            Err(SmcError::Timeout) => {
-                self.stalls.fetch_add(1, Ordering::AcqRel);
+        if matches!(r, Err(SmcError::NoAnswer)) {
+            let n = self.stalls.fetch_add(1, Ordering::AcqRel) + 1;
+            if n >= RETIRE_AFTER {
+                self.retry_at.store(
+                    self.clock.now_us().saturating_add(BACKOFF_US),
+                    Ordering::Release,
+                );
             }
-            _ => self.stalls.store(0, Ordering::Release),
+        } else {
+            // Any answer, even an error code or a key's timeout, means the
+            // SMC is there.
+            self.stalls.store(0, Ordering::Release);
         }
         r
     }
@@ -276,18 +306,20 @@ impl<P: PortIo, M: MmioIo, C: Clock> Smc<P, M, C> {
 }
 
 /// FreeBSD's port back end retries a failed transaction up to ten times;
-/// here, while the budget lasts.
+/// here, while the budget lasts. The last failure is the answer.
 fn retry<T, C: Clock>(
     d: &Deadline<'_, C>,
     mut f: impl FnMut() -> Result<T, SmcError>,
 ) -> Result<T, SmcError> {
+    let mut last = Err(SmcError::NoAnswer);
     for _ in 0..10 {
-        match f() {
-            Err(SmcError::Timeout) if !d.passed() => continue,
-            r => return r,
+        last = f();
+        match last {
+            Err(SmcError::Timeout | SmcError::NoAnswer) if !d.passed() => continue,
+            _ => return last,
         }
     }
-    Err(SmcError::Timeout)
+    last
 }
 
 // The memory window (`asmc_mmio.c`).
@@ -306,7 +338,7 @@ fn mmio_wait<M: MmioIo, C: Clock>(m: &M, clock: &C, d: &Deadline<'_, C>) -> Resu
         clock.delay_us(us);
         us = (us * 2).min(3200);
     }
-    Err(SmcError::Timeout)
+    Err(SmcError::NoAnswer)
 }
 
 fn mmio_command<M: MmioIo, C: Clock>(
@@ -429,7 +461,7 @@ fn port_command<P: PortIo, C: Clock>(
             break;
         }
     }
-    Err(SmcError::Timeout)
+    Err(SmcError::NoAnswer)
 }
 
 fn port_send<P: PortIo, C: Clock>(

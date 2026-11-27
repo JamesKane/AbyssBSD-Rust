@@ -36,27 +36,34 @@ impl Keys {
         self.0.insert(*k, (*ty, v.to_vec()));
         self
     }
-    /// The Mac Pro's keys at idle from a power-off (the fork's
-    /// fbsd-keys-cold.txt, the ones the driver uses).
+    /// The Mac Pro's keys the driver uses, with their types, lengths and
+    /// values from a FreeBSD boot after a power-off (the fork's
+    /// `fbsd-keys-cold.txt`, 2026-11-26: 770 keys, 104 of them `sp78`).
+    /// `#KEY` is set to this table's own count.
     fn mac_pro() -> Self {
         let mut k = Self::default()
-            .with(b"#KEY", b"ui32", &0u32.to_be_bytes())
-            .with(b"LDKN", b"ui8 ", &[2])
-            .with(b"REV ", b"{rev", &[2, 0x20, 0x0f, 0, 0x00, 0x18])
-            .with(b"FNum", b"ui8 ", &[1])
-            .with(b"F0ID", b"{fds", b"\0\0\0\0Main\0\0\0\0\0\0\0\0\0\0\0\0")
-            .with(b"F0Ac", b"fpe2", &(790u16 << 2).to_be_bytes())
-            .with(b"F0Mn", b"fpe2", &(790u16 << 2).to_be_bytes())
-            .with(b"F0Mx", b"fpe2", &(1968u16 << 2).to_be_bytes())
-            .with(b"F0Tg", b"fpe2", &(790u16 << 2).to_be_bytes())
-            .with(b"FS! ", b"ui16", &[0, 0])
-            .with(b"TC0P", b"sp78", &[45, 0])
-            .with(b"TCXc", b"sp78", &[46, 0x80])
-            .with(b"TG0D", b"sp78", &[59, 0])
-            .with(b"TG1D", b"sp78", &[60, 0])
-            .with(b"MSLT", b"flt ", &0f32.to_bits().to_le_bytes())
-            .with(b"MSLG", b"ui8 ", &[0])
-            .with(b"MSTc", b"ui8 ", &[0]);
+            .with(b"LDKN", b"ui8 ", &[0x02])
+            .with(b"REV ", b"{rev", &[0x02, 0x20, 0x0f, 0x00, 0x00, 0x18])
+            .with(b"FNum", b"ui8 ", &[0x01])
+            .with(
+                b"F0ID",
+                b"{fds",
+                &[
+                    0, 0, 0x10, 0, b'M', b'a', b'i', b'n', b' ', 0, 0, 0, 0, 0, 0, 0,
+                ],
+            )
+            .with(b"F0Ac", b"fpe2", &[0x0d, 0x38])
+            .with(b"F0Mn", b"fpe2", &[0x0c, 0x58])
+            .with(b"F0Mx", b"fpe2", &[0x1e, 0xb8])
+            .with(b"F0Tg", b"fpe2", &[0x0d, 0xec])
+            .with(b"FS! ", b"ui16", &[0x00, 0x00])
+            .with(b"MSLG", b"ui8 ", &[0x00])
+            .with(b"MSLT", b"flt ", &[0x00, 0x00, 0x00, 0x00])
+            .with(b"MSTc", b"ui8 ", &[0x00])
+            .with(b"TC0P", b"sp78", &[0x35, 0xc0])
+            .with(b"TCXc", b"sp78", &[0x3e, 0x04])
+            .with(b"TG0D", b"sp78", &[0x3e, 0x00])
+            .with(b"TG1D", b"sp78", &[0x3e, 0xa0]);
         let n = u32::try_from(k.0.len()).unwrap();
         k.0.insert(*b"#KEY", (*b"ui32", n.to_be_bytes().to_vec()));
         k
@@ -201,6 +208,8 @@ impl PortIo for &FakePorts {
         match (s.cmd, s.input.len()) {
             (_, 1..=4) => s.status = 0x04,
             // The length after the key: the answer follows.
+            // A key the SMC lacks never becomes data-ready, as on the hardware.
+            (0x10 | 0x13, 5) if !keys.0.contains_key(&key(&s)) => s.status = 0,
             (0x10, 5) => {
                 let v = keys
                     .0
@@ -320,7 +329,7 @@ fn a_port_smc_that_never_acknowledges_is_retired() {
     let smc: Smc<&Deaf, &FakeMmio, FakeClock> = Smc::with_ports(&d, FakeClock::default());
     let mut b = [0u8; 2];
     for _ in 0..RETIRE_AFTER {
-        assert_eq!(smc.read(*b"F0Ac", &mut b), Err(SmcError::Timeout));
+        assert_eq!(smc.read(*b"F0Ac", &mut b), Err(SmcError::NoAnswer));
     }
     assert!(smc.retired());
     assert_eq!(smc.read(*b"F0Ac", &mut b), Err(SmcError::Retired));
@@ -367,7 +376,7 @@ fn c(deg: i32) -> Option<i32> {
 
 #[test]
 fn the_floor_follows_the_hottest_sensor_of_each_class() {
-    // Undriven D700s idling at 59-60 C: 790 + 1810 * 14/20.
+    // Undriven D700s idling at 59-60 C: 790 + 1810 * 15/20.
     assert_eq!(
         MAC_PRO.demand(MAC_PRO.gpu, &[c(59), c(60)]),
         790 + 1810 * 15 / 20
@@ -456,4 +465,227 @@ fn a_late_listener_learns_of_a_latched_limit() {
 fn fan_keys_take_the_fan_number() {
     assert_eq!(crate::fan_key(b"F%Mn", 0), *b"F0Mn");
     assert_eq!(crate::fan_key(b"F%ID", 3), *b"F3ID");
+}
+
+#[test]
+fn missing_keys_do_not_set_a_port_smc_aside() {
+    let p = FakePorts::new(Keys::mac_pro());
+    let smc: MmioSmc<'_> = Smc::with_ports(&p, FakeClock::default());
+    let mut b = [0u8; 2];
+    for _ in 0..2 * RETIRE_AFTER {
+        assert_eq!(smc.read(*b"NOPE", &mut b), Err(SmcError::Timeout));
+    }
+    assert!(!smc.retired());
+    assert!(smc.read(*b"F0Ac", &mut b).is_ok());
+}
+
+#[test]
+fn an_smc_set_aside_is_tried_again_after_the_backoff() {
+    /// Ports that stop acknowledging while `deaf` is set.
+    struct Flaky {
+        deaf: std::sync::atomic::AtomicBool,
+        ports: FakePorts,
+    }
+    impl PortIo for &Flaky {
+        fn read8(&self, off: u16) -> u8 {
+            if self.deaf.load(Ordering::SeqCst) {
+                0
+            } else {
+                (&self.ports).read8(off)
+            }
+        }
+        fn write8(&self, off: u16, v: u8) {
+            (&self.ports).write8(off, v);
+        }
+    }
+    let f = Flaky {
+        deaf: std::sync::atomic::AtomicBool::new(true),
+        ports: FakePorts::new(Keys::mac_pro()),
+    };
+    let smc: Smc<&Flaky, &FakeMmio, FakeClock> = Smc::with_ports(&f, FakeClock::default());
+    let mut b = [0u8; 2];
+    for _ in 0..RETIRE_AFTER {
+        assert_eq!(smc.read(*b"F0Ac", &mut b), Err(SmcError::NoAnswer));
+    }
+    f.deaf.store(false, Ordering::SeqCst);
+    // Still set aside until the backoff passes.
+    assert_eq!(smc.read(*b"F0Ac", &mut b), Err(SmcError::Retired));
+    smc.clock().delay_us(crate::smc::BACKOFF_US);
+    assert!(smc.read(*b"F0Ac", &mut b).is_ok(), "tried again, and back");
+    assert!(!smc.retired());
+}
+
+// The driver's own sampling, against the fake SMC with the properties
+// `platform/apple-mac` states for `MacPro6,1`.
+
+use crate::machine::{Machine, Props};
+
+/// `platform/apple-mac`'s `MACPRO6_1`, as `sys/acpi` hands it over.
+struct MacPro;
+
+impl MacPro {
+    fn get(name: &str) -> Option<aml::Value> {
+        apple_mac::MACPRO6_1
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| acpi::properties::to_value(p.value))
+    }
+}
+
+impl Props for MacPro {
+    fn int(&self, name: &'static str) -> Option<u64> {
+        match Self::get(name)? {
+            aml::Value::Integer(n) => Some(n),
+            _ => None,
+        }
+    }
+    fn ints(&self, name: &'static str) -> Option<Vec<u64>> {
+        match Self::get(name)? {
+            aml::Value::Package(v) => v
+                .into_iter()
+                .map(|e| match e {
+                    aml::Value::Integer(n) => Some(n),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        }
+    }
+    fn keys(&self, name: &'static str) -> Option<Vec<Key>> {
+        match Self::get(name)? {
+            aml::Value::Package(v) => v
+                .into_iter()
+                .map(|e| match e {
+                    aml::Value::String(s) => s.as_bytes().try_into().ok(),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        }
+    }
+}
+
+type FakeMachine<'a> = Machine<&'a FakePorts, &'a FakeMmio, FakeClock>;
+
+fn machine(m: &FakeMmio) -> FakeMachine<'_> {
+    let smc = Smc::probe_mmio(m, FakeClock::default())
+        .ok()
+        .expect("LDKN 2");
+    let mut mach = Machine {
+        smc,
+        fans: 1,
+        temps: Vec::new(),
+        floor: None,
+        limit: None,
+    };
+    mach.floor = mach.fan_floor(&MacPro).expect("a floor");
+    mach.limit = mach.limit_keys(&MacPro).expect("a limit");
+    assert!(mach.floor.is_some() && mach.limit.is_some());
+    mach
+}
+
+/// `F0Mn` as the fake SMC holds it.
+fn min_speed(m: &FakeMmio) -> u32 {
+    let v = &m.keys.lock().unwrap().0[b"F0Mn"].1;
+    value::fpe2([v[0], v[1]])
+}
+
+fn set(m: &FakeMmio, k: &[u8; 4], v: &[u8]) {
+    m.keys.lock().unwrap().0.get_mut(k).unwrap().1 = v.to_vec();
+}
+
+#[test]
+fn a_cold_boot_raises_the_floor_from_the_gpus() {
+    let m = FakeMmio::new(Keys::mac_pro());
+    let mach = machine(&m);
+    assert_eq!(min_speed(&m), 790);
+    mach.floor_tick(mach.floor.as_ref().unwrap());
+    // GPU dies at 62.0 and 62.6 C: 790 + 1810 * 17/20.
+    assert_eq!(min_speed(&m), 790 + 1810 * 17 / 20);
+}
+
+#[test]
+fn a_stale_floor_from_a_warm_reboot_is_rewritten() {
+    let m = FakeMmio::new(Keys::mac_pro());
+    set(&m, b"F0Mn", &value::to_fpe2(1600).unwrap());
+    for k in [b"TG0D", b"TG1D", b"TCXc", b"TC0P"] {
+        set(&m, k, &[40, 0]);
+    }
+    let mach = machine(&m);
+    mach.floor_tick(mach.floor.as_ref().unwrap());
+    assert_eq!(min_speed(&m), 790, "the first sample always writes");
+}
+
+#[test]
+fn a_missing_sensor_sends_the_floor_to_the_top() {
+    let m = FakeMmio::new(Keys::mac_pro());
+    let mach = machine(&m);
+    m.keys.lock().unwrap().0.remove(b"TG1D");
+    mach.floor_tick(mach.floor.as_ref().unwrap());
+    assert_eq!(min_speed(&m), 2600);
+}
+
+#[test]
+fn turning_the_policy_off_restores_the_firmware_minimum() {
+    let m = FakeMmio::new(Keys::mac_pro());
+    let mach = machine(&m);
+    let f = mach.floor.as_ref().unwrap();
+    mach.floor_tick(f);
+    assert!(min_speed(&m) > 790);
+    mach.set_floor_enabled(f, false);
+    assert_eq!(min_speed(&m), 790);
+    // Off: a sample writes nothing.
+    mach.floor_tick(f);
+    assert_eq!(min_speed(&m), 790);
+    // On again: the next sample writes.
+    mach.set_floor_enabled(f, true);
+    mach.floor_tick(f);
+    assert!(min_speed(&m) > 790);
+    mach.floor_restore(f);
+    assert_eq!(min_speed(&m), 790);
+}
+
+#[test]
+fn the_limit_follows_mslt_through_the_smc() {
+    let m = FakeMmio::new(Keys::mac_pro());
+    let mach = machine(&m);
+    let l = mach.limit.as_ref().unwrap();
+    assert_eq!(
+        mach.limit_tick(l),
+        None,
+        "off and unchanged: nothing to say"
+    );
+    set(&m, b"MSLT", &[0x00, 0x00, 0xc8, 0x42]);
+    set(&m, b"MSLG", &[2]);
+    set(&m, b"MSTc", &[0x11]);
+    assert_eq!(mach.limit_tick(l), Some(true));
+    assert_eq!(l.state.lock().level, 100);
+    assert_eq!(l.gpu_step.load(Ordering::Relaxed), 2);
+    assert_eq!(l.cpu_step.load(Ordering::Relaxed), 0x11);
+    // Said again on every sample while on.
+    assert_eq!(mach.limit_tick(l), Some(true));
+    set(&m, b"MSLT", &[0; 4]);
+    for _ in 0..OFF_SAMPLES - 1 {
+        assert_eq!(mach.limit_tick(l), Some(true));
+    }
+    assert_eq!(mach.limit_tick(l), Some(false), "off once, after the zeros");
+    assert_eq!(mach.limit_tick(l), None);
+}
+
+#[test]
+fn fan_values_decode_from_the_dump() {
+    let m = FakeMmio::new(Keys::mac_pro());
+    let mach = machine(&m);
+    assert_eq!(mach.fan_speed(*b"F0Ac"), Ok(846));
+    assert_eq!(mach.fan_speed(*b"F0Mx"), Ok(1966));
+    assert_eq!(mach.sensor(*b"TCXc"), Some(62_015));
+    assert_eq!(mach.manual(0), Ok(0));
+    mach.set_manual(0, 1).unwrap();
+    assert_eq!(mach.manual(0), Ok(1));
+    assert_eq!(mach.set_manual(0, 2), Err(abi::errno::Errno::EINVAL));
+    assert_eq!(
+        mach.set_fan_speed(*b"F0Mn", 16_384),
+        Err(abi::errno::Errno::EINVAL),
+        "no wrap"
+    );
 }

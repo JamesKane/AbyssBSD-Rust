@@ -193,6 +193,12 @@ fn osi_interfaces(ops: &'static dyn Ops) -> Vec<String> {
 }
 
 impl Service {
+    /// Whether any applying platform states device properties.
+    #[must_use]
+    pub fn has_platform_properties(&self) -> bool {
+        !self.properties.is_empty()
+    }
+
     /// The platform property `name` of a device whose `_HID` is `hid`.
     #[must_use]
     pub fn platform_property(

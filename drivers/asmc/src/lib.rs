@@ -36,6 +36,7 @@
 
 extern crate alloc;
 
+mod machine;
 pub mod policy;
 pub mod smc;
 pub mod value;
@@ -46,7 +47,7 @@ mod tests;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use abi::errno::Errno;
 use abi::sysctl::{ctlflag, ctltype};
@@ -59,14 +60,13 @@ use sched::{Sleepable, WaitQueue};
 use sync::SpinLock;
 use sysctl::{NodeId, Number};
 
-use policy::{Curve, Floor, Limit, Reading};
+use machine::{FanFloor, LimitKeys, Machine, Props, fan_key, temperature_keys};
+use policy::Floor;
 use regs::Bytes;
-use smc::{Clock, Key, MmioIo, PortIo, Smc, SmcError};
+use smc::{Clock, Key, MmioIo, PortIo, Smc};
 
 /// The most fans (`ASMC_MAXFANS`).
 const MAX_FANS: u8 = 6;
-/// The most temperature sensors (`ASMC_TEMP_MAX`).
-const MAX_TEMPS: usize = 80;
 
 /// The port window.
 #[allow(missing_debug_implementations)]
@@ -134,10 +134,14 @@ pub fn platform_limit() -> bool {
 
 /// Registers `f`, called with the limit's state on each change, and once
 /// now with the current state, so a driver that loads while the limit is
-/// latched (it is across a warm reboot) learns of it.
+/// latched (it is across a warm reboot) learns of it. The state is read
+/// under the listeners' lock, so no change falls between the two.
 pub fn on_platform_limit(f: LimitFn) {
-    let now = platform_limit();
-    LISTENERS.lock().push(Arc::clone(&f));
+    let now = {
+        let mut l = LISTENERS.lock();
+        l.push(Arc::clone(&f));
+        platform_limit()
+    };
     f(now);
 }
 
@@ -147,157 +151,39 @@ pub fn off_platform_limit(f: &LimitFn) {
 }
 
 fn publish_limit(on: bool) {
-    LIMIT_ON.store(on, Ordering::Release);
-    let listeners = LISTENERS.lock().clone();
+    let listeners = {
+        let l = LISTENERS.lock();
+        LIMIT_ON.store(on, Ordering::Release);
+        l.clone()
+    };
     for f in listeners {
         f(on);
     }
 }
 
-/// A key name for fan `n` from a pattern with `%` where the digit goes
-/// (`"F%Mn"`).
-fn fan_key(pattern: &[u8; 4], n: u8) -> Key {
-    pattern.map(|b| if b == b'%' { b'0' + n } else { b })
-}
+type KernelMachine = Machine<Ports, Memory, BusClock>;
 
-/// The fan floor's configuration and state.
-struct FanFloor {
-    fan: u8,
-    settings: SpinLock<Floor>,
-    enabled: AtomicBool,
-    gpu_keys: Vec<Key>,
-    cpu_keys: Vec<Key>,
-    /// The last floor written, rpm; `u32::MAX` before the first.
-    floor: AtomicU32,
-}
-
-/// The platform limit's keys and state.
-struct LimitKeys {
-    level: Key,
-    gpu: Key,
-    cpu: Key,
-    state: SpinLock<Limit>,
-    gpu_step: AtomicU32,
-    cpu_step: AtomicU32,
-}
-
-/// What the driver keeps.
+/// What the driver keeps: the SMC and its findings ([`Machine`]), and the
+/// kernel's part.
 struct Inner {
-    smc: KernelSmc,
+    m: KernelMachine,
     unit: u32,
-    fans: u8,
-    temps: Vec<Key>,
-    floor: Option<FanFloor>,
-    limit: Option<LimitKeys>,
     stopping: AtomicBool,
     wake: WaitQueue,
     worker: SpinLock<Option<Arc<sched::Thread>>>,
     nodes: SpinLock<Vec<NodeId>>,
 }
 
+impl core::ops::Deref for Inner {
+    type Target = KernelMachine;
+    fn deref(&self) -> &KernelMachine {
+        &self.m
+    }
+}
+
 impl Inner {
     fn log(&self, args: core::fmt::Arguments<'_>) {
         bus::manager().log(format_args!("asmc{}: {args}", self.unit));
-    }
-
-    /// A fan speed in rpm, by the key's own type.
-    fn fan_speed(&self, key: Key) -> Result<u32, SmcError> {
-        let info = self.smc.info(key)?;
-        if &info.ty == b"flt " && info.len == 4 {
-            let mut b = [0u8; 4];
-            self.smc.read(key, &mut b)?;
-            Ok(value::float_to_u32(u32::from_le_bytes(b)))
-        } else {
-            let mut b = [0u8; 2];
-            self.smc.read(key, &mut b)?;
-            Ok(value::fpe2(b))
-        }
-    }
-
-    /// Sets a fan speed key, in its own type; out of range is `EINVAL`.
-    fn set_fan_speed(&self, key: Key, rpm: u32) -> Result<(), Errno> {
-        let info = self.smc.info(key).map_err(|_| Errno::EIO)?;
-        let r = if &info.ty == b"flt " && info.len == 4 {
-            if rpm > 65_535 {
-                return Err(Errno::EINVAL);
-            }
-            self.smc
-                .write_checked(key, &value::u32_to_float(rpm).to_le_bytes())
-        } else {
-            let b = value::to_fpe2(rpm).ok_or(Errno::EINVAL)?;
-            self.smc.write_checked(key, &b)
-        };
-        r.map_err(|_| Errno::EIO)
-    }
-
-    /// A two-byte sensor in millidegrees.
-    fn sensor(&self, key: Key) -> Option<i32> {
-        let info = self.smc.info(key).ok()?;
-        if info.len != 2 {
-            return None;
-        }
-        let mut b = [0u8; 2];
-        self.smc.read(key, &mut b).ok()?;
-        value::sensor_milli(&info.ty, b)
-    }
-
-    /// One fan floor sample; writes the floor when it should.
-    fn floor_tick(&self, f: &FanFloor) {
-        if !f.enabled.load(Ordering::Acquire) {
-            return;
-        }
-        let settings = *f.settings.lock();
-        let read = |keys: &[Key]| {
-            keys.iter()
-                .map(|&k| self.sensor(k))
-                .collect::<Vec<Reading>>()
-        };
-        let (gpu, cpu) = (read(&f.gpu_keys), read(&f.cpu_keys));
-        let last = match f.floor.load(Ordering::Acquire) {
-            u32::MAX => None,
-            n => Some(n),
-        };
-        let (next, write) = settings.step(last, &gpu, &cpu);
-        if write {
-            let key = fan_key(b"F%Mn", f.fan);
-            if self.set_fan_speed(key, next).is_ok() {
-                f.floor.store(next, Ordering::Release);
-            }
-        }
-    }
-
-    /// Gives the fan back its firmware minimum.
-    fn floor_restore(&self, f: &FanFloor) {
-        let fwmin = f.settings.lock().fwmin;
-        if self.set_fan_speed(fan_key(b"F%Mn", f.fan), fwmin).is_ok() {
-            f.floor.store(fwmin, Ordering::Release);
-        }
-    }
-
-    /// One platform-limit sample. The limit is published on every sample
-    /// while on (the fork's `421c666bda5a`), and on the change to off.
-    fn limit_tick(&self, l: &LimitKeys) {
-        let mut b = [0u8; 4];
-        let level = self
-            .smc
-            .read(l.level, &mut b)
-            .ok()
-            .map(|()| value::limit(b));
-        let (changed, on) = {
-            let mut s = l.state.lock();
-            let changed = s.sample(level);
-            (changed, s.active())
-        };
-        if on || changed {
-            publish_limit(on);
-        }
-        let mut one = [0u8; 1];
-        if self.smc.read(l.gpu, &mut one).is_ok() {
-            l.gpu_step.store(u32::from(one[0]), Ordering::Relaxed);
-        }
-        if self.smc.read(l.cpu, &mut one).is_ok() {
-            l.cpu_step.store(u32::from(one[0]), Ordering::Relaxed);
-        }
     }
 }
 
@@ -315,160 +201,42 @@ impl core::fmt::Debug for Asmc {
     }
 }
 
-/// Device property `name` as an integer.
-fn prop_int(cx: &AttachCx<'_>, name: &'static str) -> Option<u64> {
-    match acpi::properties::value(cx, name)? {
-        aml::Value::Integer(n) => Some(n),
-        _ => None,
-    }
-}
+/// The device's properties, through `sys/acpi`.
+struct CxProps<'a, 'b>(&'a AttachCx<'b>);
 
-/// Device property `name` as a package of integers.
-fn prop_ints(cx: &AttachCx<'_>, name: &'static str) -> Option<Vec<u64>> {
-    match acpi::properties::value(cx, name)? {
-        aml::Value::Package(v) => v
-            .into_iter()
-            .map(|e| match e {
-                aml::Value::Integer(n) => Some(n),
-                _ => None,
-            })
-            .collect(),
-        _ => None,
-    }
-}
-
-/// Device property `name` as SMC keys (four-character strings).
-fn prop_keys(cx: &AttachCx<'_>, name: &'static str) -> Option<Vec<Key>> {
-    match acpi::properties::value(cx, name)? {
-        aml::Value::Package(v) => v
-            .into_iter()
-            .map(|e| match e {
-                aml::Value::String(s) => s.as_bytes().try_into().ok(),
-                _ => None,
-            })
-            .collect(),
-        _ => None,
-    }
-}
-
-/// A curve from a two-integer range property.
-fn curve(v: &[u64]) -> Option<Curve> {
-    let [start, full] = v else { return None };
-    Some(Curve {
-        start: i32::try_from(*start).ok()?,
-        full: i32::try_from(*full).ok()?,
-    })
-}
-
-/// The fan floor, if the properties give one and the fan's minimum key is
-/// the two-byte `fpe2` the policy writes.
-fn fan_floor(
-    cx: &AttachCx<'_>,
-    smc: &KernelSmc,
-    fans: u8,
-) -> Result<Option<FanFloor>, &'static str> {
-    let Some(fan) = prop_int(cx, "apple,fan-floor-fan") else {
-        return Ok(None);
-    };
-    let fan = u8::try_from(fan)
-        .ok()
-        .filter(|&f| f < fans)
-        .ok_or("no such fan")?;
-    let fwmin = prop_int(cx, "apple,fan-floor-firmware-minimum").ok_or("no firmware minimum")?;
-    let top = prop_int(cx, "apple,fan-floor-top").ok_or("no top")?;
-    let gpu = prop_ints(cx, "apple,fan-floor-gpu-range")
-        .as_deref()
-        .and_then(curve)
-        .ok_or("no GPU range")?;
-    let cpu = prop_ints(cx, "apple,fan-floor-cpu-range")
-        .as_deref()
-        .and_then(curve)
-        .ok_or("no CPU range")?;
-    let gpu_keys = prop_keys(cx, "apple,fan-floor-gpu-keys").ok_or("no GPU keys")?;
-    let cpu_keys = prop_keys(cx, "apple,fan-floor-cpu-keys").ok_or("no CPU keys")?;
-    let info = smc
-        .info(fan_key(b"F%Mn", fan))
-        .map_err(|_| "no minimum key")?;
-    if info.len != 2 || &info.ty != b"fpe2" {
-        return Err("the minimum key is not a two-byte fpe2");
-    }
-    let (fwmin, top) = (
-        u32::try_from(fwmin).map_err(|_| "firmware minimum")?,
-        u32::try_from(top).map_err(|_| "top")?,
-    );
-    if top < fwmin || top > 4000 {
-        return Err("top out of range");
-    }
-    Ok(Some(FanFloor {
-        fan,
-        settings: SpinLock::new(Floor {
-            fwmin,
-            top,
-            gpu,
-            cpu,
-        }),
-        enabled: AtomicBool::new(true),
-        gpu_keys,
-        cpu_keys,
-        floor: AtomicU32::new(u32::MAX),
-    }))
-}
-
-/// The platform limit, if the properties name its keys and the level key
-/// is a four-byte `flt `.
-fn limit_keys(cx: &AttachCx<'_>, smc: &KernelSmc) -> Result<Option<LimitKeys>, &'static str> {
-    let Some(keys) = prop_keys(cx, "apple,power-limit-keys") else {
-        return Ok(None);
-    };
-    let [level, gpu, cpu] = keys[..] else {
-        return Err("want three keys");
-    };
-    let info = smc.info(level).map_err(|_| "no level key")?;
-    if info.len != 4 || &info.ty != b"flt " {
-        return Err("the level key is not a four-byte flt");
-    }
-    Ok(Some(LimitKeys {
-        level,
-        gpu,
-        cpu,
-        state: SpinLock::new(Limit::default()),
-        gpu_step: AtomicU32::new(0),
-        cpu_step: AtomicU32::new(0),
-    }))
-}
-
-/// The two-byte `sp78` keys from `T` to `U` (`asmc_detect_sensors`), found
-/// by a binary search for each end over the key table.
-fn temperature_keys(smc: &KernelSmc, nkeys: u32) -> Vec<Key> {
-    let search = |prefix: &Key| -> Option<u32> {
-        let (mut lo, mut hi) = (0, nkeys);
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            if smc.key_at(mid).ok()? < *prefix {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        Some(lo)
-    };
-    let (Some(start), Some(end)) = (search(b"T\0\0\0"), search(b"U\0\0\0")) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for i in start..end {
-        let Ok(k) = smc.key_at(i) else { continue };
-        if smc
-            .info(k)
-            .is_ok_and(|info| info.len == 2 && &info.ty == b"sp78")
-        {
-            out.push(k);
-            if out.len() == MAX_TEMPS {
-                break;
-            }
+impl Props for CxProps<'_, '_> {
+    fn int(&self, name: &'static str) -> Option<u64> {
+        match acpi::properties::value(self.0, name)? {
+            aml::Value::Integer(n) => Some(n),
+            _ => None,
         }
     }
-    out
+
+    fn ints(&self, name: &'static str) -> Option<Vec<u64>> {
+        match acpi::properties::value(self.0, name)? {
+            aml::Value::Package(v) => v
+                .into_iter()
+                .map(|e| match e {
+                    aml::Value::Integer(n) => Some(n),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        }
+    }
+
+    fn keys(&self, name: &'static str) -> Option<Vec<Key>> {
+        match acpi::properties::value(self.0, name)? {
+            aml::Value::Package(v) => v
+                .into_iter()
+                .map(|e| match e {
+                    aml::Value::String(s) => s.as_bytes().try_into().ok(),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        }
+    }
 }
 
 impl Driver for Asmc {
@@ -524,14 +292,29 @@ impl Driver for Asmc {
             .map_or(0, |()| one[0])
             .min(MAX_FANS);
         let temps = temperature_keys(&smc, nkeys);
-        let floor = fan_floor(cx, &smc, fans).unwrap_or_else(|why| {
+        let mut m = Machine {
+            smc,
+            fans,
+            temps,
+            floor: None,
+            limit: None,
+        };
+        let props = CxProps(cx);
+        m.floor = m.fan_floor(&props).unwrap_or_else(|why| {
             log(format_args!("fan policy: {why}"));
             None
         });
-        let limit = limit_keys(cx, &smc).unwrap_or_else(|why| {
+        m.limit = m.limit_keys(&props).unwrap_or_else(|why| {
             log(format_args!("power limit: {why}"));
             None
         });
+        if m.smc.retired() {
+            log(format_args!(
+                "the SMC stopped answering while probing; it is tried again every {} s",
+                smc::BACKOFF_US / 1_000_000
+            ));
+        }
+        let floor = &m.floor;
         if let Some(f) = &floor {
             let s = f.settings.lock();
             log(format_args!(
@@ -541,12 +324,8 @@ impl Driver for Asmc {
         }
         Ok(Self {
             inner: Arc::new(Inner {
-                smc,
+                m,
                 unit,
-                fans,
-                temps,
-                floor,
-                limit,
                 stopping: AtomicBool::new(false),
                 wake: WaitQueue::new(),
                 worker: SpinLock::new(None),
@@ -600,18 +379,29 @@ impl Driver for Asmc {
 /// [`policy::INTERVAL_S`].
 fn worker(inner: &Arc<Inner>, s: &Sleepable) {
     let stopping = || inner.stopping.load(Ordering::Acquire);
+    let mut was_retired = false;
     while !stopping() {
         if let Some(f) = &inner.floor {
             inner.floor_tick(f);
         }
-        if let Some(l) = &inner.limit {
-            inner.limit_tick(l);
+        if let Some(l) = &inner.limit
+            && let Some(on) = inner.limit_tick(l)
+        {
+            publish_limit(on);
         }
-        if inner.smc.retired() {
-            inner.log(format_args!(
-                "the SMC stopped answering; leaving the fan as it is"
-            ));
-            break;
+        // Set aside, the SMC is tried again every BACKOFF_US: the fan keeps
+        // what was last written meanwhile.
+        let retired = inner.smc.retired();
+        if retired != was_retired {
+            if retired {
+                inner.log(format_args!(
+                    "the SMC stopped answering; trying again every {} s",
+                    smc::BACKOFF_US / 1_000_000
+                ));
+            } else {
+                inner.log(format_args!("the SMC answers again"));
+            }
+            was_retired = retired;
         }
         let mut done = stopping;
         bus::manager().wait_timeout(
@@ -724,8 +514,8 @@ fn sysctls(inner: &Arc<Inner>, s: &Sleepable) {
                     RW_INT,
                     "I",
                     int_query(
-                        move || manual(&g, n),
-                        Some(Arc::new(move |v| set_manual(&w, n, v))),
+                        move || g.manual(n),
+                        Some(Arc::new(move |v| w.set_manual(n, v))),
                     ),
                 );
             }
@@ -821,21 +611,13 @@ fn floor_sysctls(t: &mut sysctl::Tree, node: NodeId, inner: &Arc<Inner>) {
         int_query(
             move || Ok(i32::from(floor_of(&g).enabled.load(Ordering::Acquire))),
             Some(Arc::new(move |v| {
-                let f = floor_of(&w);
-                match v {
-                    0 => {
-                        if f.enabled.swap(false, Ordering::AcqRel) {
-                            w.floor_restore(f);
-                        }
-                    }
-                    1 => {
-                        if !f.enabled.swap(true, Ordering::AcqRel) {
-                            f.floor.store(u32::MAX, Ordering::Release);
-                            w.wake.wake_all();
-                        }
-                    }
+                let on = match v {
+                    0 => false,
+                    1 => true,
                     _ => return Err(Errno::EINVAL),
-                }
+                };
+                w.set_floor_enabled(floor_of(&w), on);
+                w.wake.wake_all();
                 Ok(())
             })),
         ),
@@ -941,44 +723,6 @@ fn in_degrees(v: i32) -> Result<i32, Errno> {
     } else {
         Err(Errno::EINVAL)
     }
-}
-
-/// Fan `n`'s manual mode: its own `F<n>Md` key where there is one (T2
-/// Macs), else its bit of `FS! ` (`asmc_mb_sysctl_fanmanual`).
-fn manual(inner: &Inner, n: u8) -> Result<i32, Errno> {
-    let md = fan_key(b"F%Md", n);
-    let mut b = [0u8; 2];
-    if inner.smc.info(md).is_ok_and(|i| i.len == 1) {
-        inner.smc.read(md, &mut b[..1]).map_err(|_| Errno::EIO)?;
-        return Ok(i32::from(b[0] != 0));
-    }
-    inner.smc.read(*b"FS! ", &mut b).map_err(|_| Errno::EIO)?;
-    Ok(i32::from(u16::from_be_bytes(b) & (1 << n) != 0))
-}
-
-fn set_manual(inner: &Inner, n: u8, v: i32) -> Result<(), Errno> {
-    let on = match v {
-        0 => false,
-        1 => true,
-        _ => return Err(Errno::EINVAL),
-    };
-    let md = fan_key(b"F%Md", n);
-    if inner.smc.info(md).is_ok_and(|i| i.len == 1) {
-        return inner.smc.write(md, &[u8::from(on)]).map_err(|_| Errno::EIO);
-    }
-    // One transaction's read and the next's write: FreeBSD's too.
-    let mut b = [0u8; 2];
-    inner.smc.read(*b"FS! ", &mut b).map_err(|_| Errno::EIO)?;
-    let mut mask = u16::from_be_bytes(b);
-    if on {
-        mask |= 1 << n;
-    } else {
-        mask &= !(1 << n);
-    }
-    inner
-        .smc
-        .write(*b"FS! ", &mask.to_be_bytes())
-        .map_err(|_| Errno::EIO)
 }
 
 /// The declaration for the kernel's driver list.

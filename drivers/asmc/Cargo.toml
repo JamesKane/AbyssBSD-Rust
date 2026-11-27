@@ -16,5 +16,8 @@ sched = { path = "../../sys/sched" }
 sync = { path = "../../sys/sync" }
 sysctl = { path = "../../sys/sysctl" }
 
+[dev-dependencies]
+apple-mac = { path = "../../platform/apple-mac" }
+
 [lints]
 workspace = true

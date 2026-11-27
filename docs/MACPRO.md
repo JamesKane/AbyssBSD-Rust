@@ -248,22 +248,42 @@ The planned checks:
   `apple,fan-floor-{fan,firmware-minimum,top,gpu-keys,gpu-range,cpu-keys,cpu-range}` and
   `apple,power-limit-keys`.
 - **`drivers/asmc`:**
-  - memory window first, else ports; bounded transactions, and a jammed SMC retired;
+  - memory window first, else ports;
+  - every transaction bounded at 200 ms;
+  - set-aside rule:
+    - only an SMC that does not answer at all (a command never acknowledged on the ports, the
+      memory window never ready) three times in a row is set aside;
+    - it is then tried again every 30 s;
+    - a key the SMC lacks never counts, since on the ports it looks like a timeout too;
   - FreeBSD's fan and `temp` sysctls; speeds by each key's own type (`fpe2` or `flt `);
   - the fan floor and the platform limit as pure state machines (`policy.rs`), run by a 2 s
     worker;
   - `platform_limit()` and `on_platform_limit()`, which reports the current state at
     registration.
-- **Host tests:** a fake SMC on both windows with the Mac Pro's keys, the encodings, the floor
-  curve and its fall, and the limit's latch and release.
+- **Host tests** (19), on a fake SMC on both windows whose keys have the types, lengths and values
+  of the fork's cold-boot dump (`fbsd-keys-cold.txt`):
+  - the encodings;
+  - missing keys, which do not set the SMC aside, and the back-off and retry;
+  - the driver's own sampling (`machine.rs`), with `platform/apple-mac`'s `MACPRO6_1` properties:
+    - cold boot: the GPUs at 62 °C put the floor at 2328 rpm;
+    - a stale 1600 rpm floor from a warm reboot goes back to 790;
+    - a missing GPU sensor sends the floor to 2600;
+    - turning the policy off restores 790, and no sample writes after that;
+    - `MSLT` 0 → 100 → 0 turns the limit on, re-sends it each sample, and turns it off once;
+  - the floor curve and its fall.
 - **QEMU check:** `x86_64-ivybridge` adds QEMU's `isa-applesmc`. `asmc0` attaches through the
   ports and reads `SMC revision: 1.13f3`. The Mac Pro properties reach it and are declined there
   ("no such fan", "no level key"), since QEMU's SMC has neither.
 - **Difference from the fork:** with the fork's fall rule, a raised floor never returns to the
   firmware minimum. It stops up to 100 rpm above it (890 rpm) and is rewritten there every
   sample. Ours falls the rest of the way once demand is back at the minimum.
-- **Not on the machine yet:** the memory window, the floor writes and the limit. They wait for
-  MP4.
+- **Never run on hardware or in a kernel:**
+  - `coretemp`'s attach and sysctls (KVM shows no sensor);
+  - the memory window inside the kernel;
+  - the floor writes and the limit;
+  - the `asmc` sysctl handlers.
+
+  All of these wait for MP4.
 
 ### MP4: First boot on the machine
 

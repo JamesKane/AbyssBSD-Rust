@@ -18,8 +18,10 @@ pub fn property(
     name: &str,
 ) -> Option<Value> {
     dsd_property(interp, host, node, name).or_else(|| {
+        // Most machines have no platform properties: no `_HID` to look up.
+        let svc = service().filter(|s| s.has_platform_properties())?;
         let hid = interp.hid(node, host).ok()??;
-        let d = service()?.platform_property(&hid, name)?;
+        let d = svc.platform_property(&hid, name)?;
         Some(to_value(d.value))
     })
 }
