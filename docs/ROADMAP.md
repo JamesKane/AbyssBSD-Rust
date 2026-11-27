@@ -296,6 +296,23 @@ named above.
 Status: the QEMU exit is met (U.4 and U.5 done 2026-10-24; `ugen`, `hidraw`, `hcons` and `hsctrl`
 came with P9). The hardware step is P8's on the Sky1 and P10's on the X870E.
 
+## Track: Mac Pro, Tier 2 (parallel to P10/P11) (M) — planned
+
+**Goal:** FreeBSD multi-user on the Mac Pro (Late 2013, `MacPro6,1`), from a USB 3 disk, kept
+thermally safe ([ADR-0023](adr/0023-hardware-scope-consumer-decade.md), HARDWARE.md §9). Plan,
+milestones and what is already measured: [MACPRO.md](MACPRO.md).
+
+- QEMU and host tests first: an Ivy Bridge boot case, the loader's EFI 1.10 tests,
+  `platform/apple-mac` with the Darwin `_OSI`, `ichwd` for Patsburg, `coretemp`, `asmc` with the
+  fan floor policy, `bge` for the BCM57762.
+- Then on the machine, when the FreeBSD-fork project's thermal work hands it over: first boot
+  through the Startup Manager, the thermal gate (no sustained load before `asmc`'s fan policy runs),
+  `bge` and an unattended deploy loop.
+
+**Exit:** `x86_64-multiuser` from the framebuffer and a USB keyboard; fsx and `fsck_ffs` on the USB
+disk; the device tree against FreeBSD's `devinfo`; 30 minutes of full CPU load with the fan policy.
+Correctness only, no performance gate. Southern Islands graphics is M-G's, later.
+
 ## Phase 6: FreeBSD multi-user (XL) — done 2026-10-30
 
 **Goal:** stock FreeBSD `/sbin/init` → `rc` → multi-user `login:`.

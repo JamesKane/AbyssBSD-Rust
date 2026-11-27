@@ -360,30 +360,33 @@ reference for what the hardware does, used as observation only.
 ## 9. Board profile: AMD64 Mac Pro (Late 2013, `MacPro6,1`)
 
 The first Tier 2 physical machine ([ADR-0023](adr/0023-hardware-scope-consumer-decade.md)), owned
-and on hand as of 2026-11-10. Facts are from Apple's published specifications and public knowledge
-of the model, **not yet captured from this machine**: every row is to be checked, and the
-configuration (CPU, GPUs, SSD, boot ROM version) recorded, by the capture below.
+and on hand as of 2026-11-10. The rows are from Apple's published specifications and public
+knowledge of the model unless marked **measured**. Measured rows come from the FreeBSD-fork project's
+runs of FreeBSD 16-CURRENT and macOS 12.7.6 on this unit (2026-11-26 and 27), summarized in
+[MACPRO.md §2](MACPRO.md#2-what-is-already-measured). The bring-up plan is [MACPRO.md](MACPRO.md).
+AbyssBSD writes only to an external USB 3 disk (serial number to be recorded at MP4); the internal
+SSD holds macOS and is never written.
 
 | Item | Expected | What it means for AbyssBSD |
 |---|---|---|
 | Model | Mac Pro (Late 2013), `MacPro6,1`, A1481. SMBIOS maker `Apple Inc.` | `platform/apple-mac` matches the maker, as FreeBSD's `acpi_apple_darwin_osi` does |
-| CPU | One Intel Xeon E5 v2 (Ivy Bridge-EP): E5-1620 v2 (4 cores), 1650 v2 (6), 1680 v2 (8), or 2697 v2 (12), with SMT. AVX, no AVX2. x2APIC-capable | x86-64-v2 holds. Single socket, so no NUMA. Whether firmware leaves the APIC in xAPIC mode is to check |
+| CPU | **Measured:** Xeon E5-2697 v2 (Ivy Bridge-EP, 12 cores, 24 threads), TjMax 99 °C; 64 GB. (Other configurations: E5-1620 v2, 1650 v2, 1680 v2.) AVX, no AVX2. x2APIC-capable | x86-64-v2 holds. Single socket, so no NUMA. Whether firmware leaves the APIC in xAPIC mode is to check |
 | Memory | Four DDR3 ECC RDIMM slots | Size from the memory map |
-| Firmware | Apple EFI, 64-bit, system table revision **EFI 1.10** with GOP added. CSM present (Boot Camp). No Secure Boot, no T2. Boot ROM `MP61.*`, updated only by macOS installers; NVMe boot needs `MP61.0120.B00` or later | The EFI 1.10 floor of §1. The Option key opens the Startup Manager, which lists a FAT ESP's `\EFI\BOOT\BOOTX64.EFI` as "EFI Boot" |
+| Firmware | Apple EFI, 64-bit, system table revision **EFI 1.10** with GOP added. CSM present (Boot Camp). No Secure Boot, no T2. Boot ROM updated only by macOS installers; **measured** `481.0.0.0.0` (2023-10-07) with macOS 12.7.6 | The EFI 1.10 floor of §1. The Option key opens the Startup Manager, which lists a FAT ESP's `\EFI\BOOT\BOOTX64.EFI` as "EFI Boot" |
 | Boot selection | Apple's own variables (`efi-boot-device`, set by `bless`); standard `BootOrder`/`Boot####`/`BootNext` largely ignored | Installer and `efibootmgr` behavior to check on the machine. The Startup Manager works for every test boot meanwhile |
 | ACPI | XSDT with FACP, APIC, HPET, MCFG, DMAR, SSDTs; older table revisions than ACPI 6. AML keys power and visibility on `_OSI("Darwin")` (`OSYS` = 10000) | The first pre-ACPI-5.0 corpus (`tests/corpus/macpro61/`). `_OSI` answers `Darwin` per ADR-0023 §4 |
 | Chipset | Intel C602J (Patsburg) PCH | `ichwd` needs Patsburg's LPC IDs (FreeBSD's table has them; ours stops at ICH10) |
 | Timers | Invariant TSC, HPET, ACPI PM timer, LAPIC (TSC-deadline capable) | Existing paths |
-| Display | Two AMD FirePro D300 (Pitcairn), D500, or D700 (Tahiti): GCN 1, "Southern Islands". Outputs on six Thunderbolt 2 ports and one HDMI 1.4 port | GOP framebuffer console. Which output GOP lights, and at what mode, is to check. Native graphics is Southern Islands under M-G (FreeBSD: `radeonkms`) |
-| Storage | Apple PCIe SSD on a proprietary connector, **AHCI** (not NVMe) | `ahci` matches by class. The disk AbyssBSD may write is decided before the first install (macOS likely lives on it) |
+| Display | **Measured:** two FirePro D700 (Tahiti XT `1002:6798`): `pci0:2:0:0` subsystem `106b:0128` (compute, none connected) and `pci0:6:0:0` `106b:0127` (display), each with its own VBIOS. GCN 1, "Southern Islands". Outputs on six Thunderbolt 2 ports and one HDMI 1.4 port | GOP framebuffer console. Which output GOP lights, and at what mode, is to check. Native graphics is Southern Islands under M-G (FreeBSD: drm-kmod's `amdgpu` with `si_support=1` and `si_dpm`, measured) |
+| Storage | Apple PCIe SSD on a proprietary connector, **AHCI** (not NVMe) | `ahci` matches by class. **macOS 12.7.6 lives on it: never written.** AbyssBSD installs to an external USB 3 disk (MACPRO.md §1) |
 | Network | Two Broadcom BCM57762 GbE. Broadcom BCM4360 802.11ac, Bluetooth 4.0 | `bge` is new work. Wi-Fi is out of scope |
 | USB | Four USB 3 ports; the controller (not in the C602J) is to identify | `xhci` if it is standard xHCI |
 | Thunderbolt | Three Intel Thunderbolt 2 controllers, six ports | Powered and enumerated only under the Darwin `_OSI`. Hot plug is later work |
 | Console | No serial port | As on the X870E: framebuffer, the loader's log on the ESP, the watchdog |
-| Other | Apple SMC (fans run on their own; sensors via FreeBSD's `asmc`), HDA audio | Not Day 1 |
+| SMC and cooling | **Measured:** SMC 2.20f18 at `APP0001`, MMIO at `0xfef00000` and ports `0x300-0x31f`. One fan for the CPU and both GPUs (790 to 2600 rpm). No ACPI `_TZ`. From a cold boot the SMC's curve reacts late; it throttles the CPU by PROCHOT under combined load, never the GPUs | **Day 1:** `asmc` with the fan floor policy before any sustained load (MACPRO.md §3) |
+| Other | HDA audio | Not Day 1 |
 
-**Capture before the first AbyssBSD boot** (read-only, from a FreeBSD 15.1 memstick booted through
-the Startup Manager; 16-CURRENT for its Darwin `_OSI` behavior): `acpidump -dt`, `pciconf -lvc`,
-`devinfo -rv`, `dmesg` (verbose boot), `kenv` (SMBIOS), `efivar -l`, `efibootmgr -v`, and the GOP
-modes. If macOS is installed, also its boot ROM version and `bless --info`. The results go to
-`tests/corpus/macpro61/` and replace "Expected" above.
+**Capture before the first AbyssBSD boot** (read-only). The FreeBSD-fork project already runs
+FreeBSD 16-CURRENT on the machine from its own stick, so the capture is asked of it: the list is
+[MACPRO.md §5, MP0](MACPRO.md#mp0-ground-truth-no-abyssbsd-code). The results go to
+`tests/corpus/macpro61/` and replace the remaining "Expected" rows above.
