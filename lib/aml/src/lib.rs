@@ -52,7 +52,7 @@ pub use host::{
 };
 pub use interp::{
     Config, FREEBSD_OSI, FieldInfo, Interpreter, Limits, LoadReport, LoadWarning, MethodInfo,
-    PowerResourceInfo, ProcessorInfo, RegionInfo,
+    OSI_FEATURE_GROUPS, PowerResourceInfo, ProcessorInfo, RegionInfo,
 };
 pub use name::{AmlPath, NameSeg, NameString};
 pub use namespace::NodeId;

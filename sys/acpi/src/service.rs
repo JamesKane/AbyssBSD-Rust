@@ -12,6 +12,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -45,6 +46,9 @@ pub struct Service {
     next_handler: core::sync::atomic::AtomicU64,
     /// The address-space handlers drivers installed.
     regions: Handlers,
+    /// The strings `_OSI` answers true to: FreeBSD's defaults after the
+    /// platforms' changes (ADR-0027).
+    osi: Vec<String>,
 }
 
 impl core::fmt::Debug for Service {
@@ -84,9 +88,11 @@ pub fn init(ops: &'static dyn Ops, s: &Sleepable) -> Option<LoadSummary> {
     if blocks.is_empty() {
         return None;
     }
+    let osi = osi_interfaces(ops);
     if SERVICE
         .set(Service {
             ops,
+            osi,
             jobs: SpinLock::new(VecDeque::new()),
             queue: WaitQueue::new(),
             handlers: SpinLock::new(Vec::new()),
@@ -123,6 +129,40 @@ pub fn init(ops: &'static dyn Ops, s: &Sleepable) -> Option<LoadSummary> {
     }))
 }
 
+/// FreeBSD's `_OSI` strings after every applying platform's changes,
+/// decided before the DSDT loads, since firmware's `_INI` methods read
+/// them (ADR-0027 §2). Logs what changed.
+fn osi_interfaces(ops: &'static dyn Ops) -> Vec<String> {
+    // A tunable is an integer, as FreeBSD's `TUNABLE_INT`; one that does
+    // not parse leaves the default, as `getenv_int` failing does.
+    let enabled = |name: &str| {
+        ops.tunable(name)
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .map(|n| n != 0)
+    };
+    let out = acpi_platform::osi_interfaces(
+        aml::FREEBSD_OSI,
+        ops.platforms(),
+        &ops.firmware_identity(),
+        enabled,
+    );
+    for p in &out.applied {
+        ops.log(format_args!(
+            "acpi: {p}: _OSI answers {}",
+            out.interfaces.join(", ")
+        ));
+    }
+    for (p, t) in &out.vetoed {
+        ops.log(format_args!("acpi: {p}: _OSI change turned off by {t}=0"));
+    }
+    for (p, s) in &out.conflicts {
+        ops.log(format_args!(
+            "acpi: {p}: adds _OSI vendor string {s:?} that another platform drops"
+        ));
+    }
+    out.interfaces
+}
+
 impl Service {
     /// The configuration of interpreters on the AML thread, whose stack
     /// bounds their recursion.
@@ -130,6 +170,7 @@ impl Service {
     pub fn config(&self) -> Config {
         Config {
             limits: Limits::for_stack(STACK),
+            osi: self.osi.clone(),
             ..Config::default()
         }
     }

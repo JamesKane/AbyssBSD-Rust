@@ -127,6 +127,9 @@ pub(crate) struct Vm {
     /// QEMU: a named CPU model (`IvyBridge-v2`) instead of the host's
     /// (KVM) or `max` (TCG), to boot on an older processor's feature set.
     pub(crate) cpu: Option<&'static str>,
+    /// QEMU: the SMBIOS system structure (type 1) in place of the test
+    /// machine's, with the test devices (`-smbios type=1,...` syntax).
+    pub(crate) smbios_system: Option<&'static str>,
     /// QEMU: a QMP socket at this path, to type and read the screen
     /// through ([`crate::qmp`]).
     pub(crate) qmp: Option<PathBuf>,
@@ -348,6 +351,7 @@ impl Vm {
             devices: Vec::new(),
             usb: false,
             cpu: None,
+            smbios_system: None,
             qmp: None,
             net: None,
             instance: "",
@@ -522,7 +526,12 @@ impl Vm {
             // Known SMBIOS strings, which the loader must put in the kernel
             // environment as FreeBSD's does (`smbios.*`; kernel/src/kenv.rs's
             // test).
-            c.args(SMBIOS_ARGS);
+            for (i, arg) in SMBIOS_ARGS.iter().enumerate() {
+                match self.smbios_system {
+                    Some(t1) if arg.starts_with("type=1,") && i > 0 => c.arg(t1),
+                    _ => c.arg(arg),
+                };
+            }
         }
         // EL2 for the guest needs TCG (KVM would need nested virtualization).
         let accel = if kvm_available(self.arch) && !self.el2 {

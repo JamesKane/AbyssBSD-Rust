@@ -103,9 +103,16 @@ pub trait Ops: Sync {
     fn platforms(&self) -> &'static [&'static dyn acpi_platform::PlatformSource] {
         &[]
     }
-    /// The firmware's identity, from the root table's header.
+    /// The firmware's identity: the root table's header and the SMBIOS
+    /// system strings (ADR-0027).
     fn firmware_identity(&self) -> acpi_platform::FirmwareIdentity {
         acpi_platform::FirmwareIdentity::default()
+    }
+    /// A tunable from the kernel environment (`hw.acpi.apple_darwin_osi`),
+    /// as `kern_getenv`. None by default.
+    fn tunable(&self, name: &str) -> Option<alloc::string::String> {
+        let _ = name;
+        None
     }
     /// The ECAM window (physical base, length) MCFG gives for `bus` of
     /// PCI segment `segment`: what an arm64 host bridge holds (FreeBSD's

@@ -150,9 +150,10 @@ pub static AARCH64: &[DriverDecl] = drivers![
     rts5453::DRIVER,
 ];
 
-/// The x86_64 kernel's platforms (ADR-0020): none yet.
+/// The x86_64 kernel's platforms (ADR-0020, ADR-0027): Intel Macs, matched
+/// by their SMBIOS maker.
 #[cfg(any(target_arch = "x86_64", not(target_os = "none")))]
-pub static PLATFORMS_X86_64: &[&'static dyn PlatformSource] = &[];
+pub static PLATFORMS_X86_64: &[&'static dyn PlatformSource] = &[&apple_mac::PLATFORM];
 
 /// The aarch64 kernel's platforms. Every one is built in and the ACPI bus
 /// runs each whose firmware identity matches, so no board needs a setting.

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //! The interface a platform implements (ADR-0020, DRIVER-MODEL.md §5.5).
 //!
-//! A platform is what one SoC family's firmware says outside the standard
-//! ACPI objects: vendor tables in AML, vendor `_DSD` property names, and
-//! (later) corrections. Each lives in its own crate under `platform/`,
+//! A platform is what one SoC or firmware family's firmware says outside
+//! the standard ACPI objects: vendor tables in AML, vendor `_DSD` property
+//! names, changes to the `_OSI` answers (ADR-0027), and (later)
+//! corrections. Each lives in its own crate under `platform/`,
 //! implements [`PlatformSource`], and is listed in `kernel/table`'s
 //! `PLATFORMS`. The ACPI bus runs every source whose [`PlatformSource::applies`]
 //! accepts the firmware, merges what they extract, and names no vendor
@@ -21,8 +22,9 @@ use aml::{Host, Interpreter, NodeId};
 use devtree::graph::EdgeKind;
 use devtree::platform::Description;
 
-/// The firmware's identity, from the root table's header.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The firmware's identity: the root table's header and the SMBIOS system
+/// information (ADR-0027).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FirmwareIdentity {
     /// The OEM ID.
     pub oem_id: [u8; 6],
@@ -30,6 +32,111 @@ pub struct FirmwareIdentity {
     pub oem_table_id: [u8; 8],
     /// The OEM revision.
     pub oem_revision: u32,
+    /// The SMBIOS system maker, product and family, empty without SMBIOS.
+    pub system: SystemIdentity,
+}
+
+/// The SMBIOS system information structure's strings (type 1), as the
+/// loader puts them in the kernel environment (`smbios.system.maker`,
+/// `.product`, `.family`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SystemIdentity {
+    /// The manufacturer (`Apple Inc.`).
+    pub maker: String,
+    /// The product name (`MacPro6,1`).
+    pub product: String,
+    /// The family (`MacPro`).
+    pub family: String,
+}
+
+/// What a platform changes in the `_OSI` answers, before the DSDT loads
+/// (ADR-0027 §2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OsiChanges {
+    /// Stop answering true to every vendor (operating system) string,
+    /// keeping the feature group strings: ACPICA's
+    /// `ACPI_DISABLE_ALL_VENDOR_STRINGS`.
+    pub drop_vendor_strings: bool,
+    /// Strings to answer true to.
+    pub add: &'static [&'static str],
+    /// The FreeBSD tunable that turns the change off when it is 0.
+    pub tunable: Option<&'static str>,
+}
+
+impl OsiChanges {
+    /// No change.
+    pub const NONE: Self = Self {
+        drop_vendor_strings: false,
+        add: &[],
+        tunable: None,
+    };
+
+    /// Whether it changes nothing.
+    #[must_use]
+    pub fn is_none(&self) -> bool {
+        !self.drop_vendor_strings && self.add.is_empty()
+    }
+}
+
+/// The `_OSI` strings after every platform's changes, and what happened.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OsiOutcome {
+    /// The strings `_OSI` answers true to.
+    pub interfaces: Vec<String>,
+    /// The platforms whose change was applied.
+    pub applied: Vec<&'static str>,
+    /// The platforms whose change its tunable turned off, with the tunable.
+    pub vetoed: Vec<(&'static str, &'static str)>,
+    /// A vendor string one platform added while another dropped the vendor
+    /// strings: (adder, string). The string is still added; this is a
+    /// diagnostic, which the corpus checks fail on.
+    pub conflicts: Vec<(&'static str, &'static str)>,
+}
+
+/// Applies every platform's `_OSI` changes for firmware `id` to `base`
+/// (FreeBSD's defaults, [`aml::FREEBSD_OSI`]): the drops first, then the
+/// additions, so the result does not depend on the platforms' order.
+/// `enabled` reads a tunable: `Some(false)` when it is set to 0.
+pub fn osi_interfaces(
+    base: &[&str],
+    platforms: &[&dyn PlatformSource],
+    id: &FirmwareIdentity,
+    enabled: impl Fn(&str) -> Option<bool>,
+) -> OsiOutcome {
+    let mut out = OsiOutcome::default();
+    let mut changes = Vec::new();
+    for p in platforms {
+        let c = p.osi(id);
+        if c.is_none() {
+            continue;
+        }
+        if let Some(t) = c.tunable
+            && enabled(t) == Some(false)
+        {
+            out.vetoed.push((p.name(), t));
+            continue;
+        }
+        out.applied.push(p.name());
+        changes.push((p.name(), c));
+    }
+    let is_feature = |s: &str| aml::OSI_FEATURE_GROUPS.contains(&s);
+    let drop = changes.iter().any(|(_, c)| c.drop_vendor_strings);
+    out.interfaces = base
+        .iter()
+        .filter(|s| !drop || is_feature(s))
+        .map(|s| String::from(*s))
+        .collect();
+    for (name, c) in &changes {
+        for &s in c.add {
+            if drop && !is_feature(s) && !c.drop_vendor_strings {
+                out.conflicts.push((name, s));
+            }
+            if !out.interfaces.iter().any(|i| i == s) {
+                out.interfaces.push(String::from(s));
+            }
+        }
+    }
+    out
 }
 
 /// An entry a platform's extractor could not read.
@@ -69,7 +176,7 @@ pub struct Extracted {
     pub unresolved: Vec<Unresolved>,
 }
 
-/// One platform: an SoC family's firmware conventions.
+/// One platform: an SoC or firmware family's conventions.
 pub trait PlatformSource: Sync {
     /// The platform's name in diagnostics and edge origins (`"cix-sky1"`).
     fn name(&self) -> &'static str;
@@ -94,6 +201,14 @@ pub trait PlatformSource: Sync {
     ) -> Extracted {
         let _ = (interp, host, devices);
         Extracted::default()
+    }
+
+    /// What it changes in the `_OSI` answers for firmware `id`, applied
+    /// before the DSDT loads, since firmware's `_INI` methods read the
+    /// answers (ADR-0027 §2). Nothing by default.
+    fn osi(&self, id: &FirmwareIdentity) -> OsiChanges {
+        let _ = id;
+        OsiChanges::NONE
     }
 
     /// The vendor `_DSD` reference properties its firmware uses, and the
@@ -123,3 +238,6 @@ pub fn reference_kind(platforms: &[&dyn PlatformSource], name: &str) -> Option<E
         })
     })
 }
+
+#[cfg(test)]
+mod tests;

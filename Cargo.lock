@@ -141,6 +141,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "apple-mac"
+version = "0.0.0"
+dependencies = [
+ "acpi-platform",
+ "aml",
+]
+
+[[package]]
 name = "arch-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -337,6 +345,7 @@ dependencies = [
  "amdtemp",
  "aml",
  "apei",
+ "apple-mac",
  "atrtc",
  "bus",
  "cdnc-i2c",

@@ -374,6 +374,9 @@ struct BootCase {
     audio: bool,
     /// QEMU: a named CPU model instead of the host's (`Vm::cpu`).
     cpu: Option<&'static str>,
+    /// QEMU: the SMBIOS system structure instead of the test machine's
+    /// (`Vm::smbios_system`).
+    smbios_system: Option<&'static str>,
 }
 
 /// The low-memory cases' RAM.
@@ -397,6 +400,7 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: false,
         audio: false,
         cpu: None,
+        smbios_system: None,
     },
     BootCase {
         name: "aarch64",
@@ -412,6 +416,7 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: false,
         audio: false,
         cpu: None,
+        smbios_system: None,
     },
     BootCase {
         name: "aarch64-el2",
@@ -429,6 +434,7 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: false,
         audio: false,
         cpu: None,
+        smbios_system: None,
     },
     BootCase {
         name: "aarch64-smmu",
@@ -448,6 +454,7 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: false,
         audio: false,
         cpu: None,
+        smbios_system: None,
     },
     BootCase {
         name: "aarch64-warm-reset",
@@ -465,6 +472,7 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: false,
         audio: false,
         cpu: None,
+        smbios_system: None,
     },
     BootCase {
         name: "aarch64-smmu-warm-reset",
@@ -484,6 +492,7 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: false,
         audio: false,
         cpu: None,
+        smbios_system: None,
     },
     BootCase {
         name: "x86_64-warm-reset",
@@ -500,6 +509,7 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: false,
         audio: false,
         cpu: None,
+        smbios_system: None,
     },
     BootCase {
         name: "aarch64-panic-reset",
@@ -519,6 +529,7 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: false,
         audio: false,
         cpu: None,
+        smbios_system: None,
     },
     BootCase {
         name: "x86_64-panic-reset",
@@ -536,6 +547,7 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: false,
         audio: false,
         cpu: None,
+        smbios_system: None,
     },
     BootCase {
         name: "x86_64-watchdog",
@@ -554,6 +566,7 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: false,
         audio: false,
         cpu: None,
+        smbios_system: None,
     },
     BootCase {
         name: "x86_64-bhyve",
@@ -570,6 +583,7 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: false,
         audio: false,
         cpu: None,
+        smbios_system: None,
     },
     BootCase {
         name: "aarch64-lowmem",
@@ -587,10 +601,13 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: true,
         audio: false,
         cpu: None,
+        smbios_system: None,
     },
-    // The Mac Pro (Late 2013)'s processor generation (Ivy Bridge-EP: AVX,
-    // no AVX2, BMI, INVPCID, SMAP, XSAVEC or RDSEED; docs/MACPRO.md MP1).
-    // Every other case runs the host's model, which is newer.
+    // A stand-in for the Mac Pro (Late 2013) (docs/MACPRO.md MP1, MP2): its
+    // processor generation (Ivy Bridge-EP: AVX, no AVX2, BMI, INVPCID, SMAP,
+    // XSAVEC or RDSEED; every other case runs the host's newer model), and
+    // Apple's SMBIOS system strings, on which `_OSI` answers Darwin and no
+    // Windows string (ADR-0027).
     BootCase {
         name: "x86_64-ivybridge",
         vmm: Vmm::Qemu,
@@ -600,12 +617,15 @@ const BOOT_CASES: &[BootCase] = &[
         warm_reset: false,
         cmdline: "",
         pass_status: 33,
-        expect: None,
+        expect: Some("acpi: apple-mac: _OSI answers Extended Address Space Descriptor, Darwin"),
         expect_saved: None,
         lowmem: false,
         audio: false,
         // KVM keeps the host's vendor unless told; the Mac Pro is Intel.
         cpu: Some("IvyBridge-v2,vendor=GenuineIntel"),
+        smbios_system: Some(
+            "type=1,manufacturer=Apple Inc.,product=MacPro6,,1,version=1.0,family=MacPro",
+        ),
     },
     BootCase {
         name: "x86_64-lowmem",
@@ -621,6 +641,7 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: true,
         audio: false,
         cpu: None,
+        smbios_system: None,
     },
     BootCase {
         name: "x86_64-audio",
@@ -638,6 +659,7 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: false,
         audio: true,
         cpu: None,
+        smbios_system: None,
     },
     BootCase {
         name: "aarch64-audio",
@@ -653,6 +675,7 @@ const BOOT_CASES: &[BootCase] = &[
         lowmem: false,
         audio: true,
         cpu: None,
+        smbios_system: None,
     },
 ];
 
@@ -1272,6 +1295,7 @@ fn boot(
     let vm = Vm {
         el2: case.el2,
         cpu: case.cpu,
+        smbios_system: case.smbios_system,
         iommu: case.iommu,
         test_devices: true,
         allow_reset: case.warm_reset,

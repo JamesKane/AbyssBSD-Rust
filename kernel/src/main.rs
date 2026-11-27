@@ -174,6 +174,11 @@ fn kmain(boot_info: PhysAddr) -> ! {
     // SAFETY: kmain is now a thread (`threads::init`) with interrupts
     // enabled, holding no locks: it may sleep.
     let s = unsafe { sched::Sleepable::assume() };
+    // The loader's variables, before any bus or driver attaches: FreeBSD
+    // has its static environment from early boot (`init_static_kenv`), and
+    // `acpi` reads `smbios.system.maker` and its tunables as it attaches
+    // (ADR-0027).
+    kenv::init();
     random::init();
     sync::set_possible(smp::start_cpus());
     sync::set_delay_cpus(sched::online_cpus());
@@ -187,7 +192,6 @@ fn kmain(boot_info: PhysAddr) -> ! {
     random::start_harvester();
     // After the clock is set, as FreeBSD mounts root once devices attach.
     fs::init();
-    kenv::init();
     fs::sysctl_init(&s);
     exec::sysctl_init(&s);
     kinfo::init(&s);

@@ -1,0 +1,16 @@
+[package]
+name = "apple-mac"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+acpi-platform = { path = "../../lib/acpi-platform" }
+aml = { path = "../../lib/aml" }
+
+[dev-dependencies]
+aml = { path = "../../lib/aml", features = ["asm"] }
+
+[lints]
+workspace = true

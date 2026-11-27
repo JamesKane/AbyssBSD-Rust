@@ -310,7 +310,22 @@ impl acpi::Ops for KernelAcpi {
             id.oem_table_id.copy_from_slice(x.oem_table_id());
             id.oem_revision = x.oem_revision();
         }
+        // The loader put the SMBIOS system strings in the environment, as
+        // FreeBSD's does; FreeBSD's `acpi_apple_darwin_osi` reads the maker
+        // from there too.
+        let env = |name: &[u8]| {
+            crate::kenv::get(name)
+                .map(|v| String::from_utf8_lossy(&v).into_owned())
+                .unwrap_or_default()
+        };
+        id.system.maker = env(b"smbios.system.maker");
+        id.system.product = env(b"smbios.system.product");
+        id.system.family = env(b"smbios.system.family");
         id
+    }
+
+    fn tunable(&self, name: &str) -> Option<String> {
+        crate::kenv::get(name.as_bytes()).map(|v| String::from_utf8_lossy(&v).into_owned())
     }
 
     fn iort(&self) -> Option<acpi_tables::Sdt<'static>> {

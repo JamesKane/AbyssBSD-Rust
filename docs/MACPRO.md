@@ -161,6 +161,34 @@ On the planned checks:
 
 ### MP2: ACPI for Apple firmware, against the corpus
 
+**Interface done 2026-11-27; the corpus half waits on MP0's capture.** What was built:
+- `lib/acpi-platform` (ADR-0027 §1–2):
+  - `FirmwareIdentity` carries the SMBIOS system maker, product and family.
+  - `PlatformSource::osi` returns `OsiChanges`.
+  - `osi_interfaces` applies every platform's changes to FreeBSD's defaults, drops before additions.
+    A tunable at 0 vetoes a change, and a vendor string added against a drop is reported.
+- `lib/aml`: `OSI_FEATURE_GROUPS`, so dropping the vendor strings keeps "Extended Address Space
+  Descriptor", as ACPICA's `ACPI_DISABLE_ALL_VENDOR_STRINGS` does. The interpreter already took
+  its `_OSI` list as configuration.
+- `sys/acpi`: the AML service settles `_OSI` before the DSDT loads and logs what a platform
+  changed. `Ops::tunable` reads `hw.acpi.apple_darwin_osi` from the kernel environment.
+- `platform/apple-mac`, in `PLATFORMS_X86_64`:
+  - it matches the makers `Apple Inc.` and `Apple Computer, Inc.`, and answers Darwin and no
+    Windows string unless the tunable is 0;
+  - tests run a DSDT in Apple's pattern (Darwin, then Windows strings, each setting `OSYS`): 10000
+    on an Apple machine, 2009 with the tunable at 0 or another maker.
+- The kernel fills the environment (`kenv::init`) before any device attaches, as FreeBSD's static
+  environment exists from early boot. It used to run after `devices::init`, so `acpi` saw no
+  SMBIOS maker.
+- `x86_64-ivybridge` now boots with Apple's SMBIOS system strings (`MacPro6,1`) and must log
+  `acpi: apple-mac: _OSI answers Extended Address Space Descriptor, Darwin`. It passes.
+
+Left for MP3, with its first user: the device-property applier (ADR-0027 §3), for `asmc`.
+
+Left for the capture: the corpus tests below against `tests/corpus/macpro61/`.
+
+The planned checks:
+
 - `platform/apple-mac`: matches the SMBIOS maker `Apple Inc.` or `Apple Computer, Inc.`, as
   `acpi_apple_darwin_osi` does. It supplies the `_OSI` change (answer `Darwin`, drop the Windows
   strings) before the DSDT loads. The tunable is `hw.acpi.apple_darwin_osi`, default on.

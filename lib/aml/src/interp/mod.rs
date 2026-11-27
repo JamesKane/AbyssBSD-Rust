@@ -71,6 +71,11 @@ pub const FREEBSD_OSI: &[&str] = &[
     "Extended Address Space Descriptor",
 ];
 
+/// The feature group strings among [`FREEBSD_OSI`], which ACPICA's
+/// `ACPI_DISABLE_ALL_VENDOR_STRINGS` keeps (`utosi.c`: `ACPI_OSI_FEATURE`).
+/// Every other string there names an operating system (a vendor string).
+pub const OSI_FEATURE_GROUPS: &[&str] = &["Extended Address Space Descriptor"];
+
 /// Resource bounds for evaluating untrusted AML.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
