@@ -446,11 +446,19 @@ impl Shared {
         let mut lro = (self.lro.load(Ordering::Relaxed)
             && self.port.home().0.is_some_and(|v| net::lro::allowed(&v)))
         .then(Lro::new);
+        // The status is read once an episode, as `re_intr_msi` reads it:
+        // a read crosses the chipset to the controller (about 3 us on the
+        // X870E, at 11,000 interrupts a second a fifth of a CPU), and
+        // what happened meanwhile is in the rings, which are in memory.
+        // What else came (a link change, an error) is read at the next
+        // interrupt, or by the tick.
+        let mut read = true;
         loop {
             if self.state() != State::Running {
                 break;
             }
-            let st = self.chip.ack();
+            let st = if read { self.chip.ack() } else { 0 };
+            read = true;
             if !health::responding(st) {
                 self.gone();
                 link = true;
@@ -526,6 +534,8 @@ impl Shared {
                     }
                 }
             }
+            // Unmasked next, without a second read.
+            read = false;
         }
         drop(g);
         self.deliver_held(&mut lro);
