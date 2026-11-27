@@ -614,7 +614,17 @@ impl FpuImage {
             }
         };
         // SAFETY: a zeroed area of the size and alignment the HAL needs.
-        unsafe { hal::fpu::save(ptr.as_ptr()) };
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            hal::fpu::save(ptr.as_ptr());
+        }
+        // The thread's state wherever it is: in the registers, or in its
+        // area (nothing is loaded to get it).
+        // SAFETY: as above.
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            sched::fpu_read(ptr.as_ptr());
+        }
         Some(Self { ptr, len })
     }
 
@@ -650,37 +660,12 @@ impl FpuImage {
         &CACHE[hal::cpu_id().0 as usize % hal::MAX_CPUS]
     }
 
-    /// Loads the initial state into this CPU's registers (a handler
-    /// starts with a clean FPU: FreeBSD's `fpstate_drop`), from one image
-    /// made the first time and kept: no allocation, no save of the
-    /// registers it replaces.
-    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+    /// Gives the thread the initial state (a handler starts with a clean
+    /// FPU: FreeBSD's `fpstate_drop`). On amd64 nothing is loaded: the
+    /// thread's first FP/SIMD instruction does it.
+    #[cfg(target_arch = "x86_64")]
     pub(super) fn load_initial() -> Option<()> {
-        use core::sync::atomic::{AtomicPtr, Ordering};
-        static INITIAL: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
-        let mut p = INITIAL.load(Ordering::Acquire);
-        if p.is_null() {
-            let mut me = Self::zeroed()?;
-            me.reset();
-            let mine = me.ptr.as_ptr();
-            match INITIAL.compare_exchange(
-                core::ptr::null_mut(),
-                mine,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    // Kept for good: not returned to the cache or freed.
-                    core::mem::forget(me);
-                    p = mine;
-                }
-                // Another CPU made one first: use it; ours is dropped.
-                Err(other) => p = other,
-            }
-        }
-        // SAFETY: an initial-state image of the HAL's size and alignment,
-        // never changed after it was published.
-        unsafe { hal::fpu::restore(p) };
+        sched::fpu_drop();
         Some(())
     }
 
@@ -718,7 +703,8 @@ impl FpuImage {
         unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 
-    /// Loads the image into this CPU's registers, which are the thread's.
+    /// Makes the image the thread's FP state (loaded into this CPU's
+    /// registers on arm64).
     ///
     /// # Safety
     ///
@@ -726,7 +712,17 @@ impl FpuImage {
     /// initial state, changed only in ways the caller checked.
     pub(crate) unsafe fn load(&self) {
         // SAFETY: per the contract.
-        unsafe { hal::fpu::restore(self.ptr.as_ptr()) };
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            hal::fpu::restore(self.ptr.as_ptr());
+        }
+        // Loaded now if the registers are the thread's, else kept for its
+        // first instruction.
+        // SAFETY: per the contract.
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            sched::fpu_write(self.ptr.as_ptr());
+        }
     }
 }
 

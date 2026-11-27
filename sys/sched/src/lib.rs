@@ -34,6 +34,7 @@
 extern crate alloc;
 
 mod context;
+mod fpu;
 mod list;
 pub mod lock;
 pub mod pctcpu;
@@ -55,6 +56,9 @@ use hal::{CpuId, MAX_CPUS};
 use sync::{Once, SpinLock};
 
 pub use crate::context::{IrqCx, Sleepable};
+pub use crate::fpu::{
+    device_not_available, drop_state as fpu_drop, read_state as fpu_read, write_state as fpu_write,
+};
 use crate::list::ThreadList;
 use crate::runq::RunQueue;
 pub use crate::thread::{Name, Priority, Report, State, Thread, Tid};
@@ -381,6 +385,9 @@ pub struct PerCpu {
     /// The user thread registers as last saved or loaded here, so a switch
     /// writes only those that differ (kernel threads leave them be).
     user_tls: Cell<[u64; 2]>,
+    /// CR0.TS as this CPU has it (`crate::fpu`), to write it only on a
+    /// change.
+    fpu_ts: Cell<bool>,
 }
 
 // SAFETY: the `Cell`s are only touched by the owning CPU with interrupts
@@ -481,6 +488,7 @@ fn new_percpu(id: CpuId) -> &'static mut PerCpu {
         window_end: Cell::new(0),
         space: Cell::new(None),
         user_tls: Cell::new([0; 2]),
+        fpu_ts: Cell::new(false),
     }))
 }
 
@@ -709,12 +717,12 @@ impl<'a> Builder<'a> {
         if !masked {
             reap();
         }
+        let mut inherited = fpu::AREA;
         let fpu = if self.fpu {
             let area = thread::FpuArea::new().ok_or(SpawnError::NoFpuArea)?;
             if self.fpu_inherit {
-                // SAFETY: the area is this size and alignment; saving only
-                // reads the registers.
-                unsafe { hal::fpu::save(area.as_ptr()) };
+                // SAFETY: the area is this size and alignment.
+                inherited = unsafe { fpu::inherit(area.as_ptr()) };
             }
             Some(area)
         } else {
@@ -733,6 +741,7 @@ impl<'a> Builder<'a> {
             false,
             fpu,
         ));
+        t.fpu_state.store(inherited, Ordering::Relaxed);
         t.inner.lock().bound = self.bound;
         make_runnable(Arc::clone(&t));
         Ok(t)
@@ -1218,9 +1227,7 @@ pub(crate) fn switch_away() {
     // CPU runs it (`on_cpu` was clear). `cur_ptr` stays valid: the run
     // queue, a wait queue, or `prev_owned` holds a reference.
     unsafe {
-        if let Some(f) = &(*cur_ptr).fpu {
-            hal::fpu::save(f.as_ptr());
-        }
+        fpu::switch_out(&*cur_ptr);
         // A user thread's thread registers may have changed (`sysarch`,
         // or user mode itself): keep them for its return.
         if (*(*cur_ptr).space.get()).is_some() {
@@ -1231,7 +1238,9 @@ pub(crate) fn switch_away() {
         hal::switch((*cur_ptr).context.get(), (*next_ptr).context.get());
     }
     finish_switch();
-    restore_fpu();
+    // This thread may have been switched out on another CPU: `c` is not
+    // necessarily this one.
+    fpu::switch_in(this_cpu());
     platform().rearm_timer();
 }
 
@@ -1468,26 +1477,22 @@ pub fn address_space() -> Option<Arc<dyn AddressSpace>> {
     unsafe { (*current().space.get()).clone() }
 }
 
-/// Loads the current thread's FP/SIMD registers, if it has its own.
-fn restore_fpu() {
-    if let Some(f) = &current().fpu {
-        // SAFETY: the area holds this thread's state, saved when it last
-        // left a CPU (or the initial state); `on_cpu` ordered that save
-        // before this load.
-        unsafe { hal::fpu::restore(f.as_ptr()) };
-    }
-}
-
 /// A kernel FP/SIMD section (FreeBSD's `fpu_kern_enter` with
 /// `FPU_KERN_NOCTX`): kernel code may use the vector registers until it
 /// ends. Preemption is held off, and the current thread's own registers,
-/// if it has any (they are live: the switch in restored them), are saved
-/// now and loaded back at the end. A thread without its own needs nothing
-/// saved: the registers hold another thread's, saved when it left.
+/// if it has them loaded, are saved now and loaded back at the end. A
+/// thread whose registers are not loaded, or that has none of its own,
+/// needs nothing saved: they hold no state of its, or of any thread that
+/// has not saved it.
 ///
 /// Sections do not nest, and interrupt handlers may not open one.
 #[derive(Debug)]
 pub struct Simd {
+    /// The registers were the thread's and are in its area (to load at the
+    /// end).
+    was_live: bool,
+    /// CR0.TS as it was (to put back when the registers were not live).
+    ts: bool,
     _cpu: core::marker::PhantomData<*const ()>,
 }
 
@@ -1496,23 +1501,17 @@ pub struct Simd {
 pub fn simd() -> Simd {
     debug_assert!(!hal::interrupt::active(), "SIMD in an interrupt handler");
     hal::critical::enter();
-    if let Some(f) = &current().fpu {
-        // SAFETY: the area is this thread's, of the size and alignment the
-        // HAL wants; saving only reads the registers.
-        unsafe { hal::fpu::save(f.as_ptr()) };
-    }
+    let (was_live, ts) = fpu::simd_enter();
     Simd {
+        was_live,
+        ts,
         _cpu: core::marker::PhantomData,
     }
 }
 
 impl Drop for Simd {
     fn drop(&mut self) {
-        if let Some(f) = &current().fpu {
-            // SAFETY: the area holds the state `simd` saved, and no switch
-            // has happened since (preemption is held off).
-            unsafe { hal::fpu::restore(f.as_ptr()) };
-        }
+        fpu::simd_leave(self.was_live, self.ts);
         hal::critical::exit();
     }
 }
@@ -1522,7 +1521,7 @@ pub(crate) extern "C" fn thread_start(_: usize) -> ! {
     // The switch that got here did not return into `switch_away`, so do
     // its epilogue: release the previous thread and arm the slice timer.
     finish_switch();
-    restore_fpu();
+    fpu::switch_in(this_cpu());
     platform().rearm_timer();
     let entry = current().entry.lock().take();
     hal::irq::enable();

@@ -82,6 +82,10 @@ pub(crate) fn init_fpu(boot: bool) {
     // SAFETY: once per CPU, before threads with FP state run here.
     unsafe { arch::fpu::init_cpu(boot) };
     if boot {
+        // The first FP/SIMD instruction of a thread whose registers are not
+        // loaded (FreeBSD's `fpudna`).
+        #[cfg(target_arch = "x86_64")]
+        arch::trap::set_device_not_available(sched::device_not_available);
         let (kind, detail) = arch::fpu::describe();
         #[cfg(target_arch = "x86_64")]
         kprintln!(

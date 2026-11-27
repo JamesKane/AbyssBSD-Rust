@@ -373,6 +373,23 @@ pub mod fpu {
     /// The alignment save areas need.
     pub const ALIGN: usize = 64;
 
+    /// Whether the registers load lazily: a thread whose state is not in
+    /// them runs with the CPU set to trap its first FP/SIMD instruction
+    /// ([`set_ts`]; FreeBSD's `fpudna`). amd64 only.
+    pub const LAZY: bool = cfg!(target_arch = "x86_64");
+
+    /// Sets or clears the trap on the next FP/SIMD instruction; a save or
+    /// restore needs it clear. Nothing without [`LAZY`].
+    pub fn set_ts(on: bool) {
+        #[cfg(target_os = "none")]
+        // SAFETY: defined by the linked arch crate with this signature.
+        unsafe {
+            super::abyss_hal_fpu_ts(on);
+        }
+        #[cfg(not(target_os = "none"))]
+        let _ = on;
+    }
+
     /// Fills `area` with the initial state.
     ///
     /// # Safety
@@ -624,6 +641,8 @@ pub type FpuSizeFn = fn() -> usize;
 pub type FpuAreaFn = unsafe fn(*mut u8);
 /// Signature of `abyss_hal_fpu_restore`.
 pub type FpuRestoreFn = unsafe fn(*const u8);
+/// Signature of `abyss_hal_fpu_ts`.
+pub type FpuTsFn = fn(bool);
 
 /// Signature of `abyss_hal_context_init`.
 pub type ContextInitFn = fn(&mut Context, u64, ThreadEntry, usize);
@@ -685,6 +704,7 @@ unsafe extern "Rust" {
     fn abyss_hal_fpu_init(area: *mut u8);
     fn abyss_hal_fpu_save(area: *mut u8);
     fn abyss_hal_fpu_restore(area: *const u8);
+    fn abyss_hal_fpu_ts(on: bool);
     fn abyss_hal_crypto_available() -> bool;
     fn abyss_hal_set_kernel_stack(top: u64);
     fn abyss_hal_user_tls() -> u64;

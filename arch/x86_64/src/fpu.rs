@@ -15,6 +15,8 @@ use crate::cpu;
 
 /// x87 | SSE | AVX | AVX-512 opmask, upper ZMM0-15, ZMM16-31.
 const XCR0_WANTED: u64 = 0b1110_0111;
+const CR0_MP: u64 = 1 << 1;
+const CR0_TS: u64 = 1 << 3;
 const CR4_OSFXSR: u64 = 1 << 9;
 const CR4_OSXMMEXCPT: u64 = 1 << 10;
 const CR4_OSXSAVE: u64 = 1 << 18;
@@ -40,6 +42,11 @@ pub unsafe fn init_cpu(boot: bool) {
     }
     // SAFETY: enabling FXSR/XSAVE support changes no memory.
     unsafe { cpu::set_cr4(cr4) };
+    // MP: WAIT/FWAIT trap with TS set too, as FreeBSD's `fpuinit`. TS is
+    // left clear: the scheduler sets it for a thread whose registers are
+    // not loaded (`set_ts`).
+    // SAFETY: MP changes only how WAIT behaves with TS set.
+    unsafe { cpu::set_cr0((cpu::cr0() | CR0_MP) & !CR0_TS) };
     if !has_xsave() {
         return;
     }
@@ -101,6 +108,20 @@ pub unsafe fn init_area(area: *mut u8) {
         // zero XSTATE_BV makes XRSTOR load the init state for the rest.
         area.cast::<u16>().write(0x037f);
         area.add(24).cast::<u32>().write(0x1f80);
+    }
+}
+
+/// Sets or clears CR0.TS: with it set, the first FP/SIMD instruction a
+/// thread runs raises #NM (`DeviceNotAvailable`), which loads its state
+/// (FreeBSD's `fpu_enable` and `fpu_disable`). XSAVE and XRSTOR fault with
+/// it set, so a save or restore needs it clear.
+pub fn set_ts(on: bool) {
+    if on {
+        // SAFETY: TS only decides whether FP/SIMD instructions trap.
+        unsafe { cpu::set_cr0(cpu::cr0() | CR0_TS) };
+    } else {
+        // SAFETY: as above.
+        unsafe { asm!("clts", options(nomem, nostack)) };
     }
 }
 

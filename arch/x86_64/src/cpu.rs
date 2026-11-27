@@ -54,6 +54,25 @@ pub fn cr3() -> u64 {
     v
 }
 
+/// `CR0`.
+pub fn cr0() -> u64 {
+    let v;
+    // SAFETY: reading CR0 has no side effects.
+    unsafe { asm!("mov {}, cr0", out(reg) v, options(nomem, nostack)) };
+    v
+}
+
+/// Writes `CR0`.
+///
+/// # Safety
+///
+/// The new value must keep paging and caching consistent with the running
+/// code.
+pub unsafe fn set_cr0(v: u64) {
+    // SAFETY: per the caller's contract.
+    unsafe { asm!("mov cr0, {}", in(reg) v, options(nostack)) };
+}
+
 /// `CR4`.
 pub fn cr4() -> u64 {
     let v;

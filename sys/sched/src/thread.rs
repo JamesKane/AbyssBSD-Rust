@@ -296,6 +296,8 @@ impl FpuArea {
         let ptr = core::ptr::NonNull::new(unsafe { alloc::alloc::alloc(layout) })?;
         // SAFETY: a fresh allocation of the right size and alignment.
         unsafe { hal::fpu::init(ptr.as_ptr()) };
+        // The image a thread dropped to the initial state loads from.
+        crate::fpu::initial();
         Some(Self { ptr, layout })
     }
 
@@ -355,6 +357,8 @@ pub struct Thread {
     /// the thread out, read by the one switching it in (the `on_cpu`
     /// handoff orders the two).
     pub(crate) fpu: Option<FpuArea>,
+    /// Who owns the registers (`crate::fpu`).
+    pub(crate) fpu_state: core::sync::atomic::AtomicU8,
     /// The user address space the thread runs in, if any. Written only by
     /// the thread itself ([`crate::set_address_space`]); read by the CPU
     /// switching it in (the `on_cpu` handoff orders the two).
@@ -468,6 +472,7 @@ impl Thread {
             stat_ticks: [const { AtomicU64::new(0) }; 3],
             held: UnsafeCell::new(crate::lock::witness::Held::new()),
             fpu,
+            fpu_state: core::sync::atomic::AtomicU8::new(crate::fpu::AREA),
             space: UnsafeCell::new(None),
             space_at: AtomicPtr::new(core::ptr::null_mut()),
             kstack_top,
@@ -635,6 +640,9 @@ impl Thread {
     #[must_use]
     pub fn fpu_area(&self) -> Option<(*mut u8, usize)> {
         let f = self.fpu.as_ref()?;
+        // A thread that has not loaded its state (a dropped one's is the
+        // initial) has it in the area now, and leaves it there.
+        crate::fpu::materialize(self);
         Some((f.as_ptr(), f.layout.size()))
     }
 

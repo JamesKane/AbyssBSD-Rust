@@ -18,6 +18,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <sched.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdint.h>
@@ -489,6 +490,128 @@ contexts(void)
 	CHECK(other_ran == 1);
 }
 
+
+/*
+ * FP/SIMD state across signals, as FreeBSD keeps it: a handler starts with
+ * the initial state whether or not it touches the registers, what it does
+ * to them does not reach the interrupted code, a context a handler changes
+ * is what the interrupted code gets back, and a switch in between loses
+ * nothing. One register (xmm5, v16) stands for all.
+ */
+#if defined(__x86_64__)
+#define	FP_SET(v) __asm__ volatile("movq %0, %%xmm5" : : "r"((uint64_t)(v)) : "xmm5")
+#define	FP_GET(v) __asm__ volatile("movq %%xmm5, %0" : "=r"(v))
+#elif defined(__aarch64__)
+#define	FP_SET(v) __asm__ volatile("fmov d16, %0" : : "r"((uint64_t)(v)) : "v16")
+#define	FP_GET(v) __asm__ volatile("fmov %0, d16" : "=r"(v))
+#endif
+
+#ifdef FP_SET
+static volatile uint64_t fp_seen;
+
+static void
+fp_quiet(int sig)
+{
+	(void)sig;
+	hits++;
+}
+
+static void
+fp_reads(int sig)
+{
+	uint64_t v;
+
+	(void)sig;
+	FP_GET(v);
+	fp_seen = v;
+	FP_SET(0xdead);
+	hits++;
+}
+
+#ifdef __x86_64__
+static void
+fp_changes_context(int sig, siginfo_t *si, void *ucp)
+{
+	ucontext_t *uc = ucp;
+	uint64_t v = 0xbeef;
+
+	(void)sig;
+	(void)si;
+	/* xmm5 in the FXSAVE area (XMM0 at 160). */
+	memcpy((char *)uc->uc_mcontext.mc_fpstate + 160 + 16 * 5, &v, sizeof(v));
+	hits++;
+}
+#endif
+
+static void
+fpstate(void)
+{
+	uint64_t v;
+	int i;
+
+	/* A handler that never touches the registers. */
+	catch(SIGUSR1, fp_quiet, 0);
+	for (i = 0; i < 3; i++) {
+		hits = 0;
+		FP_SET(0x1111);
+		kill(getpid(), SIGUSR1);
+		FP_GET(v);
+		CHECK(hits == 1 && v == 0x1111);
+	}
+
+	/* One that reads them first (the initial state), then changes them. */
+	catch(SIGUSR1, fp_reads, 0);
+	for (i = 0; i < 3; i++) {
+		hits = 0;
+		fp_seen = 1;
+		FP_SET(0x2222);
+		kill(getpid(), SIGUSR1);
+		FP_GET(v);
+		CHECK(hits == 1 && fp_seen == 0 && v == 0x2222);
+	}
+
+	/* A switch to another thread of control before the registers are used. */
+	catch(SIGUSR1, fp_quiet, 0);
+	FP_SET(0x3333);
+	kill(getpid(), SIGUSR1);
+	sched_yield();
+	FP_GET(v);
+	CHECK(v == 0x3333);
+
+#ifdef __x86_64__
+	/* A context the handler changed is what comes back. */
+	catch_info(SIGUSR1, fp_changes_context, 0);
+	hits = 0;
+	FP_SET(0x4444);
+	kill(getpid(), SIGUSR1);
+	FP_GET(v);
+	CHECK(hits == 1 && v == 0xbeef);
+#endif
+	signal(SIGUSR1, SIG_DFL);
+
+	/* getcontext sees them, setcontext puts them back. */
+	{
+		ucontext_t uc;
+		volatile int again = 0;
+
+		FP_SET(0x5555);
+		CHECK(getcontext(&uc) == 0);
+		if (again == 0) {
+			again = 1;
+			FP_SET(0x6666);
+			setcontext(&uc);
+		}
+		FP_GET(v);
+		CHECK(v == 0x5555);
+	}
+}
+#else
+static void
+fpstate(void)
+{
+}
+#endif
+
 static void
 misc(void)
 {
@@ -536,6 +659,7 @@ main(void)
 	RUN(interrupted);
 	RUN(waiting);
 	RUN(contexts);
+	RUN(fpstate);
 	RUN(misc);
 	if (failures != 0) {
 		printf("signals: %d failed\n", failures);

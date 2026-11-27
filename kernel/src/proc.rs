@@ -2097,6 +2097,10 @@ impl Process {
             // No memory for an image: the registers stay.
             None => arch::fpu::stop_sve(),
         }
+        // The new image starts with the initial FP state, as FreeBSD's
+        // `exec_setregs` (`fpstate_drop`).
+        #[cfg(target_arch = "x86_64")]
+        sched::fpu_drop();
         self.layout.set(image.layout);
         *frame = arch::user::user_frame(image.entry, image.sp, image.arg);
         drop(file);

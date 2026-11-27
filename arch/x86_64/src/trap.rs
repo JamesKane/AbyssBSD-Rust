@@ -330,7 +330,31 @@ extern "C" fn dispatch(frame: &mut TrapFrame) {
     }
 }
 
+/// The kernel's handler for #NM (`DeviceNotAvailable`): loads the running
+/// thread's FP/SIMD state and returns whether it did (0 until set).
+static NM_HANDLER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Sets the handler for #NM, which FreeBSD calls `fpudna`: with CR0.TS set
+/// for a thread whose FP/SIMD registers are not loaded, its first such
+/// instruction traps here, from user mode or the kernel.
+pub fn set_device_not_available(handler: fn() -> bool) {
+    NM_HANDLER.store(handler as usize, core::sync::atomic::Ordering::Release);
+}
+
+fn device_not_available() -> bool {
+    let h = NM_HANDLER.load(core::sync::atomic::Ordering::Acquire);
+    if h == 0 {
+        return false;
+    }
+    // SAFETY: stored from a `fn() -> bool` by `set_device_not_available`.
+    let handler = unsafe { core::mem::transmute::<usize, fn() -> bool>(h) };
+    handler()
+}
+
 fn handle(frame: &mut TrapFrame) {
+    if frame.vector == 7 && device_not_available() {
+        return;
+    }
     if let Ok(vector) = u8::try_from(frame.vector)
         && vector >= 32
     {

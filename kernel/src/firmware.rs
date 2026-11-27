@@ -13,8 +13,6 @@
 //!
 //! Behavior reference: sys/dev/efidev/efirt.c.
 
-use alloc::vec::Vec;
-
 use abi::errno::Errno;
 use addr::PhysAddr;
 use bootproto::{BootInfo, MemoryKind};
@@ -53,53 +51,26 @@ pub(crate) fn available() -> bool {
     RUNTIME.lock().is_some()
 }
 
-/// A save area for the FP/SIMD registers across a call.
-struct FpuSave {
-    buf: Vec<u8>,
-    offset: usize,
-}
-
-impl FpuSave {
-    fn new() -> Result<Self, Errno> {
-        let size = hal::fpu::area_size();
-        let mut buf = Vec::new();
-        buf.try_reserve_exact(size + hal::fpu::ALIGN)
-            .map_err(|_| Errno::ENOMEM)?;
-        buf.resize(size + hal::fpu::ALIGN, 0);
-        let offset = buf.as_ptr().align_offset(hal::fpu::ALIGN);
-        Ok(Self { buf, offset })
-    }
-
-    fn area(&mut self) -> Option<*mut u8> {
-        (hal::fpu::area_size() != 0).then(|| self.buf[self.offset..].as_mut_ptr())
-    }
-}
-
 /// Runs `f` on the services table: under the firmware table, with
-/// interrupts off and the FP/SIMD registers saved, holding the runtime
-/// lock.
+/// interrupts off and the thread's FP/SIMD registers saved (`sched::simd`),
+/// holding the runtime lock.
 ///
 /// # Errors
 ///
-/// `ENXIO` without runtime services, `ENOMEM` without memory for the
-/// FP/SIMD save area.
+/// `ENXIO` without runtime services.
 ///
 /// # Safety
 ///
 /// Every pointer `f` passes to firmware must be valid for the service and
 /// mapped under the firmware table (kernel memory, not user memory).
 unsafe fn call<R>(f: impl FnOnce(&RuntimeServices) -> R) -> Result<R, Errno> {
-    let mut fpu = FpuSave::new()?;
+    // The firmware may use the vector registers: the thread's, if loaded,
+    // are saved for the call and back after it.
+    let _simd = sched::simd();
     // Held across the call: runtime services are not reentrant.
     let guard = RUNTIME.lock();
     let rt = (*guard).ok_or(Errno::ENXIO)?;
     let saved = arch::cpu::save_disable_interrupts();
-    let area = fpu.area();
-    if let Some(area) = area {
-        // SAFETY: `area` is `area_size` bytes aligned to `ALIGN`, in
-        // `fpu`'s buffer; saving only reads the registers.
-        unsafe { hal::fpu::save(area) };
-    }
     // SAFETY: interrupts are off, so nothing else runs on this CPU while
     // the lower half is the firmware's; the firmware table maps the
     // runtime regions 1:1 and shares the kernel's upper half (code, stack,
@@ -112,10 +83,6 @@ unsafe fn call<R>(f: impl FnOnce(&RuntimeServices) -> R) -> Result<R, Errno> {
             f(services)
         })
     };
-    if let Some(area) = area {
-        // SAFETY: the area holds the state saved above.
-        unsafe { hal::fpu::restore(area) };
-    }
     drop(guard);
     if saved {
         arch::cpu::enable_interrupts();
