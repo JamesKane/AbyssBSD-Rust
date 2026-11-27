@@ -49,6 +49,9 @@ pub struct Service {
     /// The strings `_OSI` answers true to: FreeBSD's defaults after the
     /// platforms' changes (ADR-0027).
     osi: Vec<String>,
+    /// The device properties the applying platforms state, with the
+    /// platform's name (ADR-0027 §3).
+    properties: Vec<(&'static str, &'static acpi_platform::DeviceProperty)>,
 }
 
 impl core::fmt::Debug for Service {
@@ -89,10 +92,17 @@ pub fn init(ops: &'static dyn Ops, s: &Sleepable) -> Option<LoadSummary> {
         return None;
     }
     let osi = osi_interfaces(ops);
+    let id = ops.firmware_identity();
+    let properties = ops
+        .platforms()
+        .iter()
+        .flat_map(|p| p.properties(&id).iter().map(move |d| (p.name(), d)))
+        .collect();
     if SERVICE
         .set(Service {
             ops,
             osi,
+            properties,
             jobs: SpinLock::new(VecDeque::new()),
             queue: WaitQueue::new(),
             handlers: SpinLock::new(Vec::new()),
@@ -121,6 +131,25 @@ pub fn init(ops: &'static dyn Ops, s: &Sleepable) -> Option<LoadSummary> {
             }
         }
         sum.init_errors = interp.initialize(host).len();
+        // A platform property for a device the namespace does not have
+        // fixes nothing: say so (the corpus checks fail on it).
+        let mut checked: Vec<(&str, &str)> = Vec::new();
+        for &(p, d) in &svc.properties {
+            if checked.contains(&(p, d.hid)) {
+                continue;
+            }
+            checked.push((p, d.hid));
+            let present = interp
+                .devices()
+                .into_iter()
+                .any(|n| interp.hid(n, host).ok().flatten().as_deref() == Some(d.hid));
+            if !present {
+                svc.ops.log(format_args!(
+                    "acpi: {p}: properties for {}, which is absent",
+                    d.hid
+                ));
+            }
+        }
         // Interrupts are routed through the APIC or GIC, not the 8259
         // (`_PIC(1)`, as FreeBSD tells firmware); absent on most arm64.
         let _ = interp.evaluate_path("\\_PIC", alloc::vec![aml::Value::Integer(1)], host);
@@ -164,6 +193,19 @@ fn osi_interfaces(ops: &'static dyn Ops) -> Vec<String> {
 }
 
 impl Service {
+    /// The platform property `name` of a device whose `_HID` is `hid`.
+    #[must_use]
+    pub fn platform_property(
+        &self,
+        hid: &str,
+        name: &str,
+    ) -> Option<&'static acpi_platform::DeviceProperty> {
+        self.properties
+            .iter()
+            .map(|&(_, d)| d)
+            .find(|d| d.hid == hid && d.name == name)
+    }
+
     /// The configuration of interpreters on the AML thread, whose stack
     /// bounds their recursion.
     #[must_use]

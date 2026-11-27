@@ -78,6 +78,36 @@ impl OsiChanges {
     }
 }
 
+/// A device property a platform states for firmware that should have
+/// given it in the device's `_DSD` and did not (ADR-0027 §3): what a
+/// device's driver reads through the same accessor as its `_DSD`
+/// properties, which win over these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceProperty {
+    /// The device's `_HID`.
+    pub hid: &'static str,
+    /// The property's name: vendor-prefixed (`apple,fan-floor-top`), or a
+    /// generic devicetree name.
+    pub name: &'static str,
+    /// The value.
+    pub value: PropertyValue,
+    /// The firmware defect or omission it addresses (DRIVER-MODEL.md §5.5).
+    pub why: &'static str,
+}
+
+/// A device property's value: `_DSD`'s own value set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyValue {
+    /// An integer.
+    Integer(u64),
+    /// A string.
+    String(&'static str),
+    /// A package of integers.
+    Integers(&'static [u64]),
+    /// A package of strings.
+    Strings(&'static [&'static str]),
+}
+
 /// The `_OSI` strings after every platform's changes, and what happened.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OsiOutcome {
@@ -209,6 +239,13 @@ pub trait PlatformSource: Sync {
     fn osi(&self, id: &FirmwareIdentity) -> OsiChanges {
         let _ = id;
         OsiChanges::NONE
+    }
+
+    /// The device properties it states for firmware `id` (ADR-0027 §3).
+    /// None by default.
+    fn properties(&self, id: &FirmwareIdentity) -> &'static [DeviceProperty] {
+        let _ = id;
+        &[]
     }
 
     /// The vendor `_DSD` reference properties its firmware uses, and the

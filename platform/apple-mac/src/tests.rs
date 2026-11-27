@@ -110,3 +110,19 @@ fn the_feature_group_string_survives() {
     );
     assert_eq!(out.applied, [crate::NAME]);
 }
+
+#[test]
+fn only_the_mac_pro_gets_smc_properties() {
+    use acpi_platform::PlatformSource;
+    let props = PLATFORM.properties(&made_by("Apple Inc."));
+    assert_eq!(props, crate::MACPRO6_1);
+    assert!(
+        props
+            .iter()
+            .all(|p| p.hid == crate::SMC_HID && !p.why.is_empty())
+    );
+    let mut other = made_by("Apple Inc.");
+    other.system.product = String::from("MacBookPro11,1");
+    assert!(PLATFORM.properties(&other).is_empty());
+    assert!(PLATFORM.properties(&made_by("QEMU")).is_empty());
+}

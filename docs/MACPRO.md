@@ -211,10 +211,15 @@ The planned checks:
 - `coretemp`: the per-core and package digital thermal sensors.
 - `asmc`, from FreeBSD's `sys/dev/asmc` (port and MMIO back ends) with the fork's
   `asmc_fan.c` and `asmc_plimit.c` as the policy reference. Trap: do not carry over upstream's
-  "MMIO means T2" (`sc_is_t2`); the Mac Pro has an MMIO SMC and no T2. It goes beyond the fork where spec §04
-  says neither OS goes: writes clamped to the fan's minimum and maximum; fans returned to
-  automatic with the firmware minimum at shutdown, reboot **and panic** (a warm reboot otherwise
-  carries a raised floor into the next OS); bounded transactions; a failed sensor counted as hot.
+  "MMIO means T2" (`sc_is_t2`); the Mac Pro has an MMIO SMC and no T2. It goes beyond the fork
+  where spec §04 says neither OS goes:
+  - fan writes range-checked, never wrapped;
+  - bounded transactions, and a jammed SMC retired;
+  - a failed sensor counted as hot.
+
+  The fan gets its firmware minimum back at shutdown, reboot and detach, since a warm reboot
+  otherwise carries a raised floor into the next OS. After a panic the floor stays raised, as in
+  the fork: a fan stuck high fails safe, and a power-off clears it.
   The model table (fwmin 790, top 2600, the sensor keys and curve points, the `MSLT`/`MSTc`/`MSLG`
   keys) is `APP0001`'s device properties from `platform/apple-mac` (ADR-0027); `asmc` reads them
   through the `_DSD` property accessor and runs the SMC's own curve when there are none. The
@@ -225,6 +230,40 @@ The planned checks:
 - `bge` for the BCM57762, from FreeBSD's `if_bge.c`, scoped to the 57765 family (its ASIC revision
   checks and the 57762's PHY). Host-tested against a register model, as `rge` was. It needs
   no other Broadcom chips.
+
+**MP3 status, 2026-11-27.** `ichwd` (Patsburg), `coretemp`, the ADR-0027 property applier and
+`asmc` are done; `bge` is open.
+
+- **`ichwd`:** LPC `0x1d40`/`0x1d41`.
+- **`coretemp`** (`kernel/src/coretemp.rs`):
+  - FreeBSD's sysctls, its TjMax rules, and its critical-temperature `devd` event;
+  - ktests for the decoding and the TjMax choice;
+  - KVM shows no sensor, so the driver declines in QEMU.
+- **Property applier:**
+  - `lib/acpi-platform` has `DeviceProperty` and `PlatformSource::properties`;
+  - `sys/acpi::properties::property` returns the device's `_DSD` value first, then a platform's
+    value for its `_HID`;
+  - a property for an absent device is logged once per device.
+- **`platform/apple-mac`:** `MacPro6,1`'s `APP0001` properties are
+  `apple,fan-floor-{fan,firmware-minimum,top,gpu-keys,gpu-range,cpu-keys,cpu-range}` and
+  `apple,power-limit-keys`.
+- **`drivers/asmc`:**
+  - memory window first, else ports; bounded transactions, and a jammed SMC retired;
+  - FreeBSD's fan and `temp` sysctls; speeds by each key's own type (`fpe2` or `flt `);
+  - the fan floor and the platform limit as pure state machines (`policy.rs`), run by a 2 s
+    worker;
+  - `platform_limit()` and `on_platform_limit()`, which reports the current state at
+    registration.
+- **Host tests:** a fake SMC on both windows with the Mac Pro's keys, the encodings, the floor
+  curve and its fall, and the limit's latch and release.
+- **QEMU check:** `x86_64-ivybridge` adds QEMU's `isa-applesmc`. `asmc0` attaches through the
+  ports and reads `SMC revision: 1.13f3`. The Mac Pro properties reach it and are declined there
+  ("no such fan", "no level key"), since QEMU's SMC has neither.
+- **Difference from the fork:** with the fork's fall rule, a raised floor never returns to the
+  firmware minimum. It stops up to 100 rpm above it (890 rpm) and is rewritten there every
+  sample. Ours falls the rest of the way once demand is back at the minimum.
+- **Not on the machine yet:** the memory window, the floor writes and the limit. They wait for
+  MP4.
 
 ### MP4: First boot on the machine
 

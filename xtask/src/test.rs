@@ -361,8 +361,8 @@ struct BootCase {
     cmdline: &'static str,
     /// QEMU's exit status when the kernel reports a pass.
     pass_status: i32,
-    /// A line the log must contain (how the run powered off).
-    expect: Option<&'static str>,
+    /// Lines the log must contain (how the run powered off, what attached).
+    expect: &'static [&'static str],
     /// A line the first boot's saved log must contain (warm-reset cases).
     expect_saved: Option<&'static str>,
     /// A small guest ([`LOWMEM_MEM`]) with a [`LOWMEM_DISK`] virtio disk,
@@ -377,6 +377,8 @@ struct BootCase {
     /// QEMU: the SMBIOS system structure instead of the test machine's
     /// (`Vm::smbios_system`).
     smbios_system: Option<&'static str>,
+    /// QEMU: extra `-device` specifications.
+    devices: &'static [&'static str],
 }
 
 /// The low-memory cases' RAM.
@@ -395,12 +397,13 @@ const BOOT_CASES: &[BootCase] = &[
         cmdline: "",
         // isa-debug-exit: (0x10 << 1) | 1.
         pass_status: 33,
-        expect: None,
+        expect: &[],
         expect_saved: None,
         lowmem: false,
         audio: false,
         cpu: None,
         smbios_system: None,
+        devices: &[],
     },
     BootCase {
         name: "aarch64",
@@ -411,12 +414,13 @@ const BOOT_CASES: &[BootCase] = &[
         warm_reset: false,
         cmdline: "",
         pass_status: 0,
-        expect: None,
+        expect: &[],
         expect_saved: None,
         lowmem: false,
         audio: false,
         cpu: None,
         smbios_system: None,
+        devices: &[],
     },
     BootCase {
         name: "aarch64-el2",
@@ -429,12 +433,13 @@ const BOOT_CASES: &[BootCase] = &[
         // root port's swizzle), and a real power-off at the end.
         cmdline: "abyss.bus.serial=1 hw.pci.enable_msix=0 abyss.test.poweroff=1",
         pass_status: 0,
-        expect: Some("power: off (PSCI SYSTEM_OFF)"),
+        expect: &["power: off (PSCI SYSTEM_OFF)"],
         expect_saved: None,
         lowmem: false,
         audio: false,
         cpu: None,
         smbios_system: None,
+        devices: &[],
     },
     BootCase {
         name: "aarch64-smmu",
@@ -449,12 +454,13 @@ const BOOT_CASES: &[BootCase] = &[
         // gives it a context. The user-memory tests are the plain case's.
         cmdline: "abyss.test.skip=kernel::tests::user_memory",
         pass_status: 0,
-        expect: Some("smmu0: <ARM System Memory Management Unit> on acpi0"),
+        expect: &["smmu0: <ARM System Memory Management Unit> on acpi0"],
         expect_saved: None,
         lowmem: false,
         audio: false,
         cpu: None,
         smbios_system: None,
+        devices: &[],
     },
     BootCase {
         name: "aarch64-warm-reset",
@@ -467,12 +473,13 @@ const BOOT_CASES: &[BootCase] = &[
         // a run's time) are the plain case's.
         cmdline: "abyss.test.skip=kernel::tests::user_memory",
         pass_status: 0,
-        expect: None,
+        expect: &[],
         expect_saved: None,
         lowmem: false,
         audio: false,
         cpu: None,
         smbios_system: None,
+        devices: &[],
     },
     BootCase {
         name: "aarch64-smmu-warm-reset",
@@ -487,12 +494,13 @@ const BOOT_CASES: &[BootCase] = &[
         // MSI-X included.
         cmdline: "abyss.test.orderly_reset=1 abyss.test.skip=kernel::tests::user_memory",
         pass_status: 0,
-        expect: Some("smmu0: <ARM System Memory Management Unit> on acpi0"),
+        expect: &["smmu0: <ARM System Memory Management Unit> on acpi0"],
         expect_saved: Some("logring: devices shut down before the reset"),
         lowmem: false,
         audio: false,
         cpu: None,
         smbios_system: None,
+        devices: &[],
     },
     BootCase {
         name: "x86_64-warm-reset",
@@ -504,12 +512,13 @@ const BOOT_CASES: &[BootCase] = &[
         // A real power-off at the end: QEMU exits 0 on ACPI S5.
         cmdline: "abyss.test.poweroff=1 abyss.test.skip=kernel::tests::user_memory",
         pass_status: 0,
-        expect: Some("power: off (ACPI S5)"),
+        expect: &["power: off (ACPI S5)"],
         expect_saved: None,
         lowmem: false,
         audio: false,
         cpu: None,
         smbios_system: None,
+        devices: &[],
     },
     BootCase {
         name: "aarch64-panic-reset",
@@ -524,12 +533,13 @@ const BOOT_CASES: &[BootCase] = &[
         cmdline: "abyss.test.panic_reset=1 kern.panic_reboot_wait_time=1 \
                   abyss.test.skip=kernel::tests::user_memory",
         pass_status: 0,
-        expect: None,
+        expect: &[],
         expect_saved: Some("Automatic reboot in 1 seconds"),
         lowmem: false,
         audio: false,
         cpu: None,
         smbios_system: None,
+        devices: &[],
     },
     BootCase {
         name: "x86_64-panic-reset",
@@ -542,12 +552,13 @@ const BOOT_CASES: &[BootCase] = &[
         cmdline: "abyss.test.panic_reset=1 kern.panic_reboot_wait_time=1 \
                   abyss.test.skip=kernel::tests::user_memory",
         pass_status: 33,
-        expect: None,
+        expect: &[],
         expect_saved: Some("Automatic reboot in 1 seconds"),
         lowmem: false,
         audio: false,
         cpu: None,
         smbios_system: None,
+        devices: &[],
     },
     BootCase {
         name: "x86_64-watchdog",
@@ -561,12 +572,13 @@ const BOOT_CASES: &[BootCase] = &[
         // must reset the machine, and the second boot runs the tests.
         cmdline: "abyss.test.watchdog_reset=1 abyss.test.skip=kernel::tests::user_memory",
         pass_status: 33,
-        expect: None,
+        expect: &[],
         expect_saved: Some("watchdog: patting stopped (watchdogd killed)"),
         lowmem: false,
         audio: false,
         cpu: None,
         smbios_system: None,
+        devices: &[],
     },
     BootCase {
         name: "x86_64-bhyve",
@@ -578,12 +590,13 @@ const BOOT_CASES: &[BootCase] = &[
         // bhyve's status when the guest powers off.
         cmdline: "",
         pass_status: 1,
-        expect: Some("power: off (ACPI S5)"),
+        expect: &["power: off (ACPI S5)"],
         expect_saved: None,
         lowmem: false,
         audio: false,
         cpu: None,
         smbios_system: None,
+        devices: &[],
     },
     BootCase {
         name: "aarch64-lowmem",
@@ -596,12 +609,13 @@ const BOOT_CASES: &[BootCase] = &[
         // back (docs/ARCHITECTURE.md's memory section, `vm::pageout`).
         cmdline: "abyss.test.only=kernel::tests::user_memory::page_cache_larger_than_memory",
         pass_status: 0,
-        expect: Some("lowmem: read back:"),
+        expect: &["lowmem: read back:"],
         expect_saved: None,
         lowmem: true,
         audio: false,
         cpu: None,
         smbios_system: None,
+        devices: &[],
     },
     // A stand-in for the Mac Pro (Late 2013) (docs/MACPRO.md MP1, MP2): its
     // processor generation (Ivy Bridge-EP: AVX, no AVX2, BMI, INVPCID, SMAP,
@@ -617,7 +631,10 @@ const BOOT_CASES: &[BootCase] = &[
         warm_reset: false,
         cmdline: "",
         pass_status: 33,
-        expect: Some("acpi: apple-mac: _OSI answers Extended Address Space Descriptor, Darwin"),
+        expect: &[
+            "acpi: apple-mac: _OSI answers Extended Address Space Descriptor, Darwin",
+            "asmc0: SMC revision:",
+        ],
         expect_saved: None,
         lowmem: false,
         audio: false,
@@ -626,6 +643,9 @@ const BOOT_CASES: &[BootCase] = &[
         smbios_system: Some(
             "type=1,manufacturer=Apple Inc.,product=MacPro6,,1,version=1.0,family=MacPro",
         ),
+        // Apple's SMC on the port window (QEMU describes it as APP0001):
+        // `asmc` attaches through the port back end.
+        devices: &["isa-applesmc"],
     },
     BootCase {
         name: "x86_64-lowmem",
@@ -636,12 +656,13 @@ const BOOT_CASES: &[BootCase] = &[
         warm_reset: false,
         cmdline: "abyss.test.only=kernel::tests::user_memory::page_cache_larger_than_memory",
         pass_status: 33,
-        expect: Some("lowmem: read back:"),
+        expect: &["lowmem: read back:"],
         expect_saved: None,
         lowmem: true,
         audio: false,
         cpu: None,
         smbios_system: None,
+        devices: &[],
     },
     BootCase {
         name: "x86_64-audio",
@@ -654,12 +675,13 @@ const BOOT_CASES: &[BootCase] = &[
         // are in the tree (the kernel test looks for them).
         cmdline: "abyss.test.audio=1",
         pass_status: 33,
-        expect: None,
+        expect: &[],
         expect_saved: None,
         lowmem: false,
         audio: true,
         cpu: None,
         smbios_system: None,
+        devices: &[],
     },
     BootCase {
         name: "aarch64-audio",
@@ -670,12 +692,13 @@ const BOOT_CASES: &[BootCase] = &[
         warm_reset: false,
         cmdline: "abyss.test.audio=1",
         pass_status: 0,
-        expect: None,
+        expect: &[],
         expect_saved: None,
         lowmem: false,
         audio: true,
         cpu: None,
         smbios_system: None,
+        devices: &[],
     },
 ];
 
@@ -1282,6 +1305,11 @@ fn boot(
             ]),
         }
     }
+    if case.vmm == Vmm::Qemu {
+        for d in case.devices {
+            devices.extend(["-device".into(), (*d).into()]);
+        }
+    }
     if case.audio && case.vmm == Vmm::Qemu {
         devices.extend([
             "-audiodev".into(),
@@ -1378,10 +1406,10 @@ fn check_log(text: &str, case: &BootCase) -> std::result::Result<(), String> {
     if case.warm_reset && !text.contains("logring: loader recovered") {
         missing.push("logring: loader recovered");
     }
-    if let Some(line) = case.expect
-        && !text.contains(line)
-    {
-        missing.push(line);
+    for &line in case.expect {
+        if !text.contains(line) {
+            missing.push(line);
+        }
     }
     if missing.is_empty() {
         Ok(())

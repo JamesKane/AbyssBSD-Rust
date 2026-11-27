@@ -178,6 +178,21 @@ name = "arch-x86_64-mem"
 version = "0.0.0"
 
 [[package]]
+name = "asmc"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "acpi",
+ "aml",
+ "bus",
+ "devtree",
+ "regs",
+ "sched",
+ "sync",
+ "sysctl",
+]
+
+[[package]]
 name = "atrtc"
 version = "0.0.0"
 dependencies = [
@@ -346,6 +361,7 @@ dependencies = [
  "aml",
  "apei",
  "apple-mac",
+ "asmc",
  "atrtc",
  "bus",
  "cdnc-i2c",

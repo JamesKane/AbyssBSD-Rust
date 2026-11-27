@@ -53,8 +53,9 @@ have said and did not (DRIVER-MODEL.md §5.5).
 
 3. **A new overlay entry kind: typed device properties.** A platform may attach properties to a
    namespace node, keyed by `_HID` (and `_UID`), as `_DSD` would carry them. They are typed values
-   in `lib/devtree::platform` (`DeviceProperty { node, name, value }`). The values are integers,
-   strings, and arrays of these, which is `_DSD`'s own value set.
+   in `lib/acpi-platform` (`DeviceProperty { hid, name, value, why }`, static data like the rest of
+   a platform). The values are integers, strings, and arrays of these, which is `_DSD`'s own value
+   set.
    - **Names:** a vendor-prefixed name the device's driver documents (`apple,fan-floor-curve`), or a
      generic devicetree name where one exists.
    - **Precedence:** the driver reads its device's properties through the same accessor that returns
@@ -83,8 +84,9 @@ have said and did not (DRIVER-MODEL.md §5.5).
 - `sys/acpi`: the `_OSI` change is applied before the DSDT loads. The interpreter's interface list
   (`lib/aml/src/interp/mod.rs`) becomes settable rather than fixed. The property applier is added.
   The policy check's vendor-name rule covers the new code.
-- `lib/devtree::platform`: `DeviceProperty` and its value type. The property accessor drivers use
-  merges `_DSD` and platform properties, with `_DSD` first.
+- `lib/acpi-platform`: `DeviceProperty` and `PropertyValue`, and `PlatformSource::properties`.
+  The property accessor drivers use (`sys/acpi::properties::property`) gives the device's `_DSD`
+  value first and then a platform's for its `_HID`.
 - `platform/apple-mac` is created with three things:
   - the Darwin `_OSI` change for the makers `Apple Inc.` and `Apple Computer, Inc.`;
   - the `MacPro6,1` SMC properties;

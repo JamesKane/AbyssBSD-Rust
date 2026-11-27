@@ -252,7 +252,8 @@ fn the_tables_share_the_common_drivers() {
             "ichwd",
             "amdsbwd",
             "amdsmn",
-            "amdtemp"
+            "amdtemp",
+            "asmc"
         ]
     );
     assert!(

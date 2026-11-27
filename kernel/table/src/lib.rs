@@ -92,6 +92,7 @@ pub static X86_64: &[DriverDecl] = drivers![
     amdsbwd::DRIVER,
     amdsmn::DRIVER,
     amdtemp::DRIVER,
+    asmc::DRIVER,
 ];
 
 /// What `hostb` adds under every host bridge on x86_64: FreeBSD's `identify`

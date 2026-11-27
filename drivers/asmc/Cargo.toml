@@ -1,0 +1,20 @@
+[package]
+name = "asmc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+abi = { path = "../../lib/abi" }
+acpi = { path = "../../sys/acpi" }
+aml = { path = "../../lib/aml" }
+regs = { path = "../../lib/regs" }
+bus = { path = "../../sys/bus" }
+devtree = { path = "../../lib/devtree" }
+sched = { path = "../../sys/sched" }
+sync = { path = "../../sys/sync" }
+sysctl = { path = "../../sys/sysctl" }
+
+[lints]
+workspace = true
