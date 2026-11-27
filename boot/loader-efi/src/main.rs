@@ -87,10 +87,13 @@ extern "efiapi" fn efi_main(image: Handle, st: *mut raw::SystemTable) -> Status 
     let rev = system.revision();
     let _ = writeln!(
         con,
-        "\nAbyssBSD loader {} ({ARCH}), UEFI {}.{} firmware: {fw} rev {:#x}",
+        // Major and minor as FreeBSD's loader prints them ("%d.%02d"): 2.70,
+        // and 1.10 for the Mac Pro's EFI, which "{}.{}" of minor / 10 showed
+        // as 1.1.
+        "\nAbyssBSD loader {} ({ARCH}), UEFI {}.{:02} firmware: {fw} rev {:#x}",
         env!("CARGO_PKG_VERSION"),
         rev >> 16,
-        (rev & 0xFFFF) / 10,
+        rev & 0xFFFF,
         fw.revision
     );
     let _ = system.disable_watchdog();

@@ -372,6 +372,8 @@ struct BootCase {
     /// QEMU: an Intel HD Audio controller (`ich9-intel-hda`) with a duplex
     /// codec on a null audio back end (docs/AUDIO.md section 7.2).
     audio: bool,
+    /// QEMU: a named CPU model instead of the host's (`Vm::cpu`).
+    cpu: Option<&'static str>,
 }
 
 /// The low-memory cases' RAM.
@@ -394,6 +396,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: None,
         lowmem: false,
         audio: false,
+        cpu: None,
     },
     BootCase {
         name: "aarch64",
@@ -408,6 +411,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: None,
         lowmem: false,
         audio: false,
+        cpu: None,
     },
     BootCase {
         name: "aarch64-el2",
@@ -424,6 +428,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: None,
         lowmem: false,
         audio: false,
+        cpu: None,
     },
     BootCase {
         name: "aarch64-smmu",
@@ -442,6 +447,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: None,
         lowmem: false,
         audio: false,
+        cpu: None,
     },
     BootCase {
         name: "aarch64-warm-reset",
@@ -458,6 +464,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: None,
         lowmem: false,
         audio: false,
+        cpu: None,
     },
     BootCase {
         name: "aarch64-smmu-warm-reset",
@@ -476,6 +483,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: Some("logring: devices shut down before the reset"),
         lowmem: false,
         audio: false,
+        cpu: None,
     },
     BootCase {
         name: "x86_64-warm-reset",
@@ -491,6 +499,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: None,
         lowmem: false,
         audio: false,
+        cpu: None,
     },
     BootCase {
         name: "aarch64-panic-reset",
@@ -509,6 +518,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: Some("Automatic reboot in 1 seconds"),
         lowmem: false,
         audio: false,
+        cpu: None,
     },
     BootCase {
         name: "x86_64-panic-reset",
@@ -525,6 +535,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: Some("Automatic reboot in 1 seconds"),
         lowmem: false,
         audio: false,
+        cpu: None,
     },
     BootCase {
         name: "x86_64-watchdog",
@@ -542,6 +553,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: Some("watchdog: patting stopped (watchdogd killed)"),
         lowmem: false,
         audio: false,
+        cpu: None,
     },
     BootCase {
         name: "x86_64-bhyve",
@@ -557,6 +569,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: None,
         lowmem: false,
         audio: false,
+        cpu: None,
     },
     BootCase {
         name: "aarch64-lowmem",
@@ -573,6 +586,26 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: None,
         lowmem: true,
         audio: false,
+        cpu: None,
+    },
+    // The Mac Pro (Late 2013)'s processor generation (Ivy Bridge-EP: AVX,
+    // no AVX2, BMI, INVPCID, SMAP, XSAVEC or RDSEED; docs/MACPRO.md MP1).
+    // Every other case runs the host's model, which is newer.
+    BootCase {
+        name: "x86_64-ivybridge",
+        vmm: Vmm::Qemu,
+        arch: Arch::X86_64,
+        el2: false,
+        iommu: false,
+        warm_reset: false,
+        cmdline: "",
+        pass_status: 33,
+        expect: None,
+        expect_saved: None,
+        lowmem: false,
+        audio: false,
+        // KVM keeps the host's vendor unless told; the Mac Pro is Intel.
+        cpu: Some("IvyBridge-v2,vendor=GenuineIntel"),
     },
     BootCase {
         name: "x86_64-lowmem",
@@ -587,6 +620,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: None,
         lowmem: true,
         audio: false,
+        cpu: None,
     },
     BootCase {
         name: "x86_64-audio",
@@ -603,6 +637,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: None,
         lowmem: false,
         audio: true,
+        cpu: None,
     },
     BootCase {
         name: "aarch64-audio",
@@ -617,6 +652,7 @@ const BOOT_CASES: &[BootCase] = &[
         expect_saved: None,
         lowmem: false,
         audio: true,
+        cpu: None,
     },
 ];
 
@@ -1235,6 +1271,7 @@ fn boot(
     }
     let vm = Vm {
         el2: case.el2,
+        cpu: case.cpu,
         iommu: case.iommu,
         test_devices: true,
         allow_reset: case.warm_reset,

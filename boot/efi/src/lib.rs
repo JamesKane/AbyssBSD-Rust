@@ -13,6 +13,8 @@ pub mod devpath;
 mod file;
 pub mod memory;
 pub mod raw;
+#[cfg(test)]
+mod tests;
 
 use core::ffi::c_void;
 use core::fmt::{self, Write as _};
@@ -26,6 +28,43 @@ pub use raw::{Handle, Status};
 
 /// A UEFI result.
 pub type Result<T> = core::result::Result<T, Status>;
+
+/// Every boot service this layer calls, by its offset in the table. Each
+/// must be in EFI 1.10's table (ADR-0023): a newer one needs a
+/// [`raw::TableHeader::provides`] check and a fallback, not a place here.
+const BOOT_SERVICES_CALLED: &[usize] = &[
+    core::mem::offset_of!(raw::BootServices, allocate_pages),
+    core::mem::offset_of!(raw::BootServices, free_pages),
+    core::mem::offset_of!(raw::BootServices, get_memory_map),
+    core::mem::offset_of!(raw::BootServices, allocate_pool),
+    core::mem::offset_of!(raw::BootServices, free_pool),
+    core::mem::offset_of!(raw::BootServices, handle_protocol),
+    core::mem::offset_of!(raw::BootServices, exit_boot_services),
+    core::mem::offset_of!(raw::BootServices, stall),
+    core::mem::offset_of!(raw::BootServices, set_watchdog_timer),
+    core::mem::offset_of!(raw::BootServices, locate_handle_buffer),
+    core::mem::offset_of!(raw::BootServices, locate_protocol),
+];
+
+/// Every runtime service this layer calls, as for [`BOOT_SERVICES_CALLED`].
+const RUNTIME_SERVICES_CALLED: &[usize] = &[
+    core::mem::offset_of!(raw::RuntimeServices, get_variable),
+    core::mem::offset_of!(raw::RuntimeServices, set_variable),
+    core::mem::offset_of!(raw::RuntimeServices, reset_system),
+];
+
+const _: () = {
+    let mut i = 0;
+    while i < BOOT_SERVICES_CALLED.len() {
+        assert!(BOOT_SERVICES_CALLED[i] < raw::BootServices::EFI_1_10_SIZE);
+        i += 1;
+    }
+    let mut i = 0;
+    while i < RUNTIME_SERVICES_CALLED.len() {
+        assert!(RUNTIME_SERVICES_CALLED[i] < raw::RuntimeServices::EFI_1_10_SIZE);
+        i += 1;
+    }
+};
 
 /// The firmware's system table while boot services are active.
 #[derive(Debug)]

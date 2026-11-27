@@ -31,6 +31,29 @@ struct Runtime {
 
 static RUNTIME: SpinLock<Option<Runtime>> = SpinLock::new(None);
 
+// Every runtime service the kernel calls is in EFI 1.10's table, which ends
+// at `ResetSystem` (ADR-0023: the Mac Pro (Late 2013) reports 1.10). A
+// UEFI 2.0 service (`QueryVariableInfo`, the capsule calls) would need the
+// table header's `provides` check and a fallback.
+const _: () = {
+    use core::mem::offset_of;
+    let called = [
+        offset_of!(RuntimeServices, get_time),
+        offset_of!(RuntimeServices, set_time),
+        offset_of!(RuntimeServices, get_wakeup_time),
+        offset_of!(RuntimeServices, set_wakeup_time),
+        offset_of!(RuntimeServices, get_variable),
+        offset_of!(RuntimeServices, get_next_variable_name),
+        offset_of!(RuntimeServices, set_variable),
+        offset_of!(RuntimeServices, reset_system),
+    ];
+    let mut i = 0;
+    while i < called.len() {
+        assert!(called[i] < RuntimeServices::EFI_1_10_SIZE);
+        i += 1;
+    }
+};
+
 /// Records where the runtime services are and the table to call them
 /// under. Without a services table (as `efi_init` finds none) there are
 /// no runtime services.

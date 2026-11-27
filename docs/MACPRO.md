@@ -134,6 +134,23 @@ Each milestone runs only the tests it touches (targeted runs). The full gates ru
 
 ### MP1: The CPU and firmware floor, in QEMU
 
+**Done 2026-11-27.** What was built:
+- The boot case `x86_64-ivybridge` runs QEMU's `IvyBridge-v2` with `vendor=GenuineIntel`, because
+  KVM on an AMD host otherwise keeps the host's vendor. It passes: the kernel sees "Intel family
+  0x6 model 0x3a", and XSAVE covers x87, SSE and AVX (XCR0 `0x7`, 832-byte areas).
+- `boot/efi` defines each table's EFI 1.10 size (`BootServices::EFI_1_10_SIZE` = 0x170,
+  `RuntimeServices::EFI_1_10_SIZE` = 0x70) and `TableHeader::provides`.
+- Compile-time checks: every boot and runtime service the efi crate calls, and every runtime
+  service the kernel calls (`kernel/src/firmware.rs`), lies inside those sizes.
+- Host tests run the safe layer's lookups against a revision-1.10 system table whose UEFI 2.0
+  slots are poisoned.
+- The loader prints the revision as FreeBSD does (`%d.%02d`: 2.70, and 1.10 rather than 1.1).
+- The boot cases already boot from `\EFI\BOOT\BOOTX64.EFI` with fresh variables and no `Boot####`
+  of the loader's own. The loader's one NV variable (`AbyssLogRing`, 8 bytes) is written only when
+  it makes a fresh ring, not every boot, which matters for Apple's small NVRAM.
+
+On the planned checks:
+
 - A boot case on `-cpu IvyBridge` (under KVM on the laptop, TCG elsewhere), x86_64 only. Fix
   whatever assumes a newer CPU, gated on CPUID as FreeBSD gates it.
 - The EFI 1.10 unit tests ADR-0023 names (loader protocol lookups against a 1.10-sized system

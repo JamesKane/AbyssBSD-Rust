@@ -124,6 +124,9 @@ pub(crate) struct Vm {
     /// The USB and input set ([`USB_SLOT`] on bhyve, [`Vm::usb_args`] on
     /// QEMU).
     pub(crate) usb: bool,
+    /// QEMU: a named CPU model (`IvyBridge-v2`) instead of the host's
+    /// (KVM) or `max` (TCG), to boot on an older processor's feature set.
+    pub(crate) cpu: Option<&'static str>,
     /// QEMU: a QMP socket at this path, to type and read the screen
     /// through ([`crate::qmp`]).
     pub(crate) qmp: Option<PathBuf>,
@@ -344,6 +347,7 @@ impl Vm {
             machine: None,
             devices: Vec::new(),
             usb: false,
+            cpu: None,
             qmp: None,
             net: None,
             instance: "",
@@ -521,11 +525,15 @@ impl Vm {
             c.args(SMBIOS_ARGS);
         }
         // EL2 for the guest needs TCG (KVM would need nested virtualization).
-        if kvm_available(self.arch) && !self.el2 {
-            c.args(["-accel", "kvm", "-cpu", "host"]);
+        let accel = if kvm_available(self.arch) && !self.el2 {
+            "kvm"
         } else {
-            c.args(["-accel", "tcg", "-cpu", "max"]);
-        }
+            "tcg"
+        };
+        let cpu = self
+            .cpu
+            .unwrap_or(if accel == "kvm" { "host" } else { "max" });
+        c.args(["-accel", accel, "-cpu", cpu]);
         c.arg("-smp").arg(self.smp.to_string());
         c.arg("-m").arg(&self.mem);
         c.arg("-drive").arg(pflash(0, &code, true));

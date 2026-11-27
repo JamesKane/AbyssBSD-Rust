@@ -6,8 +6,16 @@
 //! are [`Slot`]s that keep the offsets right.
 
 use core::ffi::c_void;
+use core::mem::{offset_of, size_of};
 
 use guid::Guid;
+
+/// The oldest system table revision AbyssBSD boots from: EFI 1.10
+/// (`EFI_1_10_SYSTEM_TABLE_REVISION`), which the Mac Pro (Late 2013) reports
+/// (ADR-0023). Its boot and runtime services tables are shorter than UEFI
+/// 2.x's: see [`BootServices::EFI_1_10_SIZE`] and
+/// [`RuntimeServices::EFI_1_10_SIZE`].
+pub const EFI_1_10_REVISION: u32 = (1 << 16) | 10;
 
 /// An opaque firmware object handle.
 #[repr(transparent)]
@@ -119,6 +127,19 @@ pub struct SystemTable {
     pub configuration_table: *const ConfigurationTable,
 }
 
+impl TableHeader {
+    /// Whether the table, `header_size` bytes long, includes the service
+    /// pointer at byte `offset` (an `offset_of!` of the table's field). A
+    /// service newer than EFI 1.10 is called only after this says yes, and
+    /// has a fallback when it says no (ADR-0023).
+    #[must_use]
+    pub fn provides(&self, offset: usize) -> bool {
+        offset
+            .checked_add(size_of::<usize>())
+            .is_some_and(|end| end <= self.header_size as usize)
+    }
+}
+
 impl SystemTable {
     /// `"IBI SYST"` in little-endian.
     pub const SIGNATURE: u64 = 0x5453_5953_2049_4249;
@@ -200,6 +221,12 @@ pub struct RuntimeServices {
     pub query_variable_info: Slot,
 }
 
+impl RuntimeServices {
+    /// The table's size in EFI 1.10, which ends at `ResetSystem`; UEFI 2.0
+    /// added the capsule services and `QueryVariableInfo`.
+    pub const EFI_1_10_SIZE: usize = offset_of!(Self, update_capsule);
+}
+
 /// `EFI_BOOT_SERVICES`.
 #[repr(C)]
 #[derive(Debug)]
@@ -264,6 +291,12 @@ pub struct BootServices {
     pub copy_mem: Slot,
     pub set_mem: Slot,
     pub create_event_ex: Slot,
+}
+
+impl BootServices {
+    /// The table's size in EFI 1.10, which ends at `SetMem`; UEFI 2.0 added
+    /// `CreateEventEx`.
+    pub const EFI_1_10_SIZE: usize = offset_of!(Self, create_event_ex);
 }
 
 /// `EFI_MEMORY_DESCRIPTOR`. Firmware may use a larger stride than this
