@@ -274,9 +274,10 @@ The planned checks:
 - **QEMU check:** `x86_64-ivybridge` adds QEMU's `isa-applesmc`. `asmc0` attaches through the
   ports and reads `SMC revision: 1.13f3`. The Mac Pro properties reach it and are declined there
   ("no such fan", "no level key"), since QEMU's SMC has neither.
-- **Difference from the fork:** with the fork's fall rule, a raised floor never returns to the
-  firmware minimum. It stops up to 100 rpm above it (890 rpm) and is rewritten there every
-  sample. Ours falls the rest of the way once demand is back at the minimum.
+- **Fan floor's fall:** with the fork's original fall rule, a raised floor never returned to the
+  firmware minimum. It stopped up to 100 rpm above it (890 rpm) and was rewritten there every
+  sample. Ours falls the rest of the way once demand is back at the minimum. The fork took the
+  same rule in `9a912af88f81` (not yet run on the machine).
 - **Never run on hardware or in a kernel:**
   - `coretemp`'s attach and sysctls (KVM shows no sensor);
   - the memory window inside the kernel;

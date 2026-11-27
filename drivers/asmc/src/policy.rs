@@ -14,7 +14,8 @@
 //! item 4). The floor rises at once and falls by at most
 //! [`FALL_STEP`] rpm a sample, once demand is [`FALL_BAND`] below it, and
 //! all the way back to the firmware minimum once demand is there (the
-//! fork's rule leaves it up to [`FALL_BAND`] above for good). It is
+//! fork's first rule left it up to [`FALL_BAND`] above for good; it took
+//! this one in `9a912af88f81`). It is
 //! rewritten every sample while raised, so a stray write cannot keep the
 //! fan low.
 //!
@@ -105,7 +106,7 @@ impl Floor {
             return (demand, true);
         };
         // The band keeps the floor from hunting, except on the way back to
-        // the firmware minimum: with the fork's rule alone a raised floor
+        // the firmware minimum: with the band rule alone a raised floor
         // stops up to FALL_BAND above it for good (fwmin 790, floor 890).
         let next = if demand > floor {
             demand
