@@ -394,14 +394,22 @@ impl Master {
         tty.tty_ioctl(s, req, arg, fflag).map(|()| 0)
     }
 
-    /// `ptsdev_poll`.
+    /// `ptsdev_poll`: a poller is registered only when nothing is ready
+    /// (`revents == 0`), and looks again after.
     pub(crate) fn poll(&self, events: i16, w: Option<&Arc<dyn event::Wake>>) -> i16 {
+        let revents = self.look(events);
+        let Some(w) = w.filter(|_| revents == 0) else {
+            return revents;
+        };
+        self.sc.notify.record(w);
+        self.look(events)
+    }
+
+    /// What [`Master::poll`] reports now.
+    fn look(&self, events: i16) -> i16 {
         use abi::event::{POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM};
         if self.sc.finished.load(Ordering::Acquire) {
             return (events & (POLLIN | POLLRDNORM)) | POLLHUP;
-        }
-        if let Some(w) = w {
-            self.sc.notify.record(w);
         }
         let mut revents = 0;
         if events & (POLLIN | POLLRDNORM) != 0

@@ -1296,14 +1296,22 @@ impl Tty {
         }
     }
 
-    /// `ttydev_poll`.
+    /// `ttydev_poll`: a poller is registered only when nothing is ready
+    /// (`revents == 0`), and looks again after.
     fn poll(&self, events: i16, w: Option<&Arc<dyn event::Wake>>) -> i16 {
+        let revents = self.look(events);
+        let Some(w) = w.filter(|_| revents == 0) else {
+            return revents;
+        };
+        self.notify.record(w);
+        self.look(events)
+    }
+
+    /// What [`Tty::poll`] reports now.
+    fn look(&self, events: i16) -> i16 {
         use abi::event::{POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM};
         if self.gone.load(Ordering::Acquire) {
             return (events & (POLLIN | POLLRDNORM)) | POLLHUP;
-        }
-        if let Some(w) = w {
-            self.notify.record(w);
         }
         let mut revents = 0;
         if events & (POLLIN | POLLRDNORM) != 0 && self.ready.load(Ordering::Acquire) > 0 {
