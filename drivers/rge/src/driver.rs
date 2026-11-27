@@ -488,30 +488,28 @@ impl Shared {
                 self.log(format_args!("{}", health::MSG_SYSTEM_ERR));
                 self.reinit(&mut g);
                 link = true;
-            } else if st & r::ISR_LINKCHG == 0 {
-                if took > 0 && busy {
-                    // Masked still: look again shortly, without a status
-                    // read or an unmask in between.
-                    for _ in 0..POLL_MAX {
-                        drop(g);
-                        let mut stop = || self.state() != State::Running;
-                        bus::manager().wait_timeout(s, &self.pollq, &mut stop, POLL_NS);
-                        g = self.core.lock(s);
-                        if self.state() != State::Running {
-                            break;
-                        }
-                        let (frames, more) = self.rx_take();
-                        let got = frames.len();
-                        drop(g);
-                        self.deliver(frames);
-                        g = self.core.lock(s);
-                        self.tx.lock().reap(&self.port);
-                        if got == 0 {
-                            break;
-                        }
-                        if more {
-                            sched::yield_now();
-                        }
+            } else if st & r::ISR_LINKCHG == 0 && took > 0 && busy {
+                // Masked still: look again shortly, without a status
+                // read or an unmask in between.
+                for _ in 0..POLL_MAX {
+                    drop(g);
+                    let mut stop = || self.state() != State::Running;
+                    bus::manager().wait_timeout(s, &self.pollq, &mut stop, POLL_NS);
+                    g = self.core.lock(s);
+                    if self.state() != State::Running {
+                        break;
+                    }
+                    let (frames, more) = self.rx_take();
+                    let got = frames.len();
+                    drop(g);
+                    self.deliver(frames);
+                    g = self.core.lock(s);
+                    self.tx.lock().reap(&self.port);
+                    if got == 0 {
+                        break;
+                    }
+                    if more {
+                        sched::yield_now();
                     }
                 }
             }
