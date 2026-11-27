@@ -1259,6 +1259,21 @@ impl Object {
             // lock only once more, to insert.
             // (Not when about to fold: the count of the shadowed object
             // is what says nothing else holds it.)
+            if !foldable
+                && let Some((b, off)) = &inner.backing
+                && b.pager.is_none()
+                && b.device.is_none()
+            {
+                // The page is in the shadowed object, which is almost
+                // always where a copy-on-write fault finds it: look there
+                // with this object's lock still held (a shadow's lock
+                // comes before the one it shadows, as `collapse` takes
+                // them), so the miss, the reference to the shadowed
+                // object, and its lock cost one lock cycle and no clone.
+                if let Some(&Page { pfn, .. }) = b.inner.lock().pages.get(&(index + off)) {
+                    return Ok(Found::Backing(pfn));
+                }
+            }
             let backing = if foldable {
                 None
             } else {

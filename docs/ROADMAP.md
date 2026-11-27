@@ -572,7 +572,11 @@ stock 15.1. Open:
   (`insert` under the lock 220 cycles of 1400 in `fault::resolve`); allocating the page is 870, of which
   zeroing a cold page 510 (330 hot): the 64 MiB region is freed to the buddy allocator past the 64-page
   per-CPU cache, so pages come back cold. A 1024-page cache (refills and drains of 64) took `fault.anon` 428
-  to 406-416 ns unpinned and `vm` 1.046 to 1.039 pinned; `fault.cow` (1.08) is still to be probed. Still to
+  to 406-416 ns unpinned. Copy-on-write fault (`resolve` 1420 cycles: the page copy 840, the insert 217,
+  the rest, 365, the lookup through the shadow): the lookup now reads the shadowed object with the shadow's
+  lock held (one cycle, no clone). Six pinned runs: `fault.anon` 1.039, `fault.cow` 1.067, `mmap` 1.008, `vm`
+  1.037, the one component of `p4` still over the gate; the rest pass (`sig` 0.889, `syscall` 0.993, `proc`
+  0.959). Still to
   do for `sig`: build the frame from the thread's area without the extra copies. `xsaveopt` is not used.
   `fs.ufs.fsx` was 2.5: `ftruncate` zeroed and moved fragments on the disk, synchronously;
   it now clears and carries them in the page cache (`truncate_new`), as FreeBSD's `ffs_truncate` works in
