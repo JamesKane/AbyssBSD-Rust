@@ -364,8 +364,8 @@ and on hand as of 2026-11-10. The rows are from Apple's published specifications
 knowledge of the model unless marked **measured**. Measured rows come from the FreeBSD-fork project's
 runs of FreeBSD 16-CURRENT and macOS 12.7.6 on this unit (2026-11-26 and 27), summarized in
 [MACPRO.md §2](MACPRO.md#2-what-is-already-measured). The bring-up plan is [MACPRO.md](MACPRO.md).
-AbyssBSD writes only to an external USB 3 disk (serial number to be recorded at MP4); the internal
-SSD holds macOS and is never written.
+AbyssBSD runs from a dedicated USB stick booted through the Startup Manager (MACPRO.md MP4; its
+serial number recorded at its first boot); the internal SSD holds macOS and is never written.
 
 | Item | Expected | What it means for AbyssBSD |
 |---|---|---|
@@ -378,7 +378,7 @@ SSD holds macOS and is never written.
 | Chipset | Intel C602J (Patsburg) PCH | `ichwd` has Patsburg's LPC IDs, but **measured:** FreeBSD finds the watchdog "disabled in BIOS or hardware" and does not attach. There is no hardware watchdog to reset a hung kernel |
 | Timers | Invariant TSC, HPET, ACPI PM timer, LAPIC (TSC-deadline capable) | Existing paths |
 | Display | **Measured:** two FirePro D700 (Tahiti XT `1002:6798`): `pci0:2:0:0` subsystem `106b:0128` (compute, none connected) and `pci0:6:0:0` `106b:0127` (display), each with its own VBIOS. GCN 1, "Southern Islands". Outputs on six Thunderbolt 2 ports and one HDMI 1.4 port | GOP framebuffer console. **Measured:** the boot display is on Thunderbolt (not HDMI), and GOP offers one mode, 2560×1440×32. Native graphics is Southern Islands under M-G (FreeBSD: drm-kmod's `amdgpu` with `si_support=1` and `si_dpm`, measured) |
-| Storage | Apple PCIe SSD on a proprietary connector, **AHCI** (not NVMe) | `ahci` matches by class. **macOS 12.7.6 lives on it: never written.** AbyssBSD installs to an external USB 3 disk (MACPRO.md §1) |
+| Storage | Apple PCIe SSD on a proprietary connector, **AHCI** (not NVMe) | `ahci` matches by class. **macOS 12.7.6 lives on it: never written.** AbyssBSD runs from a dedicated USB stick (MACPRO.md §1, MP4) |
 | Network | **Measured:** two BCM57762 (`14e4:1682`, CHIP ID 0x57766000, PHY OUI 0x001be9 model 0x24). Broadcom BCM4360 802.11ac, Bluetooth 4.0 | `bge` (57765 family, host-tested; MACPRO.md MP3). Wi-Fi is out of scope |
 | USB | **Measured:** the four rear USB 3 ports are on a Fresco Logic FL1100 xHCI (one did not respond); Patsburg's EHCI carries only the internal Bluetooth | `xhci`; no EHCI driver needed |
 | Thunderbolt | Three Intel Thunderbolt 2 controllers, six ports | Powered and enumerated only under the Darwin `_OSI`. Hot plug is later work |

@@ -298,7 +298,7 @@ came with P9). The hardware step is P8's on the Sky1 and P10's on the X870E.
 
 ## Track: Mac Pro, Tier 2 (parallel to P10/P11) (M) — in progress
 
-**Goal:** FreeBSD multi-user on the Mac Pro (Late 2013, `MacPro6,1`), from a USB 3 disk, kept
+**Goal:** FreeBSD multi-user on the Mac Pro (Late 2013, `MacPro6,1`), from a USB stick, kept
 thermally safe ([ADR-0023](adr/0023-hardware-scope-consumer-decade.md), HARDWARE.md §9). Plan,
 milestones and what is already measured: [MACPRO.md](MACPRO.md).
 
@@ -309,8 +309,8 @@ milestones and what is already measured: [MACPRO.md](MACPRO.md).
   through the Startup Manager, the thermal gate (no sustained load before `asmc`'s fan policy runs),
   `bge` and an unattended deploy loop.
 
-**Exit:** `x86_64-multiuser` from the framebuffer and a USB keyboard; fsx and `fsck_ffs` on the USB
-disk; the device tree against FreeBSD's `devinfo`; 30 minutes of full CPU load with the fan policy.
+**Exit:** `x86_64-multiuser` from the framebuffer and a USB keyboard; fsx and `fsck_ffs` on the
+stick; the device tree against FreeBSD's `devinfo`; 30 minutes of full CPU load with the fan policy.
 Correctness only, no performance gate. Southern Islands graphics is M-G's, later.
 
 Status (2026-11-27, branch `macpro-bringup`):

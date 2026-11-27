@@ -8,7 +8,7 @@ scope and firmware floor are [ADR-0023](adr/0023-hardware-scope-consumer-decade.
 
 | Question | Decision |
 |---|---|
-| Disk AbyssBSD may write | **An external USB 3 disk** (ESP + root), identified by serial number as the Orange Pi's Samsung is. The internal Apple SSD holds macOS 12.7.6 and is never written: `ahci` may attach to it, `deploy` refuses it by serial number |
+| Disk AbyssBSD may write | **A dedicated USB stick** booted through the Startup Manager, as the FreeBSD-fork project's live stick is (replanned 2026-11-27, MP4): `disk-board.img` written to it by the owner, identified by serial number. The internal Apple SSD holds macOS 12.7.6 and is never written: `ahci` may attach to it, `deploy` refuses it by serial number |
 | Sharing the machine | **QEMU and host tests first.** The FreeBSD-fork project (`../AbyssBSD`) is running thermal experiments on the machine now, booted from its own FreeBSD stick. This track goes to the machine only when that work is done or the owner hands it over. The full ground-truth capture (§5, MP0) is asked of that project, since it already has FreeBSD running there |
 | Where the fan table lives | **`platform/apple-mac` states it as typed properties of the SMC's `APP0001` node; `asmc` holds all the behavior** ([ADR-0027](adr/0027-platform-osi-and-device-properties.md), which also settles the `_OSI` hook). A Mac with no such properties runs the SMC's own curve |
 | Roadmap placement | **Its own track**, parallel to P10/P11. Per ADR-0023 a Tier 2 machine is checked for correctness, booted at milestone exits, and gates nothing. It has no performance gate |
@@ -341,38 +341,70 @@ The planned checks:
 
   All of these wait for MP4.
 
-### MP4: First boot on the machine
+### MP4: First boot, from a USB stick
 
-When the owner hands the machine over:
-- The USB 3 disk (ESP `abyssefi`, root `abyssroot`), written from the build server, its serial
-  number recorded in HARDWARE.md §9. Booted through the Startup Manager (Option held).
-- GOP console on the display GPU's output, USB keyboard, the loader's persistent log on the ESP.
-- **Thermal gate**, run from a **power-off**, never a warm reboot from macOS: macOS leaves the
-  SMC in a mode that holds the fan at 2600, which would hide a broken policy (and a
-  `bless --nextonly` boot is exactly such a reboot). `asmc` attaches with the MMIO back end, the
-  fan policy follows the curve, and it restores 790 at shutdown. Compare against the fork's
-  cold-boot CPU-only run (5 min of 24 threads: GPU 64→68.5 °C, CPU 76 °C, fan about 2600). There is
-  no GPU load to compare: AbyssBSD drives no GPU in this track. Nothing sustained runs before this
-  passes.
-- `devinfo` against the capture's FreeBSD tree.
+Replanned 2026-11-27 to follow the FreeBSD-fork project's way onto this machine. It boots a
+developer live stick through the Startup Manager, runs everything from the stick, and is driven
+over ssh as root by key. Only the stick is ever written: never the internal SSD, macOS, or the
+firmware's boot settings.
 
-### MP5: Network and an unattended loop
+- **The stick.** `cargo xtask --remote image --arch x86_64 --release --root board
+  --authorized-key "$(cat ~/.ssh/id_ed25519.pub)"` builds `disk-board.img`:
+  - a GPT disk with a FAT32 ESP (`efiboot0`), the loader at `\EFI\BOOT\BOOTX64.EFI` and the
+    kernel at `EFI/ABYSS/KERNEL`;
+  - a UFS2 root (`rootfs0`) with all of FreeBSD 15.1's `base.txz`;
+  - DHCP on every interface, and sshd letting root in by key only.
 
-- `bge0` up, DHCP, `sshd`.
-- `cargo xtask deploy --machine macpro`, checked by the USB disk's serial number.
-- Boot selection. The question is how to boot AbyssBSD once, unattended, and return to macOS by
-  default. Candidates, in order: `BootNext` (if the capture shows Apple honors it); from macOS,
-  `bless --mount <ESP> --setBoot --nextonly`; Apple's `efi-boot-next` variable written from
-  AbyssBSD through runtime services. The owner chooses whether the default boot ever changes
-  away from macOS.
-- ~~The watchdog (`ichwd`) proven to reset a hung kernel.~~ The capture shows the Patsburg
-  watchdog disabled by the firmware, so there is none. A hung kernel needs the power button, and
-  the persistent log on the ESP is what tells why (§8, question 7).
+  It is the analogue of the fork's `live-image.sh --ssh-key --stay`. **The owner writes it to a
+  dedicated USB stick with `dd`**, which is the fork's step. The stick's serial number goes in
+  HARDWARE.md §9 at its first boot (`usbconfig`, `camcontrol inquiry -S`).
+- **Booting it.** Power on holding Option, then pick "EFI Boot". macOS stays the default, so a
+  reboot without Option goes back to macOS. Rules:
+  - only one live stick is plugged in at a time: ours and the fork's both carry FreeBSD-style root
+    labels;
+  - the stick goes in a rear USB 3 port, on the FL1100 (`xhci`). One port did not respond in the
+    capture; HARDWARE.md §9 records which once known.
+- **What runs.** The kernel mounts root from the stick, through `xhci`, `umass` and `da` on the
+  FL1100. There is no GPU driver, which is the fork's thermal-pass medium by construction. `asmc`
+  runs the fan floor from attach, and `coretemp`, `bge` and `ichwd` attach if they can. The GOP
+  console is on the Thunderbolt-connected display (2560×1440, the only mode).
+- **Writes outside the stick.** One 8-byte NVRAM variable, `AbyssLogRing`, written when the loader
+  makes a fresh log ring (MP1). Nothing else.
+- **If the network does not come up** (`bge` is host-tested only), the console and the loader's
+  persistent log tell why. The previous boot's kernel log is saved to the stick's ESP as
+  `EFI/ABYSS/PREVLOG.TXT`, readable by plugging the stick into the dev box. There is no serial
+  port and no watchdog (§8, question 7).
+- **Thermal gate**, unchanged: from a **power-off**, never a warm reboot from macOS. macOS leaves
+  the SMC holding the fan at 2600, which would hide a broken policy. `asmc` attaches with the MMIO
+  back end, the floor follows the curve, and 790 comes back at shutdown. Compare against the fork's
+  cold-boot CPU-only run (5 min of 24 threads: GPU 64→68.5 °C, CPU 76 °C, fan about 2600). Nothing
+  sustained runs before this passes.
+- `devinfo` against the capture's FreeBSD tree (`tests/corpus/macpro61/freebsd/osi1-quiet/`).
+
+### MP5: Network and the loop
+
+- `bge0` up, DHCP, and `ssh root@<address>` with the stick's key. The fork's FreeBSD got .12 from
+  this MAC address, so the same lease is likely.
+- **Iterating, as the fork does.** Build, copy over ssh, boot again with Option held.
+  - A kernel change goes onto the running stick: `/boot/kernel/kernel` on its root (the old one
+    kept as `kernel.prev`), checked by SHA-256.
+  - A change to the root's files goes the same way; a new `disk-board.img` is written only when
+    the layout changes.
+  - `cargo xtask deploy --machine macpro` does it with `deploy`'s checks: AbyssBSD is running, `/`
+    is `gpt/rootfs0`, and that disk's serial number is the stick's. It writes no `BootNext`: the
+    owner's Option press is the boot selection, as on the fork's stick.
+- **Unattended boots are later work, and the owner's call:**
+  - from macOS, `bless --mount <the stick's ESP> --setBoot --nextonly`, which needs sudo;
+  - from AbyssBSD, Apple's `efi-boot-next` variable through runtime services.
+
+  Neither changes the default away from macOS.
+- **No watchdog.** The Patsburg watchdog is disabled by the firmware, so a hung kernel needs the
+  power button, and the saved log tells why (§8, question 7).
 
 ### Exit
 
 - The `x86_64-multiuser` scenario from the framebuffer and a USB keyboard alone.
-- fsx and then `fsck_ffs` on the USB disk.
+- fsx and then `fsck_ffs` on the stick.
 - The device tree against FreeBSD's `devinfo` from the capture.
 - A 30-minute full CPU load from a power-off, with the fan policy: no freeze, temperatures
   plateau, the fan follows the curve. (The SMC's PROCHOT latch tripped only under combined CPU and
