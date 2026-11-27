@@ -562,6 +562,13 @@ stock 15.1. Open:
   relocks per level; (3) the system call's three nested Rust frames, the `Call` struct through memory,
   and the thread pointer chain walked three times (about 8 cycles). The stock side's pin did not hold in
   2 of 3 runs once (36 ns `getpid`): check `freq=` in the logs against the numbers.
+  **Lazy FPU (done, same day):** ownership as FreeBSD's `fpu.c` (`sys/sched/src/fpu.rs`): a thread's
+  state is live in the registers, in its area, or the initial one (dropped), CR0.TS set unless live, #NM
+  loads (`sched::device_not_available`), a switch out saves only live registers, delivery drops the state
+  and `sigreturn` copies into the area; exec drops; firmware calls use `sched::simd`; ptrace and core
+  dumps materialize the area. `p4` (3 runs): `sig.deliver` 1.13 to 0.878, `getpid` 0.92, `proc` 1.009;
+  `vm` 1.046 is the one component left over the gate (`fault.anon` 1.07, `fault.cow` 1.08). Still to
+  do for `sig`: build the frame from the thread's area without the extra copies. `xsaveopt` is not used.
   `fs.ufs.fsx` was 2.5: `ftruncate` zeroed and moved fragments on the disk, synchronously;
   it now clears and carries them in the page cache (`truncate_new`), as FreeBSD's `ffs_truncate` works in
   the buffer cache: 0.75, and `fs.ufs` 0.837. Mapped writes (`msync`) are still twice stock's cost in
