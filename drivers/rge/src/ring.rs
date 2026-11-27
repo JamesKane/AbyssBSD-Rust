@@ -138,6 +138,24 @@ pub mod tx {
     /// Extended status in TSO mode: the segment size in bits 28:18.
     pub const TSO_MSS_SHIFT: u32 = 18;
     pub const TSO_MAX_MSS: u32 = 0x7ff;
+    /// The most payload a TSO frame carries, and the most segments it is
+    /// cut into (the delta spec's limits).
+    pub const TSO_MAX_PAYLOAD: usize = 64_000;
+    pub const TSO_MAX_SEGS: usize = 64;
+
+    /// Whether a TSO frame of `len` bytes, its headers (link, IP, TCP)
+    /// `hdrlen` of them, cut into segments of `mss` payload bytes, is
+    /// within the controller's large-send limits. A frame's length alone
+    /// is not: a TSO frame may be far longer than the longest frame the
+    /// controller sends as it is.
+    #[must_use]
+    pub const fn tso_fits(len: usize, hdrlen: usize, mss: u32) -> bool {
+        if mss == 0 || len <= hdrlen {
+            return false;
+        }
+        let payload = len - hdrlen;
+        payload <= TSO_MAX_PAYLOAD && payload.div_ceil(mss as usize) <= TSO_MAX_SEGS
+    }
 
     /// The command and extended status words for a TSO frame of IPv4 TCP
     /// whose TCP header starts `tcp_offset` bytes into it, cut into

@@ -718,12 +718,14 @@ impl Shared {
     /// Sends frame `m` (`rge_encap`, with the frame copied).
     fn send(&self, m: Packet) -> Result<(), NoBufs> {
         let len = m.len();
-        if len > MAX_FRAME {
+        let tso = m.hdr.csum_flags & csum::IP_TSO != 0;
+        // A TSO frame's limits are the large send's, in `send_tso`.
+        if len > MAX_FRAME && !tso {
             return Err(NoBufs);
         }
         let mcast = m.hdr.flags & (flags::BCAST | flags::MCAST) != 0;
         self.port.tap.mtap(&m, net::bpf::Way::Out);
-        if m.hdr.csum_flags & csum::IP_TSO != 0 {
+        if tso {
             self.send_tso(m)?;
         } else if len <= SLOT {
             self.send_slotted(&m)?;
@@ -810,10 +812,18 @@ impl Shared {
         m.data.copy_out(0, &mut h);
         let ip_hlen = usize::from(h[14] & 0x0f) * 4;
         let is_tcp4 = h[12..14] == [0x08, 0x00] && h[14] >> 4 == 4 && h[23] == 6;
-        let Some((cmd, ext)) = is_tcp4
-            .then(|| ring::tx::tso4(14 + ip_hlen, u32::from(m.hdr.tso_segsz)))
-            .flatten()
-        else {
+        // The TCP header's length, from its data offset.
+        let mut off = [0u8; 1];
+        if !is_tcp4 || m.len() < 14 + ip_hlen + 20 {
+            return Err(NoBufs);
+        }
+        m.data.copy_out(14 + ip_hlen + 12, &mut off);
+        let hdrlen = 14 + ip_hlen + usize::from(off[0] >> 4) * 4;
+        let mss = u32::from(m.hdr.tso_segsz);
+        if !ring::tx::tso_fits(m.len(), hdrlen, mss) {
+            return Err(NoBufs);
+        }
+        let Some((cmd, ext)) = ring::tx::tso4(14 + ip_hlen, mss) else {
             return Err(NoBufs);
         };
         self.send_mapped(m, ext, cmd)
