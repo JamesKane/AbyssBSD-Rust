@@ -348,15 +348,28 @@ developer live stick through the Startup Manager, runs everything from the stick
 over ssh as root by key. Only the stick is ever written: never the internal SSD, macOS, or the
 firmware's boot settings.
 
-- **The stick.** `cargo xtask --remote image --arch x86_64 --release --root board
-  --authorized-key "$(cat ~/.ssh/id_ed25519.pub)"` builds `disk-board.img`:
+- **The stick.** `ABYSS_ROOT_FREE=16g ABYSS_REMOTE_DIR=abyss/src-macpro cargo xtask --remote image
+  --arch x86_64 --release --root board --authorized-key "$(cat ~/.ssh/id_ed25519.pub)"` builds
+  `disk-board.img`:
   - a GPT disk with a FAT32 ESP (`efiboot0`), the loader at `\EFI\BOOT\BOOTX64.EFI` and the
     kernel at `EFI/ABYSS/KERNEL`;
   - a UFS2 root (`rootfs0`) with all of FreeBSD 15.1's `base.txz`;
   - DHCP on every interface, and sshd letting root in by key only.
 
   It is the analogue of the fork's `live-image.sh --ssh-key --stay`. **The owner writes it to a
-  dedicated USB stick with `dd`**, which is the fork's step. The stick's serial number goes in
+  dedicated USB stick with `dd`**, which is the fork's step.
+- **Sized for packages.** `pkg` installs into the root (MP6), so the root is made with room to spare:
+  - `ABYSS_ROOT_FREE` is `makefs -b`, the free space left in the UFS2 root; by default only 25%;
+  - MP6's set, measured from the FreeBSD 15.1 package catalogue on the build server, is about 3 GB
+    installed (LLVM 19 alone is 1.77 GiB, which Mesa's software renderers need), plus `pkg`'s cache
+    of what it downloaded;
+  - **16 GiB free** holds that several times over, for development tools and logs, in an image of
+    about 18 GB, so the stick is **32 GB or larger**. The graphics dev loop's 6 GiB held Sway, foot,
+    fastfetch, glmark2 and Mesa.
+
+  The image is written whole with `dd`, not sparsely: a sparse write would leave the stick's old
+  bytes wherever the image has zeros, and some of those blocks may be file-system metadata. The root does not grow to fill a larger stick on its own; `growfs` on a mounted root is
+  not something AbyssBSD has been tested with. The stick's serial number goes in
   HARDWARE.md §9 at its first boot (`usbconfig`, `camcontrol inquiry -S`).
 - **Booting it.** Power on holding Option, then pick "EFI Boot". macOS stays the default, so a
   reboot without Option goes back to macOS. Rules:
@@ -400,6 +413,24 @@ firmware's boot settings.
   Neither changes the default away from macOS.
 - **No watchdog.** The Patsburg watchdog is disabled by the firmware, so a hung kernel needs the
   power button, and the saved log tells why (§8, question 7).
+
+### MP6: Sway and vkmark from the stick
+
+The track's aim beyond its exit. The first step is software rendering: the Mac Pro's D700s have
+no driver until Southern Islands comes under M-G (§6).
+- `pkg install sway foot fastfetch seatd vkmark glmark2 grim mesa-dri mesa-libs dejavu`, from
+  FreeBSD 15.1's packages (`IGNORE_OSVERSION=yes`, as `cargo xtask graphics --install` does). It
+  needs the network (MP5) and the stick's free space.
+- Sway on `gop-kms`: the boot framebuffer, which is the GOP's one mode, 2560×1440 on the
+  Thunderbolt display. A USB keyboard and mouse go on the FL1100.
+- glmark2 on llvmpipe, then **vkmark on lavapipe**: `mesa-dri` is built with `swrast_vk`. That is
+  M-G.1's acceptance on a physical amd64 machine, as `tests/graphics/` takes it in QEMU, with
+  vkmark added. Its screenshot goes with the run.
+- Watch: the one-off PAM failure after the first large `pkg install` in the graphics dev loop.
+  It was not reproduced afterwards.
+
+Accelerated Sway and vkmark (radeonsi, RADV) need the native Southern Islands driver (§6). Whether
+Mesa's RADV takes GCN 1 (GFX6) as FreeBSD packages build it is to check before that work starts.
 
 ### Exit
 

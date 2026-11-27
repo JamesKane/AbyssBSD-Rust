@@ -309,6 +309,9 @@ milestones and what is already measured: [MACPRO.md](MACPRO.md).
   through the Startup Manager, the thermal gate (no sustained load before `asmc`'s fan policy runs),
   `bge` and an unattended deploy loop.
 
+Beyond the exit (MP6): Sway, glmark2 and vkmark from packages on the stick, software-rendered on
+`gop-kms` until Southern Islands graphics (M-G).
+
 **Exit:** `x86_64-multiuser` from the framebuffer and a USB keyboard; fsx and `fsck_ffs` on the
 stick; the device tree against FreeBSD's `devinfo`; 30 minutes of full CPU load with the fan policy.
 Correctness only, no performance gate. Southern Islands graphics is M-G's, later.
