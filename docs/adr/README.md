@@ -33,6 +33,7 @@ Status values: **Proposed** (awaiting owner confirmation) · **Accepted** · **S
 | [0024](0024-zones-as-exact-layout-classes.md) | Zones are exact-layout classes of the one heap, declared at build time; `Zone<T>` and `ZBox<T>` are not built | Accepted |
 | [0025](0025-graphics-abi-and-native-drivers.md) | Graphics: the Direct Rendering Manager interface as FreeBSD's ports see it, implemented natively, with no LinuxKPI | Accepted |
 | [0026](0026-desktop-scoria.md) | The desktop is Scoria, a Rust tiling Wayland desktop built in this workspace; ADR-0002 amended for C libraries in `desk/` | Accepted; amended 2026-11-23 |
+| [0027](0027-platform-osi-and-device-properties.md) | Platforms may change `_OSI` before the DSDT loads and supply typed device properties; firmware identity includes SMBIOS (amends ADR-0020) | Accepted |
 
 Template:
 

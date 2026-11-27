@@ -10,6 +10,7 @@ scope and firmware floor are [ADR-0023](adr/0023-hardware-scope-consumer-decade.
 |---|---|
 | Disk AbyssBSD may write | **An external USB 3 disk** (ESP + root), identified by serial number as the Orange Pi's Samsung is. The internal Apple SSD holds macOS 12.7.6 and is never written: `ahci` may attach to it, `deploy` refuses it by serial number |
 | Sharing the machine | **QEMU and host tests first.** The FreeBSD-fork project (`../AbyssBSD`) is running thermal experiments on the machine now, booted from its own FreeBSD stick. This track goes to the machine only when that work is done or the owner hands it over. The full ground-truth capture (§5, MP0) is asked of that project, since it already has FreeBSD running there |
+| Where the fan table lives | **`platform/apple-mac` states it as typed properties of the SMC's `APP0001` node; `asmc` holds all the behavior** ([ADR-0027](adr/0027-platform-osi-and-device-properties.md), which also settles the `_OSI` hook). A Mac with no such properties runs the SMC's own curve |
 | Roadmap placement | **Its own track**, parallel to P10/P11. Per ADR-0023 a Tier 2 machine is checked for correctness, booted at milestone exits, and gates nothing. It has no performance gate |
 
 ## 2. What is already measured
@@ -81,8 +82,9 @@ The clean-room specification for all of this is `~/Projects/OS/chinese-wall/spec
 1. **Thermal comes first.** No sustained load on the Mac Pro (stress, kyua, a build, fsx) until
    `asmc` runs the fan floor policy. Until then, boots are short and interactive. The SMC's own
    PROCHOT protects the CPU; nothing protects undriven GPUs except the fan.
-2. **"Nothing special."** No `loader.conf` knob makes this machine work. Where the model's fan
-   table lives is open (§8, question 6).
+2. **"Nothing special."** No `loader.conf` knob makes this machine work. The model's fan table and
+   limit keys are device properties from `platform/apple-mac` (ADR-0027), so `asmc` and `sys/acpi`
+   name no model.
 3. **FreeBSD 16-CURRENT is the behavioral reference** for `_OSI("Darwin")` (ADR-0023 §4) and for
    `asmc`. The fork's additions are the reference for the fan policy. macOS is observation only:
    what it did is a measured baseline, never a source.
@@ -145,8 +147,8 @@ Each milestone runs only the tests it touches (targeted runs). The full gates ru
 - `platform/apple-mac`: matches the SMBIOS maker `Apple Inc.` or `Apple Computer, Inc.`, as
   `acpi_apple_darwin_osi` does. It supplies the `_OSI` change (answer `Darwin`, drop the Windows
   strings) before the DSDT loads. The tunable is `hw.acpi.apple_darwin_osi`, default on.
-- The ADR-0020 interface change: `FirmwareIdentity` gains the SMBIOS maker and product, and a hook
-  returns `_OSI` changes before `applies`. That is an amendment to ADR-0020 (or a new ADR) first.
+- The interface change of ADR-0027: `FirmwareIdentity` gains the SMBIOS identity, the `osi` hook
+  runs before the DSDT loads, and the generic device-property applier lands with its first user.
 - `lib/acpi-tables` and `lib/aml` against `macpro61`: the old FADT and MADT revisions, `OSYS` =
   10000 after `_INI`, and the namespace FreeBSD 16-CURRENT shows (`devinfo`) for both `_OSI`
   answers.
@@ -162,9 +164,10 @@ Each milestone runs only the tests it touches (targeted runs). The full gates ru
   automatic with the firmware minimum at shutdown, reboot **and panic** (a warm reboot otherwise
   carries a raised floor into the next OS); bounded transactions; a failed sensor counted as hot.
   The model table (fwmin 790, top 2600, the sensor keys and curve points, the `MSLT`/`MSTc`/`MSLG`
-  keys) goes where §8 question 6 decides. The platform-limit state is exported
-  (`dev.asmc.0.plimit.*`) and published as a kernel event, with the fork's off hysteresis (15
-  samples), for a GPU driver to consume later.
+  keys) is `APP0001`'s device properties from `platform/apple-mac` (ADR-0027); `asmc` reads them
+  through the `_DSD` property accessor and runs the SMC's own curve when there are none. The
+  platform-limit state is exported (`dev.asmc.0.plimit.*`) and published as a kernel event, with
+  the fork's off hysteresis (15 samples), for a GPU driver to consume later.
   Host tests drive a fake SMC built from the fork's key dumps: macOS mode, cold boot, latch and
   release.
 - `bge` for the BCM57762, from FreeBSD's `if_bge.c`, scoped to the 57765 family (its ASIC revision
@@ -246,11 +249,3 @@ hook's hysteresis was still being tuned). Before MP3's `asmc` work and again bef
 4. Whether the firmware leaves the APIC in x2APIC mode.
 5. Whether `MSLG` reaches 15 only when the GPUs respond (it peaked at 2 under FreeBSD and reached
    15 under macOS). This matters for how a GPU driver maps it to levels, not for this track.
-6. **Where the fan table lives.** ADR-0020 §7 says a platform crate changes what the firmware
-   says, a driver decides what the hardware does, and a driver never matches on a board. A fan
-   curve keyed on `MacPro6,1` sits across that line. FreeBSD and the fork keep it as a model table
-   inside `asmc`. Options: (a) as FreeBSD, a table in `asmc`, an explicit exception to ADR-0020 §7;
-   (b) `platform/apple-mac` supplies the table as data (sensor keys, curve points, limits) and `asmc`
-   holds all the behavior, which extends ADR-0020 beyond ACPI data. **Recommendation: (b)**, by an
-   ADR-0020 amendment written with MP2's `_OSI` change, so the driver stays board-neutral and the
-   next Mac's table is data only.

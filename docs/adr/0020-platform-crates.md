@@ -1,7 +1,9 @@
 # ADR-0020: Platform knowledge in per-SoC crates behind one interface; the ACPI bus names no vendor
 
 - Status: Accepted; decision 6 refined by [ADR-0021](0021-driver-selection-and-modules.md)
-  (2026-11-10: every platform of the kernel's ISA is built in)
+  (2026-11-10: every platform of the kernel's ISA is built in); amended by
+  [ADR-0027](0027-platform-osi-and-device-properties.md) (2026-11-27: SMBIOS in the firmware
+  identity, `_OSI` changes before the DSDT loads, typed device properties, firmware-family crates)
 - Date: 2026-11-09
 
 ## Context

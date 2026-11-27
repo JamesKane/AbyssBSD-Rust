@@ -357,6 +357,8 @@ data and widened. It may:
 | **Add dependency edges** (§6.1) and provider bindings (§9.3) | Q8B: which power domain, clocks, and interconnect paths each `PEP0` consumer needs |
 | **Describe reserved memory** (§8.4) | Carveouts, firmware shared memory |
 | **Declare a shared range** (§8.1) | Sky1: the SCMI shared memory (`CIXHA004`, `CIXHA005`) is the first 128 bytes of its mailbox's window |
+| **Attach device properties**, typed as `_DSD`'s; firmware `_DSD` wins ([ADR-0027](adr/0027-platform-osi-and-device-properties.md)) | Mac Pro: the SMC's (`APP0001`) fan-floor sensor keys, curve and limits, where the firmware has no `_TZ` |
+| **Change `_OSI`** before the DSDT loads (ADR-0027) | Apple Macs: answer `Darwin` and drop the Windows strings, as FreeBSD's `acpi_apple_darwin_osi` |
 
 An extractor for vendor tables that live in AML (CIX's `CLKT`, `RSTL`, `RSNL`, `DLKL`, `RSVL`)
 also belongs here: it evaluates them at graph build and produces the same typed entries, as do a
