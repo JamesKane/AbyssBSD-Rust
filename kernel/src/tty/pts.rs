@@ -208,7 +208,10 @@ impl Master {
                         done += uio.copy_out(&[TIOCPKT_DATA])?;
                         st = self.tty.st.lock(s);
                     }
+                    // `ttydisc_getc_uio`: the pieces, then the writers
+                    // woken once, even after a fault.
                     let mut buf = [0u8; CHUNK * 4];
+                    let mut r = Ok(());
                     while uio.resid() > 0 {
                         let want = uio.resid().min(buf.len());
                         let n = self.tty.getc(&mut st, &mut buf[..want]);
@@ -217,11 +220,19 @@ impl Master {
                         }
                         self.tty.mirror(&st);
                         drop(st);
-                        done += uio.copy_out(&buf[..n])?;
+                        let copied = uio.copy_out(&buf[..n]);
                         st = self.tty.st.lock(s);
+                        match copied {
+                            Ok(c) => done += c,
+                            Err(e) => {
+                                r = Err(e);
+                                break;
+                            }
+                        }
                     }
+                    self.tty.getc_done(&mut st);
                     self.tty.mirror(&st);
-                    return Ok(done);
+                    return r.map(|()| done);
                 }
                 if self.sc.finished.load(Ordering::Acquire) {
                     return Ok(0);

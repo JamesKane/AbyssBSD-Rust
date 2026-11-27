@@ -526,11 +526,22 @@ impl Discipline {
 
     /// Moves queued output into `buf` for the device (`ttydisc_getc`);
     /// nothing while output is stopped. Also says whether writers should
-    /// be woken: the queue is below its low watermark after filling, or
-    /// has room (`ttydisc_wakeup_watermark`).
+    /// be woken ([`Discipline::wakeup_watermark`]).
     pub fn getc(&mut self, buf: &mut [u8]) -> (usize, bool) {
         if self.stopped {
             return (0, false);
+        }
+        let n = self.take(buf);
+        (n, self.wakeup_watermark())
+    }
+
+    /// Moves queued output into `buf` (`ttyoutq_read`), saying nothing to
+    /// writers: a read of many pieces (`ttydisc_getc_uio`) asks
+    /// [`Discipline::wakeup_watermark`] once, at its end, so that writers
+    /// do not refill the queue under a reader still taking it.
+    pub fn take(&mut self, buf: &mut [u8]) -> usize {
+        if self.stopped {
+            return 0;
         }
         let n = self.outq.len().min(buf.len());
         let (a, b) = self.outq.as_slices();
@@ -539,8 +550,14 @@ impl Discipline {
         buf[first..n].copy_from_slice(&b[..n - first]);
         self.outq.drain(..n);
         Self::consumed(&mut self.out_skip, n, self.outq.is_empty(), OUTQ_BLOCK);
+        n
+    }
+
+    /// Whether writers should be woken (`ttydisc_wakeup_watermark`): the
+    /// queue is below its low watermark after filling, or has room.
+    pub fn wakeup_watermark(&mut self) -> bool {
         let room = self.output_room();
-        let wake = if self.hiwat_out {
+        if self.hiwat_out {
             if room < self.out_low {
                 false
             } else {
@@ -549,8 +566,7 @@ impl Discipline {
             }
         } else {
             room != 0
-        };
-        (n, wake)
+        }
     }
 
     /// Queues `bytes` whole or not at all (`ttyoutq_write_nofrag`).

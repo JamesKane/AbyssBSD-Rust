@@ -206,13 +206,23 @@ impl Output<'_> {
     /// Takes queued output (`ttydisc_getc`), waking writers once there is
     /// room enough.
     pub(crate) fn getc(&mut self, buf: &mut [u8]) -> usize {
-        let (n, wake) = self.d.getc(buf);
-        if wake {
+        // Stopped: nothing, and no writer hears (`ttydisc_getc`).
+        if self.d.stopped() {
+            return 0;
+        }
+        let n = self.d.take(buf);
+        self.wakeup_watermark();
+        n
+    }
+
+    /// Wakes writers once there is room enough
+    /// (`ttydisc_wakeup_watermark`).
+    pub(crate) fn wakeup_watermark(&mut self) {
+        if self.d.wakeup_watermark() {
             // The writers' condition first, then the writers.
             self.tty.mirror_disc(self.d);
             self.tty.wakeup(false, true);
         }
-        n
     }
 }
 
@@ -650,13 +660,20 @@ impl Tty {
     }
 
     /// Takes queued output for a device outside [`Driver::outwakeup`] (a
-    /// pseudo-terminal's master read), waking writers at the watermark.
+    /// pseudo-terminal's master read, `ttyoutq_read_uio`), one piece of a
+    /// read: writers hear once the read is done ([`Tty::getc_done`]).
     fn getc(&self, st: &mut State, buf: &mut [u8]) -> usize {
+        st.d.take(buf)
+    }
+
+    /// The end of such a read: writers wake at the watermark
+    /// (`ttydisc_getc_uio`'s `ttydisc_wakeup_watermark`).
+    fn getc_done(&self, st: &mut State) {
         Output {
             tty: self,
             d: &mut st.d,
         }
-        .getc(buf)
+        .wakeup_watermark();
     }
 
     /// Typed bytes are in (`ttydisc_rint_done`): readers wake, and the
