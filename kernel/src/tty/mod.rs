@@ -103,6 +103,18 @@ impl input::Consumer for ConsoleInput {
 /// `TTY_STACKBUF`), and from the discipline to a device.
 const CHUNK: usize = tty::STACKBUF;
 
+/// Bytes a writer's output and a master's read move per hold of the
+/// terminal's lock: four of FreeBSD's `TTY_STACKBUF` chunks. FreeBSD drops
+/// the lock for each chunk's copy, and there a reader waiting on the lock
+/// often gets it during the writer's copy (on the 7900X its writer spins
+/// on the lock about as often as its reader, and its copies weigh in its
+/// profile). Here a reader spinning with backoff (as `lock_delay`) seldom
+/// found the lock free between a writer's chunks: `pty.relay` at 256 bytes, the
+/// relay spun a third of its time and took 12 us per 4 KB, stock 6.6; at
+/// 1024, 6.7. Taking the queue's blocks off to copy unlocked
+/// (`ttyoutq_read_uio`) was worse (10.2 us): each block is another hold.
+const COPY: usize = CHUNK * 4;
+
 /// `NO_PID`: what `TIOCGPGRP` reports with no foreground group.
 const NO_PID: i32 = 100_000;
 
@@ -1258,7 +1270,7 @@ impl Tty {
         if self.zombie.load(Ordering::Acquire) {
             return Err(Errno::EIO);
         }
-        let mut buf = [0u8; CHUNK];
+        let mut buf = [0u8; COPY];
         let mut done = 0;
         let mut result = Ok(());
         'chunks: while uio.resid() > 0 {

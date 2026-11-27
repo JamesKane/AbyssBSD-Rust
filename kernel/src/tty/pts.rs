@@ -29,7 +29,7 @@ use sched::{Sleepable, WaitQueue};
 use sync::SpinLock;
 use vfs::Uio;
 
-use super::{CHUNK, Driver, Make, NO_PID, Output, Tty, get_int, put_int};
+use super::{CHUNK, COPY, Driver, Make, NO_PID, Output, Tty, get_int, put_int};
 
 /// The numbers in use (`pts_pool`).
 static UNITS: SpinLock<Vec<bool>> = SpinLock::new(Vec::new());
@@ -210,7 +210,7 @@ impl Master {
                     }
                     // `ttydisc_getc_uio`: the pieces, then the writers
                     // woken once, even after a fault.
-                    let mut buf = [0u8; CHUNK * 4];
+                    let mut buf = [0u8; COPY];
                     let mut r = Ok(());
                     while uio.resid() > 0 {
                         let want = uio.resid().min(buf.len());
