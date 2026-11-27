@@ -567,7 +567,23 @@ stock 15.1. Open:
   found and the neighbor is unexpired; the entry's `used` flag, which ARP's timer reads, is set without
   the lock. No route lookup, epoch section, network lock or neighbor search per datagram, and the
   driver's `Arc` clone is gone from that path: `udp.tx.small` 905 to 767 ns (10.4 million datagrams in 8 s).
-  TCP's output still takes the full path.
+  TCP's output still takes the full path. A datagram up to 256 bytes is copied in on the stack, and a
+  `bpf` program's loads read the first mbuf when the bytes are there: 767 to 735 ns (stock 700 to 860).
+  **Receive mitigation (2026-11-27):** `tcp.cpu.rx` was 3631 ns a segment against stock's 803 (4.5x) with
+  the `rge` interrupt at about 86,000 a second, one or two frames each. Each interrupt cost about 3 of its
+  4.7 us in device register accesses (the status read that acknowledges, the mask, the unmask), not in the
+  stack. Stock's `re` gets the same relief from its interrupt moderation timer; `rge` has none that holds
+  at this rate, so the driver does what a NAPI-style poller does: when an interrupt arrives within 40 us of
+  the last one's end and took frames, the handler leaves the controller masked and looks at the ring every
+  30 us (a timed wait, at most 64 rounds, until a round finds nothing), then acknowledges and unmasks.
+  Interrupts fell to about 2,000 a second; `tcp.cpu.rx` 3631 to about 1080 ns (1.35x, noisy) and the
+  component `tcp` 0.932. A frame that arrives in one slot piece is copied once, from the slot into mbufs
+  (was three copies and two allocations). Lessons: (1) the status must be acknowledged again before the
+  unmask; skipping that second acknowledge left bits set and the next frame's interrupt was lost until the
+  one-second tick (`tcp.connect.net` 4x, 26 ms stalls); (2) the poll period is a latency tax on ACKs: 100 us
+  made `sendfile` 1.67x, 30 us with the 40 us gap brought it back to 1.000. Measured only on the RTL8125D;
+  the RTL8126, `igc` and `virtio-net` do not poll. Left: software LRO for the per-segment stack cost
+  (`tcp.cpu.rx` 1.35x, `tcp.cpu.tx` 1.4 to 1.6x and noisy, `tcp.rr.net.p50` 1.06x).
   **sig, syscall, vm (2026-11-26, audited against FreeBSD's source):** `p4` at 3000 MHz went from
   `sig.deliver` 1.23 to 1.13, `getpid` 1.06 to 1.04, `vm.fault.anon` 1.13 to 1.07, `vm.fault.cow` 1.13 to
   1.08, `vm.mmap` 1.06 to 1.05 (frame filled in place, `sigreturn` without a save and a second zeroing,
