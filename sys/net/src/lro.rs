@@ -16,13 +16,12 @@
 //! after what is held of it, in order. Nothing merges while the VNET
 //! forwards (`V_ipforwarding`).
 //!
-//! One difference: a segment without data goes up as it came (after what
-//! is held of its connection), where `tcp_lro_condense` folds an ACK that
-//! advances into the held frame. Folded, the ACKs of a connection this
-//! side sends on made the peer see holes in what was sent: on the X870E
-//! to the build server, 10,900 retransmissions in 5 s and 365 Mbit/s,
-//! against 60 and 2 Gbit/s unfolded (2026-11-27; why stock does not
-//! suffer it is not known yet).
+//! An ACK without data folds into what is held of its connection as
+//! `tcp_lro_condense` folds it: the held frame takes its acknowledgement,
+//! window and timestamps, so a sender's ACKs of a pass go up as one.
+//! (Folding was off for a while: the build server then saw holes in what
+//! the X870E sent, but those were `rge` refusing TSO frames longer than a
+//! jumbo frame, which more folding made longer.)
 //!
 //! FreeBSD's drivers flush at the end of each receive pass, a pass of
 //! about a dozen frames behind the device's interrupt moderation. A driver
@@ -159,8 +158,8 @@ impl Lro {
             return;
         };
         let at = self.entries.iter().position(|e| e.flow == s.flow);
-        if s.flags & !(TH_ACK | TH_PUSH) != 0 || s.odd_options || s.data_len == 0 {
-            // FIN, RST, URG, a SACK, an ACK alone: up in order, unmerged.
+        if s.flags & !(TH_ACK | TH_PUSH) != 0 || s.odd_options {
+            // FIN, RST, URG, a SACK: up in order, unmerged.
             if let Some(i) = at {
                 self.flush(i, up);
             }

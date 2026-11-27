@@ -194,9 +194,10 @@ fn fin_gap_and_dup_ack_keep_order() {
 }
 
 #[test]
-fn acks_alone_go_up_as_they_came() {
+fn acks_fold_into_what_is_held() {
     let d = [3u8; 10];
     let mut lro = Lro::new();
+    // After data: the ACKs fold into it (`tcp_lro_condense`).
     let out = run(
         &mut lro,
         &[
@@ -213,7 +214,25 @@ fn acks_alone_go_up_as_they_came() {
             (s, a, d.len())
         })
         .collect();
-    assert_eq!(got, [(0, 10, 20), (20, 20, 0), (20, 30, 0)]);
+    assert_eq!(got, [(0, 30, 20)]);
+    // ACKs alone: one frame, the newest, and an older one dropped.
+    let out = run(
+        &mut lro,
+        &[
+            seg(2, 0, 100, &[]),
+            seg(2, 0, 200, &[]),
+            seg(2, 0, 150, &[]),
+            seg(2, 0, 300, &[]),
+        ],
+    );
+    let got: Vec<(u32, u32, usize)> = out
+        .iter()
+        .map(|m| {
+            let (s, a, d) = check(m);
+            (s, a, d.len())
+        })
+        .collect();
+    assert_eq!(got, [(0, 300, 0)]);
 }
 
 #[test]
