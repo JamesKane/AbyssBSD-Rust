@@ -51,7 +51,12 @@ cleanup() {
 }
 trap cleanup EXIT
 if [ $side = freebsd ]; then
+	# Another level first: cpufreq skips a write of the level it believes
+	# is current, and after boot it can believe the pinned one while the
+	# package boosts (2026-11-27: freq read 3000 with the cores at 5.47 GHz).
+	other=$(sysctl -n dev.cpu.0.freq_levels | tr ' ' '\n' | cut -d/ -f1 | grep -vx "$PIN" | head -1)
 	for c in $(jot "$(sysctl -n hw.ncpu)" 0); do
+		[ -z "$other" ] || sysctl -q dev.cpu.$c.freq=$other >/dev/null 2>&1 || true
 		sysctl -q dev.cpu.$c.freq=$PIN >/dev/null 2>&1 || true
 	done
 	sysctl -q hw.acpi.cpu.cx_lowest=C1 >/dev/null

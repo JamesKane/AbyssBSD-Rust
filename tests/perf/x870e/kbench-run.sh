@@ -21,7 +21,12 @@ fi
 # which has no boost) instead of the top one; AbyssBSD's side pins its
 # cores to the same clock (p2-x870e.sh, abyss.bench.pin_perf).
 top=$(sysctl -n dev.cpu.0.freq_levels | tr ' ' '\n' | cut -d/ -f1 | { if [ -n "${P2_PIN_MHZ:-}" ]; then grep -x "$P2_PIN_MHZ"; else head -1; fi; })
+# Another level first: cpufreq skips a write of the level it believes is
+# current, and after boot it can believe the pinned one while the package
+# boosts (2026-11-27: freq read 3000 with the cores at 5.47 GHz).
+other=$(sysctl -n dev.cpu.0.freq_levels | tr ' ' '\n' | cut -d/ -f1 | grep -vx "$top" | head -1)
 for c in $(jot "$(sysctl -n hw.ncpu)" 0); do
+	[ -z "$other" ] || sysctl -q dev.cpu.$c.freq=$other >/dev/null 2>&1 || true
 	sysctl -q dev.cpu.$c.freq=$top >/dev/null 2>&1 || true
 done
 sysctl -q hw.acpi.cpu.cx_lowest=C1 >/dev/null
