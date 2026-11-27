@@ -144,6 +144,7 @@ dependencies = [
 name = "apple-mac"
 version = "0.0.0"
 dependencies = [
+ "acpi-corpus",
  "acpi-platform",
  "aml",
 ]

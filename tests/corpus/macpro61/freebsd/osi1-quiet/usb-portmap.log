@@ -1,0 +1,57 @@
+start 19:57:24
+ugen1.1: <EHCI root HUB Intel> at usbus1, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=SAVE (0mA)
+ugen0.1: <XHCI root HUB (0x1b73)> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+ugen0.2: <Hub Genesys Logic, Inc.> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=SAVE (100mA)
+ugen1.2: <Integrated Rate Matching Hub Intel Corp.> at usbus1, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=SAVE (0mA)
+ugen0.4: <Natural Keyboard Elite Microsoft Corp.> at usbus0, cfg=0 md=HOST spd=LOW (1.5Mbps) pwr=ON (100mA)
+ugen1.3: <BCM2046B1 USB 2.0 Hub (part of BCM2046 Bluetooth) Broadcom Corp.> at usbus1, cfg=0 md=HOST spd=FULL (12Mbps) pwr=SAVE (94mA)
+ugen0.5: <Kingston DataTraveler 102/2.0 / HEMA Flash Drive 2 GB / PNY Attache 4GB Stick Toshiba Corp.> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (200mA)
+ugen1.6: <Bluetooth Host Controller Apple, Inc.> at usbus1, cfg=0 md=HOST spd=FULL (12Mbps) pwr=ON (0mA)
+ugen0.6: <Hub Genesys Logic, Inc.> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+ugen0.3: <Keychron M3 Keychron> at usbus0, cfg=0 md=HOST spd=FULL (12Mbps) pwr=ON (100mA)
+== 20:00:48
+> ugen0.7: <Basic Optical Mouse Microsoft Corp.> at usbus0, cfg=0 md=HOST spd=LOW (1.5Mbps) pwr=ON (100mA)
+ugen0.7: <Microsoft Microsoft Basic Optical Mouse> at usbus0
+usbhid5 on uhub1
+== 20:00:51
+< ugen0.7: <Basic Optical Mouse Microsoft Corp.> at usbus0, cfg=0 md=HOST spd=LOW (1.5Mbps) pwr=ON (100mA)
+ugen0.7: <Microsoft Microsoft Basic Optical Mouse> at usbus0 (disconnected)
+usbhid5: at uhub1, port 4, addr 9 (disconnected)
+== 20:01:06
+< ugen0.2: <Hub Genesys Logic, Inc.> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=SAVE (100mA)
+< ugen0.4: <Natural Keyboard Elite Microsoft Corp.> at usbus0, cfg=0 md=HOST spd=LOW (1.5Mbps) pwr=ON (100mA)
+< ugen0.6: <Hub Genesys Logic, Inc.> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+< ugen0.3: <Keychron M3 Keychron> at usbus0, cfg=0 md=HOST spd=FULL (12Mbps) pwr=ON (100mA)
+ugen0.6: <GenesysLogic USB3.1 Hub> at usbus0 (disconnected)
+uhub5: at uhub1, port 5, addr 6 (disconnected)
+uhub5: detached
+ugen0.2: <GenesysLogic USB2.1 Hub> at usbus0 (disconnected)
+uhub2: at uhub1, port 1, addr 1 (disconnected)
+ugen0.3: <Keychron Keychron M3> at usbus0 (disconnected)
+usbhid0: at uhub2, port 3, addr 8 (disconnected)
+usbhid1: at uhub2, port 3, addr 8 (disconnected)
+usbhid2: at uhub2, port 3, addr 8 (disconnected)
+usbhid3: at uhub2, port 3, addr 8 (disconnected)
+ugen0.4: <vendor 0x045e Microsoft Natural Keyboard Elite> at usbus0 (disconnected)
+usbhid4: at uhub2, port 4, addr 3 (disconnected)
+uhub2: detached
+== 20:01:12
+> ugen0.2: <Hub Genesys Logic, Inc.> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+> ugen0.3: <Hub Genesys Logic, Inc.> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=SAVE (100mA)
+> ugen0.4: <Keychron M3 Keychron> at usbus0, cfg=0 md=HOST spd=FULL (12Mbps) pwr=ON (100mA)
+> ugen0.6: <Natural Keyboard Elite Microsoft Corp.> at usbus0, cfg=0 md=HOST spd=LOW (1.5Mbps) pwr=ON (100mA)
+ugen0.2: <GenesysLogic USB3.1 Hub> at usbus0
+uhub2 on uhub1
+uhub2: <GenesysLogic USB3.1 Hub, class 9/0, rev 3.20/6.63, addr 10> on usbus0
+uhub2: 4 ports with 4 removable, self powered
+ugen0.3: <GenesysLogic USB2.1 Hub> at usbus0
+uhub5 on uhub1
+uhub5: <GenesysLogic USB2.1 Hub, class 9/0, rev 2.10/6.63, addr 11> on usbus0
+uhub5: 4 ports with 4 removable, self powered
+ugen0.4: <Keychron Keychron M3> at usbus0
+usbhid0 on uhub5
+usbhid1 on uhub5
+usbhid2 on uhub5
+usbhid3 on uhub5
+ugen0.6: <vendor 0x045e Microsoft Natural Keyboard Elite> at usbus0
+usbhid4 on uhub5

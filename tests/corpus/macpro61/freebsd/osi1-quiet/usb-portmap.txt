@@ -1,0 +1,21 @@
+USB 3 port map, 2013 Mac Pro (MacPro6,1), FreeBSD, 2026-11-27.
+
+All four back-panel USB 3 ports are on the Fresco Logic FL1100 xHCI
+(xhci0, pci3 device 0.0, usbus0). Its root hub, uhub1, has 8 ports:
+1-4 are the USB 2 halves and 5-8 the SuperSpeed halves of the four
+physical ports. The Intel Patsburg EHCI (ehci0, usbus1) has only internal
+devices behind its rate-matching hub: the Broadcom BCM20702 Bluetooth hub.
+
+Root-hub port -> what was plugged in (devinfo -v, "hubaddr=1 port=N"):
+  port 1 (+5 SS) : Genesys Logic hub (USB 2.1 half on 1, USB 3.1 half on 5),
+                   with the keyboards behind it; unplugged and replugged at
+                   20:01:06-20:01:12 and re-enumerated cleanly
+  port 2         : the boot stick (Kingston DataTraveler, USB 2); not moved,
+                   since unplugging it would crash the running system
+  port 4         : test mouse, plugged at 20:00:48 and unplugged at 20:00:51
+  port 3 (+7 SS) : by elimination, the physical port that did not respond
+                   to a plugged-in device. Nothing was logged for it: no
+                   attach and no port error in dmesg.
+
+Which physical port on the back is which was not recorded.
+Raw log: usb-portmap.log.

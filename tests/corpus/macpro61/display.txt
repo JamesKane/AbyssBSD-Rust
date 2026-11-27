@@ -1,0 +1,9 @@
+Boot display, 2013 Mac Pro (MacPro6,1), 2026-11-27, reported by the user.
+
+The monitor is on a Thunderbolt (mini DisplayPort) port, not on HDMI, and
+that is the output that lights up at boot. Which of the six Thunderbolt
+ports it is was not recorded.
+
+The loader's `gop list` on that boot (the monitor on Thunderbolt) offers one
+mode only:
+  mode 0: 2560x1440x32, stride=2560

@@ -1,0 +1,10 @@
+kldload: can't load ichwd: module already loaded or in kernel
+kldload rc=1
+ichwd0: <Intel Patsburg watchdog timer> on isa0
+ichwd0: ICH WDT present but disabled in BIOS or hardware
+device_attach: ichwd0 attach returned 6
+ichwd0: <Intel Patsburg watchdog timer> on isa0
+ichwd0: ICH WDT present but disabled in BIOS or hardware
+device_attach: ichwd0 attach returned 6
+dev.ichwd.%parent: 
+dev.ichwd.%parent: 

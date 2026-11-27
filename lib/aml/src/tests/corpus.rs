@@ -29,19 +29,20 @@ pub(crate) const DSDTS: &[(&str, &[u8])] = &[
     ("radxa-q8b", corpus!("radxa-q8b/dsdt.dat")),
     ("opi6p", corpus!("opi6p/dsdt.dat")),
     ("x870e", corpus!("x870e/dsdt.dat")),
+    ("macpro61", corpus!("macpro61/dsdt.dat")),
 ];
 
 /// The vendor firmware, whose AML nests deeper than the default limits allow
 /// (see [`stack_budgets_for_real_firmware`]).
 pub(crate) fn real_firmware(name: &str) -> bool {
-    matches!(name, "radxa-q8b" | "opi6p" | "x870e")
+    matches!(name, "radxa-q8b" | "opi6p" | "x870e" | "macpro61")
 }
 
 /// The DSDTs whose methods call into their SSDTs (the X870E's `_INI`s use
 /// AMD's CPM library in SSDT10), so they run only with them loaded: see
 /// `x870e_devices_match_linux`.
 fn needs_ssdts(name: &str) -> bool {
-    name == "x870e"
+    matches!(name, "x870e" | "macpro61")
 }
 
 pub(crate) fn load(dsdt: &[u8]) -> (Interpreter, FakeHost) {
@@ -126,6 +127,8 @@ fn integer_width_follows_dsdt_revision() {
         ("opi6p", IntWidth::W64),
         // AMI writes revision 202.
         ("x870e", IntWidth::W64),
+        // Apple's DSDT is revision 1: 32-bit integers.
+        ("macpro61", IntWidth::W32),
     ] {
         let (i, _) = load(dsdt(name));
         assert_eq!(i.int_width(), w, "{name}");
@@ -913,4 +916,126 @@ fn x870e_setup_variables_decide_the_namespace() {
     let errors: Vec<_> = r.warnings.iter().map(|w| w.error.clone()).collect();
     assert_eq!(errors, [Error::AlreadyExists, Error::AlreadyExists]);
     node(&i, "\\_GPE._L16");
+}
+
+/// The Mac Pro (Late 2013)'s AML (the DSDT and its eight SSDTs: SATA,
+/// SMC, the FL1100's and Patsburg's USB, S3, Thunderbolt, SD, and CPU
+/// power), loaded with `_OSI` answering `osi`. Its `\_SB.PCI0._INI`
+/// calls into the Thunderbolt SSDT, so it runs only with them loaded.
+fn load_macpro(osi: &[&str]) -> (Interpreter, FakeHost) {
+    let config = Config {
+        limits: crate::Limits::for_stack(64 * 1024),
+        osi: osi.iter().map(|s| std::string::String::from(*s)).collect(),
+        ..test_config()
+    };
+    let mut i = Interpreter::new(config);
+    let mut h = FakeHost::default();
+    for t in [
+        corpus!("macpro61/dsdt.dat"),
+        corpus!("macpro61/ssdt1.dat"),
+        corpus!("macpro61/ssdt2.dat"),
+        corpus!("macpro61/ssdt3.dat"),
+        corpus!("macpro61/ssdt4.dat"),
+        corpus!("macpro61/ssdt5.dat"),
+        corpus!("macpro61/ssdt6.dat"),
+        corpus!("macpro61/ssdt7.dat"),
+        corpus!("macpro61/ssdt8.dat"),
+    ] {
+        let r = i.load_table(t, &mut h).unwrap();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+    (i, h)
+}
+
+/// What FreeBSD 16 answers on an Apple machine (`acpi_apple_darwin_osi`):
+/// the feature group string and Darwin.
+const DARWIN: &[&str] = &["Extended Address Space Descriptor", "Darwin"];
+
+#[test]
+fn macpro_tables_load_and_initialize_under_both_answers() {
+    for osi in [DARWIN, crate::FREEBSD_OSI] {
+        let (mut i, mut h) = load_macpro(osi);
+        assert_eq!(i.int_width(), IntWidth::W32, "DSDT revision 1");
+        let errors = i.initialize(&mut h);
+        assert!(errors.is_empty(), "{errors:?}");
+        for space in [
+            RegionSpace::SystemMemory,
+            RegionSpace::SystemIo,
+            RegionSpace::PciConfig,
+        ] {
+            let (_, errors) = i.run_reg(space, &mut h);
+            assert!(errors.is_empty(), "{errors:?}");
+        }
+        for d in i.devices() {
+            i.sta(d, &mut h).unwrap();
+            i.crs(d, &mut h).unwrap();
+        }
+        assert!(i.peak_stack() <= i.config().limits.stack_budget);
+    }
+}
+
+/// `\_SB.PCI0._INI` sets `OSYS` (a field of the firmware's `GNVS` region)
+/// from `_OSI`: 10000 for Darwin, else 2012 by the Windows strings; the
+/// firmware's 296 `OSDW()` checks read it.
+#[test]
+fn macpro_osys_follows_the_darwin_answer() {
+    for (osi, osys, osdw) in [(DARWIN, 10000, 1), (crate::FREEBSD_OSI, 2012, 0)] {
+        let (mut i, mut h) = load_macpro(osi);
+        assert!(i.initialize(&mut h).is_empty());
+        assert_eq!(
+            i.evaluate_path("\\OSYS", Vec::new(), &mut h).unwrap(),
+            Value::Integer(osys)
+        );
+        assert_eq!(
+            i.evaluate_path("\\OSDW", Vec::new(), &mut h).unwrap(),
+            Value::Integer(osdw)
+        );
+    }
+}
+
+/// Without Darwin, each Thunderbolt bridge's `RMCR` (from `_INI`) finds no
+/// controller behind its upstream ports and runs `RMC1`: the link disabled,
+/// 2 s, the controller's power off (GPIO 45). That is why FreeBSD with
+/// `hw.acpi.apple_darwin_osi=0` sees none of the 21 Thunderbolt functions
+/// (`tests/corpus/macpro61`). Under Darwin nothing is cut.
+#[test]
+fn macpro_thunderbolt_is_kept_powered_only_for_darwin() {
+    for (osi, cut) in [(DARWIN, 0), (crate::FREEBSD_OSI, 3)] {
+        let (mut i, mut h) = load_macpro(osi);
+        // An empty PCI space: the upstream ports' vendor reads 0xffff.
+        h.fill = 0xff;
+        assert!(i.initialize(&mut h).is_empty());
+        assert_eq!(h.sleeps, 2000 * cut, "{cut} controllers cut");
+    }
+}
+
+/// The SMC (`APP0001`), as FreeBSD's `asmc0` attached: ports 0x300-0x31f,
+/// memory 0xfef00000-0xfef0ffff, IRQ 6.
+#[test]
+fn macpro_smc_resources() {
+    let (mut i, mut h) = load_macpro(DARWIN);
+    assert!(i.initialize(&mut h).is_empty());
+    let smc = node(&i, "\\_SB.PCI0.LPCB.SMC");
+    assert_eq!(i.hid(smc, &mut h).unwrap().as_deref(), Some("APP0001"));
+    let crs = i.crs(smc, &mut h).unwrap().unwrap();
+    assert!(matches!(
+        crs[0],
+        Resource::Io(crate::resource::Io {
+            min: 0x300,
+            length: 0x20,
+            ..
+        })
+    ));
+    assert!(matches!(
+        crs[1],
+        Resource::FixedMemory32(crate::resource::Memory {
+            min: 0xfef0_0000,
+            length: 0x1_0000,
+            ..
+        })
+    ));
+    assert!(matches!(
+        crs[2],
+        Resource::Irq(crate::resource::Irq { mask: 0x40, .. })
+    ));
 }

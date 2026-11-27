@@ -12,6 +12,7 @@ Raw ACPI tables (`<signature>.dat`, header included; repeated signatures numbere
 | `bhyve/` | bhyve on FreeBSD 15.1 (the build server), `edk2-bhyve`, the boot-test configuration. `cargo xtask --remote acpidump --arch x86_64 --vmm bhyve` |
 | `opi6p/` | Orange Pi 6 Plus (CIX P1 / Sky1), firmware as shipped, copied from Linux's `/sys/firmware/acpi/tables` on 2026-11-09. Linux's `SSDT1`/`SSDT2` are `ssdt1.dat`/`ssdt2.dat`. See [../opi6p/README.md](../opi6p/README.md) |
 | `x870e/` | Ryzen 9 7900X / Gigabyte X870E AORUS ELITE WIFI7 (AMI firmware), copied from Linux's `/sys/firmware/acpi/tables` on 2026-11-09, without `VFCT` (AMD's video BIOS). Linux's `SSDT1`-`SSDT15` are `ssdt1.dat`-`ssdt15.dat`. See [../x870e/README.md](../x870e/README.md) |
+| `macpro61/` | Mac Pro (Late 2013, Apple EFI), the exact firmware bytes read from FreeBSD 16's `/dev/mem` on 2026-11-27 by the FreeBSD-fork project, with `rsdp.dat` and `xsdt.dat`, without `VFCT` (the D700s' video BIOS). Every checksum valid. XSDT order: FACP, HPET, APIC, MCFG, `ssdt1.dat`-`ssdt8.dat`, DMAR; the DSDT is revision 1 (32-bit integers) and the FACP revision 4. See [../macpro61/README.md](../macpro61/README.md) |
 | `radxa-q8b/` | Radxa Dragon Q8B (Qualcomm), captured with `acpidump` under Linux during the earlier AbyssBSD project (`../AbyssBSD/docs/boards/radxa-dragon-q8b/dumps/acpi/`). A large vendor DSDT |
 
 `cargo xtask acpidump` boots the kernel with `abyss.acpidump`, which prints every table the XSDT

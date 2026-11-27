@@ -1,0 +1,43 @@
+BootCurrent: 0000
+Timeout    : 2 seconds
+BootOrder  : 0080
+ Boot0080* Mac OS X
+       dp: PciRoot(0x0)/Pci(0x1c,0x4)/Pci(0x0,0x0)/Sata(0x0,0x0,0x0)/HD(2,GPT,31c5e95b-0930-4363-a1fc-c440044e50d4,0x64028,0x7474a0f8)/VenMedia(be74fcf7-0b7c-49f3-9147-01f4042e6842,10eb82069516a246be78646df9badffa)/File(\8B241B8D-ACB7-4791-9210-82AC1C97D8A1\System\Library\CoreServices\boot.efi)
+     attr: 0x1<ACTIVE,>
+    categ: 0<BOOT>
+
+
+Unreferenced Variables:
+ Boot0082* 
+       dp: PciRoot(0x0)/Pci(0x1c,0x4)/Pci(0x0,0x0)/Sata(0x0,0x0,0x0)/HD(2,GPT,31c5e95b-0930-4363-a1fc-c440044e50d4,0x64028,0x7474a0f8)/VenMedia(be74fcf7-0b7c-49f3-9147-01f4042e6842,10eb82069516a246be78646df9badffa)/File(\8B241B8D-ACB7-4791-9210-82AC1C97D8A1\System\Library\CoreServices\boot.efi)
+     attr: 0x1<ACTIVE,>
+    categ: 0<BOOT>
+ Boot0081* Mac OS X
+       dp: VenMedia(be74fcf7-0b7c-49f3-9147-01f4042e6842,1698aa01f65ab94cb051438f1123db8e)/File(\01EF3644-034C-4AC9-B6CD-07E9E978C835\System\Library\CoreServices\boot.efi)
+     attr: 0x1<ACTIVE,>
+    categ: 0<BOOT>
++Boot0000* Windows Boot Manager
+       dp: HD(1,GPT,102d52e8-68c2-4228-a1fa-65bfe924b1df,0x28,0x64000)/File(\EFI\Microsoft\Boot\bootmgfw.efi)
+    opt/x: 0000: 57 49 4e 44 4f 57 53 00 01 00 00 00 88 00 00 00 
+           0010: 78 00 00 00 42 00 43 00 44 00 4f 00 42 00 4a 00 
+           0020: 45 00 43 00 54 00 3d 00 7b 00 39 00 64 00 65 00 
+           0030: 61 00 38 00 36 00 32 00 63 00 2d 00 35 00 63 00 
+           0040: 64 00 64 00 2d 00 34 00 65 00 37 00 30 00 2d 00 
+           0050: 61 00 63 00 63 00 31 00 2d 00 66 00 33 00 32 00 
+           0060: 62 00 33 00 34 00 34 00 64 00 34 00 37 00 39 00 
+           0070: 35 00 7d 00 00 00 9e 42 01 00 00 00 10 00 00 00 
+           0080: 04 00 00 00 7f ff 04 00 
+    opt/a: WINDOWS%00%01%00%00%00%88%00%00%00x%00%00%00B%00C%00D%00O%00B%00J%00E%00C%00T%00
+           =%00{%009%00d%00e%00a%008%006%002%00c%00-%005%00c%00d%00d%00-%004%00e%007%000%00-
+           %00a%00c%00c%001%00-%00f%003%002%00b%003%004%004%00d%004%007%009%005%00}%00%00%00
+           %9eB%01%00%00%00%10%00%00%00%04%00%00%00%7f%ff%04%00
+     attr: 0x1<ACTIVE,>
+    categ: 0<BOOT>
+ Boot0001* OpenCore
+       dp: PciRoot(0x0)/Pci(0x1,0x0)/Pci(0x0,0x0)/Pci(0x1,0x0)/Pci(0x0,0x0)/USB(0x6,0x0)/HD(1,GPT,dc2beac4-5b3f-406e-add9-195049f26387,0x28,0x64000)/File(EFI\OC\OpenCore.efi)
+     attr: 0x1<ACTIVE,>
+    categ: 0<BOOT>
+ BootFFFF* 
+       dp: PciRoot(0x0)/Pci(0x1c,0x4)/Pci(0x0,0x0)/Sata(0x0,0x0,0x0)/HD(3,GPT,3e088462-e811-4c17-9db1-cf9d92ac3ba6,0x61b6e120,0xf000000)/File(\System\Library\CoreServices\boot.efi)
+     attr: 0x1<ACTIVE,>
+    categ: 0<BOOT>

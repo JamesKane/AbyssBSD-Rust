@@ -28,6 +28,14 @@ macro_rules! opi6p {
     };
 }
 
+/// The Mac Pro (Late 2013)'s tables (Apple's EFI, ACPI 2.0 tables and a
+/// revision 4 FADT: the first pre-ACPI-5.0 machine; ADR-0023).
+macro_rules! macpro {
+    ($name:literal) => {
+        Mem(include_bytes!(concat!("../../../../tests/corpus/acpi/macpro61/", $name)).to_vec())
+    };
+}
+
 /// The X870E's tables.
 macro_rules! x870e {
     ($name:literal) => {
@@ -647,4 +655,117 @@ fn opi6p_csrt_dma_controllers() {
     );
     assert!(dma[0].serves(7) && !dma[0].serves(32));
     assert!(dma[1].serves(50) && !dma[1].serves(64));
+}
+
+#[test]
+fn macpro_every_table_survives_the_exerciser() {
+    for m in [
+        macpro!("apic.dat"),
+        macpro!("dmar.dat"),
+        macpro!("facp.dat"),
+        macpro!("hpet.dat"),
+        macpro!("mcfg.dat"),
+        macpro!("xsdt.dat"),
+    ] {
+        exercise(&sdt(&m));
+    }
+}
+
+/// FreeBSD's `acpidump -t` on the machine (`tests/corpus/macpro61`): 24
+/// local APICs, the first threads 0-11 and their siblings 16-27; IO APICs
+/// 8 (GSI 0) and 9 (GSI 24); the SCI on IRQ 9, active high and level.
+#[test]
+fn macpro_madt() {
+    let m = macpro!("apic.dat");
+    let t = madt::parse(&sdt(&m)).unwrap();
+    assert_eq!(sdt(&m).revision(), 2);
+    assert!(t.entries().all(|e| e.is_ok()));
+    assert_eq!(t.local_apic_address(), 0xfee0_0000);
+    assert!(t.pcat_compat());
+    let ioapics: Vec<_> = t
+        .entries()
+        .filter_map(|e| match e {
+            Ok(madt::MadtEntry::IoApic(a)) => Some((a.id, a.address, a.gsi_base)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ioapics, [(8, 0xfec0_0000, 0), (9, 0xfec0_1000, 24)]);
+    let enabled: Vec<_> = t.cpus().filter(|c| c.enabled).map(|c| c.hw_id).collect();
+    let want: Vec<_> = (0..12).chain(16..28).map(madt::HwId::Apic).collect();
+    assert_eq!(enabled, want);
+    assert_eq!(t.enabled_cpu_count(), 24);
+    let isos: Vec<_> = t
+        .entries()
+        .filter_map(|e| match e {
+            Ok(madt::MadtEntry::InterruptSourceOverride(o)) => Some(o),
+            _ => None,
+        })
+        .collect();
+    assert_eq!((isos[0].source, isos[0].gsi), (0, 2));
+    assert_eq!((isos[1].source, isos[1].gsi), (9, 9));
+    assert_eq!(isos[1].flags.trigger(), madt::Trigger::Level);
+    assert_eq!(isos[1].flags.polarity(), madt::Polarity::ActiveHigh);
+}
+
+/// FreeBSD's decode: revision 4 (ACPI 3.0, before the minor version field),
+/// SCI 9, SMI port 0xb2, PM1a 0x400/0x404, the timer at 0x408 (32 bits),
+/// GPE0 at 0x420 (16 bytes), reset through 0xcf9 with 6, century 50. The
+/// timer's register is 32 bits wide, but without `TMR_VAL_EXT` in the flags
+/// (FreeBSD lists none) it counts 24.
+#[test]
+fn macpro_fadt_revision_4() {
+    let m = macpro!("facp.dat");
+    let f = fadt::parse(&sdt(&m)).unwrap();
+    assert_eq!(f.major_version(), 4);
+    assert_eq!(f.minor_version(), None, "no minor version before ACPI 5.1");
+    assert!(!f.flags().unwrap().hw_reduced_acpi());
+    assert_eq!(f.facs(), Some(0x7e14_f000));
+    assert_eq!(f.dsdt(), Some(0x7e58_3000));
+    assert_eq!(f.sci_interrupt(), Some(9));
+    assert_eq!(f.smi_command_port(), Some(0xb2));
+    assert_eq!(f.acpi_enable_disable(), Some((0xf0, 0xf1)));
+    let tmr = f.pm_timer().unwrap();
+    assert_eq!(
+        (tmr.block.space, tmr.block.address, tmr.bits),
+        (AddressSpace::Io, 0x408, 24)
+    );
+    assert_eq!(f.pm1a_event_block().map(|g| g.address), Some(0x400));
+    assert_eq!(f.pm1a_control_block().map(|g| g.address), Some(0x404));
+    assert_eq!(f.pm2_control_block().map(|g| g.address), Some(0x450));
+    assert_eq!(f.gpe0_block().map(|g| g.address), Some(0x420));
+    assert_eq!(f.gpe0_len(), Some(16));
+    assert_eq!(
+        f.reset_register().map(|r| (r.register.address, r.value)),
+        Some((0xcf9, 0x6))
+    );
+    assert_eq!(f.century(), Some(50));
+}
+
+/// FreeBSD's decode: base 0xfed00000, Intel, a 64-bit counter, legacy
+/// replacement capable, and "Comparators=3": `acpidump` prints the raw
+/// field, the last comparator's number, so 4. (The hardware has more:
+/// FreeBSD's `hpet0` reads 8 timers from the block's own capabilities
+/// register. The table describes less than the hardware has.)
+#[test]
+fn macpro_hpet() {
+    let m = macpro!("hpet.dat");
+    let h = hpet::parse(&sdt(&m)).unwrap();
+    assert_eq!(h.base.address, 0xfed0_0000);
+    assert_eq!(h.block_id.vendor_id(), 0x8086);
+    assert_eq!(h.block_id.comparators(), 4);
+    assert!(h.block_id.counter_64bit() && h.block_id.legacy_replacement());
+}
+
+/// FreeBSD's decode: one ECAM window, 0xe0000000, buses 0-255.
+#[test]
+fn macpro_mcfg() {
+    let m = macpro!("mcfg.dat");
+    let t = mcfg::parse(&sdt(&m)).unwrap();
+    let r: Vec<_> = t.regions().map(Result::unwrap).collect();
+    assert_eq!(
+        r.iter()
+            .map(|r| (r.base, r.segment, r.start_bus, r.end_bus))
+            .collect::<Vec<_>>(),
+        [(0xe000_0000, 0, 0, 0xff)]
+    );
 }

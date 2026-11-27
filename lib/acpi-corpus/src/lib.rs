@@ -145,14 +145,39 @@ pub fn machines() -> Vec<(&'static str, Vec<&'static [u8]>)> {
                 corpus!("x870e/ssdt15.dat"),
             ],
         ),
+        (
+            "macpro61",
+            vec![
+                corpus!("macpro61/dsdt.dat"),
+                corpus!("macpro61/ssdt1.dat"),
+                corpus!("macpro61/ssdt2.dat"),
+                corpus!("macpro61/ssdt3.dat"),
+                corpus!("macpro61/ssdt4.dat"),
+                corpus!("macpro61/ssdt5.dat"),
+                corpus!("macpro61/ssdt6.dat"),
+                corpus!("macpro61/ssdt7.dat"),
+                corpus!("macpro61/ssdt8.dat"),
+            ],
+        ),
     ]
 }
 
 /// A machine's namespace, loaded with its firmware state in place, and
 /// `_INI` run.
 pub fn load_tables(name: &str, tables: &[&[u8]]) -> (Interpreter, Machine) {
+    load_tables_with_osi(name, tables, &Config::default().osi)
+}
+
+/// As [`load_tables`], with `_OSI` answering `osi` (a platform's changes
+/// applied, as `sys/acpi` applies them before the DSDT loads).
+pub fn load_tables_with_osi(
+    name: &str,
+    tables: &[&[u8]],
+    osi: &[std::string::String],
+) -> (Interpreter, Machine) {
     let mut i = Interpreter::new(Config {
         limits: Limits::for_stack(64 * 1024),
+        osi: osi.to_vec(),
         ..Config::default()
     });
     let mut h = Machine::for_machine(name);

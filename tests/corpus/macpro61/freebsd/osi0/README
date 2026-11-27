@@ -1,0 +1,4 @@
+captured 2026-11-27T20:11:12Z
+hw.acpi.apple_darwin_osi=0
+boot_verbose=YES
+FINDING: with osi=0 the three Thunderbolt 2 (Falcon Ridge) controllers are absent: 21 PCI functions (8086:156d bridges and 8086:156c NHIs at buses 20-22, 91-93, 162-164). Nothing else is missing; only pcib unit numbers shift.

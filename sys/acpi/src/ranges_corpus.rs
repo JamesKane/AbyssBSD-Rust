@@ -106,6 +106,48 @@ fn firmware_shared() {
                 ("\\_SB_.PCI0.SBRG.DMAD", "\\DEB2"),
             ],
         ),
+        // POST codes at port 0x80 over the legacy DMA controller's page
+        // registers: the CPUs' `DBG0` (24 of them), `PRT0` and `DBG0` at the
+        // root. `SMBI` sits at port 0 only because its base comes from PCI
+        // configuration the corpus host leaves zero. The CMOS's upper bank
+        // (`ACMS`, ports 0x72-0x73) beside the RTC's. And `PLMT` (ports
+        // 0x310-0x319), the SMC's power-limit bytes the CPU methods read
+        // (`CPLT`), inside the SMC's port window but apart from its data and
+        // command ports, and unused by `asmc` on the memory window.
+        (
+            "macpro61",
+            &[
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_SB_.PCI0.SBUS.SMBI"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP00.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP01.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP02.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP03.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP04.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP05.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP06.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP07.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP08.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP09.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP0A.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP0B.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP0C.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP0D.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP0E.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP0F.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP0G.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP0H.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP0I.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP0J.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP0K.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP0L.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP0M.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\_PR_.CP0N.DBG0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\PRT0"),
+                ("\\_SB_.PCI0.LPCB.DMAC", "\\DBG0"),
+                ("\\_SB_.PCI0.LPCB.RTC_", "\\ACMS"),
+                ("\\_SB_.PCI0.LPCB.SMC_", "\\PLMT"),
+            ],
+        ),
     ];
     let names: Vec<_> = acpi_corpus::machines().into_iter().map(|m| m.0).collect();
     assert_eq!(names, want.iter().map(|w| w.0).collect::<Vec<_>>());

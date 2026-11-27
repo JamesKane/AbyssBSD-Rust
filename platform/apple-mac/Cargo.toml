@@ -10,6 +10,7 @@ acpi-platform = { path = "../../lib/acpi-platform" }
 aml = { path = "../../lib/aml" }
 
 [dev-dependencies]
+acpi-corpus = { path = "../../lib/acpi-corpus" }
 aml = { path = "../../lib/aml", features = ["asm"] }
 
 [lints]

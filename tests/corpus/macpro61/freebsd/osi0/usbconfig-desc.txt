@@ -1,0 +1,170 @@
+ugen1.1: <EHCI root HUB Intel> at usbus1, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0200 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0001 
+  bMaxPacketSize0 = 0x0040 
+  idVendor = 0x0000 
+  idProduct = 0x0000 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <Intel>
+  iProduct = 0x0002  <EHCI root HUB>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen0.1: <XHCI root HUB (0x1b73)> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0300 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0003 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x0000 
+  idProduct = 0x0000 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <(0x1b73)>
+  iProduct = 0x0002  <XHCI root HUB>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen0.2: <Hub Genesys Logic, Inc.> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=SAVE (100mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0210 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0001 
+  bMaxPacketSize0 = 0x0040 
+  idVendor = 0x05e3 
+  idProduct = 0x0610 
+  bcdDevice = 0x0663 
+  iManufacturer = 0x0001  <GenesysLogic>
+  iProduct = 0x0002  <USB2.1 Hub>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen1.2: <Integrated Rate Matching Hub Intel Corp.> at usbus1, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0200 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0001 
+  bMaxPacketSize0 = 0x0040 
+  idVendor = 0x8087 
+  idProduct = 0x0024 
+  bcdDevice = 0x0000 
+  iManufacturer = 0x0000  <no string>
+  iProduct = 0x0000  <no string>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen0.4: <Natural Keyboard Elite Microsoft Corp.> at usbus0, cfg=0 md=HOST spd=LOW (1.5Mbps) pwr=ON (100mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0200 
+  bDeviceClass = 0x0000  <Probed by interface class>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0000 
+  bMaxPacketSize0 = 0x0008 
+  idVendor = 0x045e 
+  idProduct = 0x000b 
+  bcdDevice = 0x0207 
+  iManufacturer = 0x0000  <no string>
+  iProduct = 0x0001  <Microsoft Natural Keyboard Elite>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen1.3: <BCM2046B1 USB 2.0 Hub (part of BCM2046 Bluetooth) Broadcom Corp.> at usbus1, cfg=0 md=HOST spd=FULL (12Mbps) pwr=SAVE (94mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0200 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0000 
+  bMaxPacketSize0 = 0x0008 
+  idVendor = 0x0a5c 
+  idProduct = 0x4500 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <Apple Inc.>
+  iProduct = 0x0002  <BRCM20702 Hub>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen0.5: <Kingston DataTraveler 102/2.0 / HEMA Flash Drive 2 GB / PNY Attache 4GB Stick Toshiba Corp.> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr=ON (200mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0200 
+  bDeviceClass = 0x0000  <Probed by interface class>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0000 
+  bMaxPacketSize0 = 0x0040 
+  idVendor = 0x0930 
+  idProduct = 0x6545 
+  bcdDevice = 0x0100 
+  iManufacturer = 0x0001  <Kingston>
+  iProduct = 0x0002  <DataTraveler SE9>
+  iSerialNumber = 0x0003  <<redacted>>
+  bNumConfigurations = 0x0001 
+
+ugen1.6: <Bluetooth Host Controller Apple, Inc.> at usbus1, cfg=0 md=HOST spd=FULL (12Mbps) pwr=ON (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0200 
+  bDeviceClass = 0x00ff  <Vendor specific>
+  bDeviceSubClass = 0x0001 
+  bDeviceProtocol = 0x0001 
+  bMaxPacketSize0 = 0x0040 
+  idVendor = 0x05ac 
+  idProduct = 0x828d 
+  bcdDevice = 0x0150 
+  iManufacturer = 0x0001  <Apple Inc.>
+  iProduct = 0x0002  <Bluetooth USB Host Controller>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen0.6: <Hub Genesys Logic, Inc.> at usbus0, cfg=0 md=HOST spd=SUPER (5.0Gbps) pwr=SAVE (0mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0320 
+  bDeviceClass = 0x0009  <HUB>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0003 
+  bMaxPacketSize0 = 0x0009 
+  idVendor = 0x05e3 
+  idProduct = 0x0626 
+  bcdDevice = 0x0663 
+  iManufacturer = 0x0001  <GenesysLogic>
+  iProduct = 0x0002  <USB3.1 Hub>
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+
+ugen0.3: <Keychron M3 Keychron> at usbus0, cfg=0 md=HOST spd=FULL (12Mbps) pwr=ON (100mA)
+
+  bLength = 0x0012 
+  bDescriptorType = 0x0001 
+  bcdUSB = 0x0110 
+  bDeviceClass = 0x0000  <Probed by interface class>
+  bDeviceSubClass = 0x0000 
+  bDeviceProtocol = 0x0000 
+  bMaxPacketSize0 = 0x0008 
+  idVendor = 0x3434 
+  idProduct = 0xd04e 
+  bcdDevice = 0x0101 
+  iManufacturer = 0x0001  <Keychron>
+  iProduct = 0x0002  <Keychron M3 >
+  iSerialNumber = 0x0000  <no string>
+  bNumConfigurations = 0x0001 
+

@@ -1,0 +1,71 @@
+== date
+Fri Nov 27 20:17:37 UTC 2026
+== sw_vers
+ProductName:	macOS
+ProductVersion:	12.7.6
+BuildVersion:	21H1320
+== uname (hostname withheld)
+Darwin 21.6.0 Darwin Kernel Version 21.6.0: Mon Jun 24 00:56:10 PDT 2024; root:xnu-8020.240.18.709.2~1/RELEASE_X86_64 x86_64
+== bless --info
+Volume for path /dev/disk1s5 is not available
+sudo: a password is required
+== bless --info --getBoot
+/dev/disk1s5
+== nvram -p (values withheld for secret-looking keys)
+_kdp_ipstr	<withheld>
+efi-boot-device	<array><dict><key>IOMatch</key><dict><key>IOProviderClass</key><string>IOMedia</string><key>IOPropertyMatch</key><dict><key>UUID</key><string>0682EB10-1695-46A2-BE78-646DF9BADFFA</string></dict></dict><key>BLLastBSDName</key><string>disk1s2</string></dict><dict><key>IOEFIDevicePathType</key><string>MediaFilePath</string><key>Path</key><string>\8B241B8D-ACB7-4791-9210-82AC1C97D8A1\System\Library\CoreServices\boot.efi</string></dict></array>%00
+fmm-mobileme-token-FMM	<withheld>
+multiupdater-state	%01%00%00%00%00%00%00%00%00%00%00%00
+prev-lang:kbd	en:0
+EFIBluetoothDelay	<withheld>
+efi-apple-recovery	<array><dict><key>IOMatch</key><dict><key>IOProviderClass</key><string>IOMedia</string><key>IOPropertyMatch</key><dict><key>UUID</key><string>D7FD4751-6472-407F-A363-EC43C4E6562C</string></dict></dict><key>BLLastBSDName</key><string>disk0s1</string></dict><dict><key>IOEFIDevicePathType</key><string>MediaFilePath</string><key>Path</key><string>\EFI\APPLE\FIRMWARE\MP61.scap</string></dict></array>%00
+BootCampProcessorPstates	%11%00
+PSFU_STATUS	NOUPD
+SystemAudioVolumeDB	%fa
+fmm-mobileme-token-FMM-BridgeHasAccount	<withheld>
+csr-data	<dict><key>kext-allowed-teams</key><array><string>49Q4Z6Z66H</string><string>4UYUA773XD</string><string>Z5M5QP2W4Y</string><string>9ZGFBWLSYP</string><string>9VB857J7CD</string><string>6S723WSY59</string><string>EKS2CRZPNK</string><string>EG27766DY7</string><string>GWAW84XALH</string><string>EQHXZ8M8AV</string></array></dict>%00
+fm-spstatus	YES
+csr-active-config	%7f%08%00%00
+preferred-networks	<withheld>
+preferred-count	%04%00%00%00%00%00%00%00
+LocationServicesEnabled	<withheld>
+InstallWindowsUEFI	1
+bluetoothExternalDongleFailed	<withheld>
+prev-lang-diags:kbd	en%00
+com.twocanoes.mds.workflowname	<withheld>
+fmm-computer-name	<withheld>
+current-network	<withheld>
+bluetoothActiveControllerInfo	<withheld>
+multiupdater-retry-limits	%01%00%00%00%00%00%00%00
+previous-system-uuid	<withheld>
+auto-boot	true
+boot-args	keepsyms=1 debug=0x100 -lilubetaall ipc_control_port_options=0 -nokcmismatchpanic
+SystemAudioVolume	s
+efi-boot-device-data	%02%01%0c%00%d0A%03%0a%00%00%00%00%01%01%06%00%04%1c%01%01%06%00%00%00%03%12%0a%00%00%00%00%00%00%00%04%01*%00%02%00%00%00(@%06%00%00%00%00%00%f8%a0tt%00%00%00%00[%e9%c510%09cC%a1%fc%c4@%04NP%d4%02%02%04%03$%00%f7%fct%be|%0b%f3I%91G%01%f4%04.hB%10%eb%82%06%95%16%a2F%bexdm%f9%ba%df%fa%04%04%9a%00\%008%00B%002%004%001%00B%008%00D%00-%00A%00C%00B%007%00-%004%007%009%001%00-%009%002%001%000%00-%008%002%00A%00C%001%00C%009%007%00D%008%00A%001%00\%00S%00y%00s%00t%00e%00m%00\%00L%00i%00b%00r%00a%00r%00y%00\%00C%00o%00r%00e%00S%00e%00r%00v%00i%00c%00e%00s%00\%00b%00o%00o%00t%00.%00e%00f%00i%00%00%00%7f%ff%04%00
+bluetoothInternalControllerInfo	<withheld>
+== diskutil list
+/dev/disk0 (internal, physical):
+   #:                       TYPE NAME                    SIZE       IDENTIFIER
+   0:      GUID_partition_scheme                        *1.0 TB     disk0
+   1:                        EFI ⁨EFI⁩                     209.7 MB   disk0s1
+   2:                 Apple_APFS ⁨Container disk1⁩         1.0 TB     disk0s2
+
+/dev/disk1 (synthesized):
+   #:                       TYPE NAME                    SIZE       IDENTIFIER
+   0:      APFS Container Scheme -                      +1.0 TB     disk1
+                                 Physical Store disk0s2
+   1:                APFS Volume ⁨Macintosh HD - Data⁩     22.3 GB    disk1s1
+   2:                APFS Volume ⁨Preboot⁩                 268.4 MB   disk1s2
+   3:                APFS Volume ⁨Recovery⁩                1.1 GB     disk1s3
+   4:                APFS Volume ⁨VM⁩                      1.1 MB     disk1s4
+   5:                APFS Volume ⁨Macintosh HD⁩            15.4 GB    disk1s5
+   6:              APFS Snapshot ⁨com.apple.os.update-...⁩ 15.4 GB    disk1s5s1
+
+/dev/disk2 (external, physical):
+   #:                       TYPE NAME                    SIZE       IDENTIFIER
+   0:      GUID_partition_scheme                        *15.6 GB    disk2
+   1:                        EFI ⁨EFISYS⁩                  41.9 MB    disk2s1
+   2: 83BD6B9D-7F41-11DC-BE0B-001560B84F0F ⁨⁩              62.0 KB    disk2s2
+   3:                FreeBSD UFS ⁨⁩                        3.2 GB     disk2s3
+                    (free space)                         12.3 GB    -
+

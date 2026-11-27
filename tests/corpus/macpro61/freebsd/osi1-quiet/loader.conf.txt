@@ -1,0 +1,12 @@
+vfs.root.mountfrom="ufs:/dev/ufs/ABYSSLIVE"
+boot_serial="YES"
+comconsole_speed="115200"
+console="comconsole,vidconsole"
+kern.geom.label.disk_ident.enable="0"
+
+hw.pci.enable_pcie_hp="0"
+
+compat.linuxkpi.amdgpu_si_support="1"
+hw.amdgpu.si_support="1"
+compat.linuxkpi.radeon_si_support="0"
+hw.radeon.si_support="0"

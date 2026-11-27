@@ -125,6 +125,13 @@ Each milestone runs only the tests it touches (targeted runs). The full gates ru
 
 ### MP0: Ground truth (no AbyssBSD code)
 
+**Done 2026-11-27.**
+- The fork project's capture is in `tests/corpus/macpro61/` (README there; HARDWARE.md §9 has the
+  measured rows).
+- The raw ACPI tables, read from FreeBSD's `/dev/mem` without `VFCT`, are in
+  `tests/corpus/acpi/macpro61/`.
+- Still missing: `bless --info`, and which Thunderbolt port carries the display.
+
 - HARDWARE.md §9: replace "Expected" rows with the measured facts in §2, dated and attributed.
 - Ask the fork project, on its next FreeBSD boot, for the read-only capture HARDWARE.md §9 lists.
   The thermal capture of 2026-11-26 has only SMBIOS, `asmc`, MSRs and the display devices, so
@@ -168,7 +175,33 @@ On the planned checks:
 
 ### MP2: ACPI for Apple firmware, against the corpus
 
-**Interface done 2026-11-27; the corpus half waits on MP0's capture.** What was built:
+**Done 2026-11-27.** The corpus tests run Apple's real tables:
+- `lib/aml`:
+  - all nine AML tables load without warnings and `_INI` runs without errors under both answers;
+    integers are 32 bits (DSDT revision 1);
+  - `OSYS` is 10000 and `OSDW()` 1 under Darwin, and 2012 and 0 under FreeBSD's default strings;
+  - with an empty PCI space, a non-Darwin `_INI` cuts all three Thunderbolt controllers (each
+    bridge's `RMCR` runs `RMC1`: link disabled, 2 s, power off) and Darwin cuts none. That is
+    FreeBSD's `apple_darwin_osi=0` boot, which saw no Thunderbolt functions;
+  - the SMC is at `\_SB.PCI0.LPCB.SMC` with FreeBSD's `asmc0` resources.
+- `lib/acpi-tables`, against FreeBSD's `acpidump -t` decode:
+  - MADT revision 2: 24 APICs, IO APICs 8 and 9, the SCI override active high and level;
+  - FADT revision 4: SCI 9, PM registers at 0x400, a 24-bit timer, reset 0xcf9/6;
+  - HPET and MCFG.
+
+  The FADT showed a real bug: `minor_version()` read the reserved byte of a revision 4 FADT as
+  minor 0. It is now `None` before revision 5.
+- `lib/acpi-corpus` lists the machine, so `sys/acpi`'s and `kernel/table`'s whole-machine checks
+  run it:
+  - every device is in its machine's driver table;
+  - nothing with a driver waits forever;
+  - the firmware-shared ranges include `PLMT`, the SMC power-limit bytes the CPU methods read at
+    ports 0x310-0x319.
+- `platform/apple-mac`, end to end on the real tables: the Mac Pro's identity and the tunable through
+  `osi_interfaces` give `OSYS` 10000, or 2012 with the tunable at 0. Every `MACPRO6_1` property names
+  a device the namespace has.
+
+The interface work:
 - `lib/acpi-platform` (ADR-0027 §1–2):
   - `FirmwareIdentity` carries the SMBIOS system maker, product and family.
   - `PlatformSource::osi` returns `OsiChanges`.
@@ -332,7 +365,9 @@ When the owner hands the machine over:
   `bless --mount <ESP> --setBoot --nextonly`; Apple's `efi-boot-next` variable written from
   AbyssBSD through runtime services. The owner chooses whether the default boot ever changes
   away from macOS.
-- The watchdog (`ichwd`) proven to reset a hung kernel, since there is no serial console.
+- ~~The watchdog (`ichwd`) proven to reset a hung kernel.~~ The capture shows the Patsburg
+  watchdog disabled by the firmware, so there is none. A hung kernel needs the power button, and
+  the persistent log on the ESP is what tells why (§8, question 7).
 
 ### Exit
 
@@ -376,6 +411,11 @@ hook's hysteresis was still being tuned). Before MP3's `asmc` work and again bef
   `macos-keys-*.txt`) as the fake SMC's data.
 
 ## 8. Open questions
+
+7. **No watchdog.** `ichwd` finds the TCO watchdog "disabled in BIOS or hardware". Whether that is
+   the TCO `NO_REBOOT` strap or a disabled TCO block is not known. Recovering from a hang means
+   holding the power button. Option: a software watchdog (a per-CPU NMI or an APIC timer that logs
+   to the ring and resets through ACPI), which FreeBSD does not have either.
 
 1. Which controller the front USB 3 ports are on, and whether anything we need is on the PCH's EHCI.
 2. Whether Apple's firmware honors `BootNext` (MP5).

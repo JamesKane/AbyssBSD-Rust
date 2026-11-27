@@ -1,0 +1,4 @@
+captured 2026-11-27T20:14:28Z
+hw.acpi.apple_darwin_osi=1
+boot_verbose=YES
+Same ACPI tables as osi=0 and the quiet boot (only acpidump temp-file names differ).

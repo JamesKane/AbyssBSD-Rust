@@ -38,7 +38,7 @@ impl Isa {
     /// The ISA of a corpus machine. A new machine must be placed here.
     fn of(machine: &str) -> Self {
         match machine {
-            "qemu-q35" | "bhyve" | "x870e" => Self::X86_64,
+            "qemu-q35" | "bhyve" | "x870e" | "macpro61" => Self::X86_64,
             "qemu-virt" | "radxa-q8b" | "opi6p" => Self::Aarch64,
             m => panic!("corpus machine {m} has no ISA in driver-table's tests"),
         }

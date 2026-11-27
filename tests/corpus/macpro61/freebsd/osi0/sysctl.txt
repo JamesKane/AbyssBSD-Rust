@@ -1,0 +1,5 @@
+hw.model: Intel(R) Xeon(R) CPU E5-2697 v2 @ 2.70GHz
+hw.ncpu: 24
+hw.physmem: 68649242624
+kern.osreldate: 1600034
+machdep.bootmethod: UEFI

@@ -136,9 +136,14 @@ impl Fadt<'_> {
         self.bytes.get(8).copied().unwrap_or(0)
     }
 
-    /// The FADT minor version (ACPI 5.1).
+    /// The FADT minor version (ACPI 5.1, FADT revision 5). Before that the
+    /// byte is reserved, so a revision 4 FADT (the Mac Pro (Late 2013)'s)
+    /// has none, whatever the byte holds.
     #[must_use]
     pub fn minor_version(&self) -> Option<u8> {
+        if self.major_version() < 5 {
+            return None;
+        }
         self.u8(MINOR_VERSION).map(|v| v & 0xf)
     }
 
