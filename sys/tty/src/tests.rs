@@ -322,3 +322,21 @@ fn erasing_after_program_output_retypes() {
     // The program wrote after "ab": the line is typed again.
     assert_eq!(echoed(&mut d), b"^R\r\na");
 }
+
+/// Stopped output gives a device nothing and wakes no writer
+/// (`ttydisc_getc`'s `TF_STOPPED`).
+#[test]
+fn stopped_output_wakes_no_writer() {
+    let mut d = Discipline::new();
+    let mut t = *d.termios();
+    t.c_oflag = 0;
+    d.set_termios(t);
+    assert_eq!(d.write(&[b'a'; 4096]), 1984);
+    d.set_hiwat_out();
+    d.set_stopped(true);
+    let mut buf = [0u8; 4096];
+    assert_eq!(d.getc(&mut buf), (0, false));
+    assert!(d.hiwat_out());
+    d.set_stopped(false);
+    assert_eq!(d.getc(&mut buf), (1984, true));
+}

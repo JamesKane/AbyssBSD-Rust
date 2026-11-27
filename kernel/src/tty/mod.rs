@@ -103,6 +103,18 @@ impl input::Consumer for ConsoleInput {
 /// `TTY_STACKBUF`), and from the discipline to a device.
 const CHUNK: usize = tty::STACKBUF;
 
+/// Bytes a writer's output and a master's read move per hold of the
+/// terminal's lock: four of FreeBSD's `TTY_STACKBUF` chunks. FreeBSD drops
+/// the lock for each chunk's copy, and there a reader waiting on the lock
+/// often gets it during the writer's copy (on the 7900X its writer spins
+/// on the lock about as often as its reader, and its copies weigh in its
+/// profile). Here a reader spinning with backoff (as `lock_delay`) seldom
+/// found the lock free between a writer's chunks: `pty.relay` at 256 bytes, the
+/// relay spun a third of its time and took 12 us per 4 KB, stock 6.6; at
+/// 1024, 6.7. Taking the queue's blocks off to copy unlocked
+/// (`ttyoutq_read_uio`) was worse (10.2 us): each block is another hold.
+const COPY: usize = CHUNK * 4;
+
 /// `NO_PID`: what `TIOCGPGRP` reports with no foreground group.
 const NO_PID: i32 = 100_000;
 
@@ -206,14 +218,44 @@ impl Output<'_> {
     /// Takes queued output (`ttydisc_getc`), waking writers once there is
     /// room enough.
     pub(crate) fn getc(&mut self, buf: &mut [u8]) -> usize {
-        let (n, wake) = self.d.getc(buf);
-        if wake {
+        // Stopped: nothing, and no writer hears (`ttydisc_getc`).
+        if self.d.stopped() {
+            return 0;
+        }
+        let n = self.d.take(buf);
+        self.wakeup_watermark();
+        n
+    }
+
+    /// Wakes writers once there is room enough
+    /// (`ttydisc_wakeup_watermark`).
+    pub(crate) fn wakeup_watermark(&mut self) {
+        if self.d.wakeup_watermark() {
             // The writers' condition first, then the writers.
             self.tty.mirror_disc(self.d);
             self.tty.wakeup(false, true);
         }
-        n
     }
+}
+
+/// Stores `v` in a mirror unless it is there already, returning what was
+/// there if it changed. Release: a waiter that sees a mirror sees the
+/// state it mirrors.
+fn set_usize(a: &AtomicUsize, v: usize) -> Option<usize> {
+    let old = a.load(Ordering::Relaxed);
+    (old != v).then(|| {
+        a.store(v, Ordering::Release);
+        old
+    })
+}
+
+/// [`set_usize`] for a flag: whether it changed.
+fn set_bool(a: &AtomicBool, v: bool) -> bool {
+    let changed = a.load(Ordering::Relaxed) != v;
+    if changed {
+        a.store(v, Ordering::Release);
+    }
+    changed
 }
 
 /// Writes all queued output with `f`, for devices that write at once.
@@ -599,24 +641,40 @@ impl Tty {
     /// Updates the wait-condition mirrors from the state, and tells
     /// pollers.
     fn mirror(&self, st: &State) {
-        self.zombie.store(st.zombie, Ordering::Release);
-        self.gone.store(st.gone, Ordering::Release);
-        self.mirror_disc(&st.d);
+        self.mirror_with(
+            &st.d,
+            set_bool(&self.zombie, st.zombie) | set_bool(&self.gone, st.gone),
+        );
     }
 
     /// The mirrors of the discipline's state. Sleepers' conditions read
     /// them, so they are set before any wakeup.
+    ///
+    /// A mirror is stored only when it changes: a writer queues output a
+    /// chunk at a time, mirroring after each under the terminal's lock,
+    /// and a store of what is already there would still take the line
+    /// from the CPU reading the other side. The terminal's pollers and
+    /// knotes hear only of a change in what they look at (input ready,
+    /// room to write, or output stopped); data arriving and room freed
+    /// wake them as FreeBSD's `tty_wakeup` does ([`Tty::wakeup`]).
     fn mirror_disc(&self, d: &Discipline) {
-        // Release: a waiter that sees a mirror sees the state it mirrors.
-        self.readable.store(d.readable(), Ordering::Release);
-        self.ready.store(d.read_poll(), Ordering::Release);
-        self.out_room.store(d.output_room(), Ordering::Release);
+        self.mirror_with(d, false);
+    }
+
+    /// [`Tty::mirror_disc`], notifying also if `seen`.
+    fn mirror_with(&self, d: &Discipline, mut seen: bool) {
+        seen |= set_bool(&self.readable, d.readable());
+        seen |= set_usize(&self.ready, d.read_poll()).is_some();
+        let room = d.output_room();
+        seen |= set_usize(&self.out_room, room).is_some_and(|old| (old == 0) != (room == 0));
         let used = if d.stopped() { 0 } else { d.output_len() };
-        self.out_used.store(used, Ordering::Release);
-        self.in_room.store(d.input_room(), Ordering::Release);
-        self.hiwat_out.store(d.hiwat_out(), Ordering::Release);
-        self.stopped.store(d.stopped(), Ordering::Release);
-        self.notify.notify(0);
+        set_usize(&self.out_used, used);
+        set_usize(&self.in_room, d.input_room());
+        set_bool(&self.hiwat_out, d.hiwat_out());
+        seen |= set_bool(&self.stopped, d.stopped());
+        if seen {
+            self.notify.notify(0);
+        }
     }
 
     /// Wakes readers, writers, or both (`tty_wakeup`).
@@ -650,13 +708,20 @@ impl Tty {
     }
 
     /// Takes queued output for a device outside [`Driver::outwakeup`] (a
-    /// pseudo-terminal's master read), waking writers at the watermark.
+    /// pseudo-terminal's master read, `ttyoutq_read_uio`), one piece of a
+    /// read: writers hear once the read is done ([`Tty::getc_done`]).
     fn getc(&self, st: &mut State, buf: &mut [u8]) -> usize {
+        st.d.take(buf)
+    }
+
+    /// The end of such a read: writers wake at the watermark
+    /// (`ttydisc_getc_uio`'s `ttydisc_wakeup_watermark`).
+    fn getc_done(&self, st: &mut State) {
         Output {
             tty: self,
             d: &mut st.d,
         }
-        .getc(buf)
+        .wakeup_watermark();
     }
 
     /// Typed bytes are in (`ttydisc_rint_done`): readers wake, and the
@@ -1205,7 +1270,7 @@ impl Tty {
         if self.zombie.load(Ordering::Acquire) {
             return Err(Errno::EIO);
         }
-        let mut buf = [0u8; CHUNK];
+        let mut buf = [0u8; COPY];
         let mut done = 0;
         let mut result = Ok(());
         'chunks: while uio.resid() > 0 {
@@ -1279,14 +1344,22 @@ impl Tty {
         }
     }
 
-    /// `ttydev_poll`.
+    /// `ttydev_poll`: a poller is registered only when nothing is ready
+    /// (`revents == 0`), and looks again after.
     fn poll(&self, events: i16, w: Option<&Arc<dyn event::Wake>>) -> i16 {
+        let revents = self.look(events);
+        let Some(w) = w.filter(|_| revents == 0) else {
+            return revents;
+        };
+        self.notify.record(w);
+        self.look(events)
+    }
+
+    /// What [`Tty::poll`] reports now.
+    fn look(&self, events: i16) -> i16 {
         use abi::event::{POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM};
         if self.gone.load(Ordering::Acquire) {
             return (events & (POLLIN | POLLRDNORM)) | POLLHUP;
-        }
-        if let Some(w) = w {
-            self.notify.record(w);
         }
         let mut revents = 0;
         if events & (POLLIN | POLLRDNORM) != 0 && self.ready.load(Ordering::Acquire) > 0 {

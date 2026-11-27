@@ -31,6 +31,9 @@ pub mod link;
 #[cfg(test)]
 mod link_tests;
 pub mod lltable;
+pub mod lro;
+#[cfg(test)]
+mod lro_tests;
 pub mod netif;
 pub mod netisr;
 pub mod netlink;

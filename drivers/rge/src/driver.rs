@@ -54,6 +54,7 @@ use devtree::ids::PciId;
 use irq::Filter;
 use mbuf::{Chain, NoBufs, Packet, PktHdr, csum, flags};
 use net::link::{Link, Media, ifm};
+use net::lro::Lro;
 use net::netif::{Ether, Port};
 use net::{Family, Vnet};
 use pci::bus::{Messages, PciChild};
@@ -87,6 +88,11 @@ const TICK_NS: u64 = 1_000_000_000;
 const POLL_NS: u64 = 30_000;
 const POLL_GAP_NS: u64 = 40_000;
 const POLL_MAX: u32 = 64;
+/// How long a merging connection's frame is held across poll rounds
+/// before it goes up ([`net::lro::Lro::flush_round`]): about the dozen
+/// frames at a gigabit that stock's `re` merges behind one moderated
+/// interrupt.
+const LRO_HOLD_NS: u64 = 100_000;
 /// How often the doorbell watch looks while frames are in flight, and how
 /// old the oldest may be before it rings again. A frame takes some tens of
 /// microseconds to go; one older than this has been left in the ring.
@@ -293,6 +299,8 @@ pub struct Shared {
     pollq: WaitQueue,
     /// When the last service ended (`sched::now_ns`).
     last_end: core::sync::atomic::AtomicU64,
+    /// `IFCAP_LRO` is on: received TCP segments merge ([`net::lro`]).
+    lro: core::sync::atomic::AtomicBool,
     /// Frames may be in flight that the controller has not been told of
     /// (or has missed): the tick thread looks every [`WATCH_NS`].
     watch: AtomicBool,
@@ -433,11 +441,24 @@ impl Shared {
         let mut link = false;
         let begin = sched::now_ns();
         let busy = begin.saturating_sub(self.last_end.load(Ordering::Relaxed)) < POLL_GAP_NS;
+        // Received TCP segments merge for this episode, across its poll
+        // rounds, unless LRO is off or the VNET forwards.
+        let mut lro = (self.lro.load(Ordering::Relaxed)
+            && self.port.home().0.is_some_and(|v| net::lro::allowed(&v)))
+        .then(Lro::new);
+        // The status is read once an episode, as `re_intr_msi` reads it:
+        // a read crosses the chipset to the controller (about 3 us on the
+        // X870E, at 11,000 interrupts a second a fifth of a CPU), and
+        // what happened meanwhile is in the rings, which are in memory.
+        // What else came (a link change, an error) is read at the next
+        // interrupt, or by the tick.
+        let mut read = true;
         loop {
             if self.state() != State::Running {
                 break;
             }
-            let st = self.chip.ack();
+            let st = if read { self.chip.ack() } else { 0 };
+            read = true;
             if !health::responding(st) {
                 self.gone();
                 link = true;
@@ -456,7 +477,7 @@ impl Shared {
                     break;
                 }
                 drop(g);
-                self.deliver(frames);
+                self.deliver(frames, &mut lro);
                 g = self.core.lock(s);
                 if !more {
                     break;
@@ -470,7 +491,7 @@ impl Shared {
                 let (frames, more) = self.rx_take();
                 took += frames.len();
                 drop(g);
-                self.deliver(frames);
+                self.deliver(frames, &mut lro);
                 if more {
                     sched::yield_now();
                 }
@@ -502,7 +523,7 @@ impl Shared {
                     let (frames, more) = self.rx_take();
                     let got = frames.len();
                     drop(g);
-                    self.deliver(frames);
+                    self.deliver(frames, &mut lro);
                     g = self.core.lock(s);
                     self.tx.lock().reap(&self.port);
                     if got == 0 {
@@ -513,8 +534,11 @@ impl Shared {
                     }
                 }
             }
+            // Unmasked next, without a second read.
+            read = false;
         }
         drop(g);
+        self.deliver_held(&mut lro);
         self.last_end.store(sched::now_ns(), Ordering::Relaxed);
         if link {
             self.port.link_state(self.link_up());
@@ -671,28 +695,47 @@ impl Shared {
     }
 
     /// Hands received frames to the stack (`if_input`).
-    fn deliver(&self, frames: Vec<Packet>) {
-        if frames.is_empty() {
+    fn deliver(&self, frames: Vec<Packet>, lro: &mut Option<Lro>) {
+        if frames.is_empty() && lro.as_ref().is_none_or(Lro::is_empty) {
             return;
         }
         let batch = net::defer::begin();
+        let mut up = |m| self.port.input(m);
+        let now = sched::now_ns();
         for m in frames {
             self.port.stats.ipackets.add(1);
             self.port.stats.ibytes.add(m.len() as u64);
-            self.port.input(m);
+            match lro {
+                Some(l) => l.rx(m, now, &mut up),
+                None => up(m),
+            }
+        }
+        if let Some(l) = lro {
+            l.flush_round(now, LRO_HOLD_NS, &mut up);
         }
         drop(batch);
+    }
+
+    /// Sends up what the episode's [`Lro`] still holds.
+    fn deliver_held(&self, lro: &mut Option<Lro>) {
+        if let Some(l) = lro.as_mut().filter(|l| !l.is_empty()) {
+            let batch = net::defer::begin();
+            l.flush_all(&mut |m| self.port.input(m));
+            drop(batch);
+        }
     }
 
     /// Sends frame `m` (`rge_encap`, with the frame copied).
     fn send(&self, m: Packet) -> Result<(), NoBufs> {
         let len = m.len();
-        if len > MAX_FRAME {
+        let tso = m.hdr.csum_flags & csum::IP_TSO != 0;
+        // A TSO frame's limits are the large send's, in `send_tso`.
+        if len > MAX_FRAME && !tso {
             return Err(NoBufs);
         }
         let mcast = m.hdr.flags & (flags::BCAST | flags::MCAST) != 0;
         self.port.tap.mtap(&m, net::bpf::Way::Out);
-        if m.hdr.csum_flags & csum::IP_TSO != 0 {
+        if tso {
             self.send_tso(m)?;
         } else if len <= SLOT {
             self.send_slotted(&m)?;
@@ -779,10 +822,18 @@ impl Shared {
         m.data.copy_out(0, &mut h);
         let ip_hlen = usize::from(h[14] & 0x0f) * 4;
         let is_tcp4 = h[12..14] == [0x08, 0x00] && h[14] >> 4 == 4 && h[23] == 6;
-        let Some((cmd, ext)) = is_tcp4
-            .then(|| ring::tx::tso4(14 + ip_hlen, u32::from(m.hdr.tso_segsz)))
-            .flatten()
-        else {
+        // The TCP header's length, from its data offset.
+        let mut off = [0u8; 1];
+        if !is_tcp4 || m.len() < 14 + ip_hlen + 20 {
+            return Err(NoBufs);
+        }
+        m.data.copy_out(14 + ip_hlen + 12, &mut off);
+        let hdrlen = 14 + ip_hlen + usize::from(off[0] >> 4) * 4;
+        let mss = u32::from(m.hdr.tso_segsz);
+        if !ring::tx::tso_fits(m.len(), hdrlen, mss) {
+            return Err(NoBufs);
+        }
+        let Some((cmd, ext)) = ring::tx::tso4(14 + ip_hlen, mss) else {
             return Err(NoBufs);
         };
         self.send_mapped(m, ext, cmd)
@@ -909,6 +960,12 @@ impl Link for Iface {
     fn multicast_changed(&self, groups: &[[u8; 6]]) {
         self.0.filter.lock().1 = groups.to_vec();
         self.0.apply_filter();
+    }
+
+    fn caps_changed(&self, capenable: u32) {
+        self.0
+            .lro
+            .store(capenable & ifcap::LRO != 0, Ordering::Relaxed);
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1046,6 +1103,7 @@ impl Driver for Rge {
             | ifcap::TXCSUM
             | ifcap::VLAN_MTU
             | ifcap::LINKSTATE
+            | ifcap::LRO
             | if tso { ifcap::TSO4 } else { 0 };
         let info = Ether {
             dname: "rge",
@@ -1082,6 +1140,7 @@ impl Driver for Rge {
                 wake: WaitQueue::new(),
                 pollq: WaitQueue::new(),
                 last_end: core::sync::atomic::AtomicU64::new(0),
+                lro: core::sync::atomic::AtomicBool::new(true),
                 watch: AtomicBool::new(false),
                 rekicks: AtomicU64::new(0),
                 seen: SpinLock::new(None),

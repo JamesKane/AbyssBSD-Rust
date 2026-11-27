@@ -475,18 +475,27 @@ impl End {
         &self.pipe
     }
 
-    /// `pipe_poll` for a file open with `fflags`.
+    /// `pipe_poll` for a file open with `fflags`: a poller is registered
+    /// only when nothing is ready (`revents == 0`), and looks again after.
     pub(crate) fn poll(&self, fflags: u32, events: i16, w: Option<&Arc<dyn Wake>>) -> i16 {
+        let revents = self.look(fflags, events);
+        let Some(w) = w.filter(|_| revents == 0) else {
+            return revents;
+        };
         let (rx, tx) = (self.rx(), self.tx());
         // Registered whatever is asked: `POLLHUP` comes unasked.
-        if let Some(w) = w {
-            if fflags & FREAD != 0 {
-                rx.notify.record(w);
-            }
-            if fflags & FWRITE != 0 && !tx.reader_gone.load(Ordering::Acquire) {
-                tx.notify.record(w);
-            }
+        if fflags & FREAD != 0 {
+            rx.notify.record(w);
         }
+        if fflags & FWRITE != 0 && !tx.reader_gone.load(Ordering::Acquire) {
+            tx.notify.record(w);
+        }
+        self.look(fflags, events)
+    }
+
+    /// What [`End::poll`] reports now.
+    fn look(&self, fflags: u32, events: i16) -> i16 {
+        let (rx, tx) = (self.rx(), self.tx());
         let mut revents = 0;
         if fflags & FREAD != 0
             && events & (POLLIN | POLLRDNORM) != 0

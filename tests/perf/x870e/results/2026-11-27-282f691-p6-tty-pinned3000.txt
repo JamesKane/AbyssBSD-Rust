@@ -1,0 +1,62 @@
+perf on the Ryzen 9 7900X / X870E: AbyssBSD 282f691 vs FreeBSD 15.1-RELEASE GENERIC (stock)
+3 FreeBSD runs, 3 AbyssBSD runs; FreeBSD 15.1 userland on both
+
+freebsd: side=freebsd ident=GENERIC 15.1-RELEASE
+freebsd: cpu0 freq=3000 cx=C1
+freebsd: processes=50 load={ 0.14 0.04 0.01 }
+abyss: side=abyss ident=ABYSSBSD 15.1-RELEASE
+abyss: cpu0 freq=2991 cx=none
+abyss: processes=30 load={ 0.11 0.03 0.01 }
+
+core class all, AbyssBSD 282f691 vs FreeBSD 15.1-RELEASE GENERIC (stock), 3/3 runs
+ratio = median(AbyssBSD) / median(FreeBSD); pass <= 1.02; noisy = FreeBSD CV > 1%
+
+benchmark                     FreeBSD       AbyssBSD   ratio  95% CI              CV  verdict
+event.kevent.pipe1        464.9 ns/op    504.7 ns/op   1.086  [1.044, 1.099]   0.7%  Slower
+event.kevent.pipe1000     520.6 ns/op    560.4 ns/op   1.076  [1.066, 1.089]   0.3%  Slower
+event.poll1000         110025.3 ns/op  77966.6 ns/op   0.709  [0.690, 0.718]   1.3%  Noisy
+event.select1000        91466.3 ns/op  62701.3 ns/op   0.686  [0.673, 0.693]   1.0%  Noisy
+event.timer              3439.0 ns/op   3472.3 ns/op   1.010  [0.958, 1.020]   0.7%  Pass
+event.user.pingpong      4101.2 ns/op   2086.7 ns/op   0.509  [0.507, 0.510]   0.1%  Win
+exec.lib10             1007390.5 ns/op 966765.0 ns/op   0.960  [0.956, 0.967]   0.3%  Win
+exec.rcsubr            196099070.5 ns/op 179192024.8 ns/op   0.914  [0.909, 0.919]   0.2%  Win
+exec.true              262431.7 ns/op 247166.4 ns/op   0.942  [0.923, 0.949]   1.1%  Noisy
+pty.canon                2674.6 ns/op   2493.9 ns/op   0.932  [0.929, 0.939]   0.4%  Win
+pty.raw                  7885.4 ns/op   3637.5 ns/op   0.461  [0.452, 0.463]   0.4%  Win
+pty.relay                6607.7 ns/op   6615.1 ns/op   1.001  [0.996, 1.014]   0.3%  Pass
+thr.cond.pingpong        4637.7 ns/op   2462.5 ns/op   0.531  [0.521, 0.544]   1.4%  Noisy
+thr.create               4341.3 ns/op   3646.8 ns/op   0.840  [0.833, 0.851]   0.2%  Win
+thr.mutex.pi.t1            12.1 ns/op     12.1 ns/op   1.000  [1.000, 1.000]   0.0%  Pass
+thr.mutex.pi.t2            28.4 ns/op     14.8 ns/op   0.521  [0.519, 0.530]   0.7%  Win
+thr.mutex.pi.t4            97.4 ns/op     27.6 ns/op   0.283  [0.276, 0.299]   2.0%  Noisy
+thr.mutex.pi.t8           119.0 ns/op     48.9 ns/op   0.411  [0.393, 0.476]   4.9%  Noisy
+thr.mutex.pshared.t1       36.1 ns/op     36.2 ns/op   1.003  [0.989, 1.025]   1.3%  Noisy
+thr.mutex.pshared.t2      148.7 ns/op     41.2 ns/op   0.277  [0.274, 0.277]   0.3%  Win
+thr.mutex.pshared.t4      101.5 ns/op     57.7 ns/op   0.568  [0.490, 0.574]   8.3%  Noisy
+thr.mutex.pshared.t8       92.7 ns/op     82.9 ns/op   0.894  [0.853, 0.911]   2.1%  Noisy
+thr.mutex.t1               12.4 ns/op     12.5 ns/op   1.008  [0.992, 1.008]   0.5%  Pass
+thr.mutex.t2               25.3 ns/op     13.9 ns/op   0.549  [0.549, 0.554]   0.5%  Win
+thr.mutex.t4               45.3 ns/op     21.3 ns/op   0.470  [0.453, 0.470]   1.9%  Noisy
+thr.mutex.t8               43.2 ns/op     30.3 ns/op   0.701  [0.680, 0.726]   1.2%  Noisy
+thr.rwlock.t1              11.2 ns/op     11.5 ns/op   1.027  [0.991, 1.045]   0.5%  Slower
+thr.rwlock.t2             365.8 ns/op     71.1 ns/op   0.194  [0.191, 0.197]   0.4%  Win
+thr.rwlock.t4             327.7 ns/op    157.7 ns/op   0.481  [0.460, 0.584]   0.5%  Win
+thr.rwlock.t8             400.0 ns/op    237.0 ns/op   0.593  [0.568, 0.635]   1.2%  Noisy
+thr.sem.pingpong         3964.3 ns/op   1804.8 ns/op   0.455  [0.453, 0.457]   0.3%  Win
+unix.connect             5224.7 ns/op   1993.9 ns/op   0.382  [0.375, 0.388]   0.3%  Win
+unix.dgram                490.5 ns/op    402.5 ns/op   0.821  [0.794, 0.830]   1.9%  Noisy
+unix.rights               581.4 ns/op    615.1 ns/op   1.058  [0.993, 1.097]   2.3%  Noisy
+unix.seqpacket.pingpong   4173.0 ns/op    845.3 ns/op   0.203  [0.200, 0.203]   0.2%  Win
+unix.stream.bw4k          515.2 ns/op    509.3 ns/op   0.989  [0.979, 1.023]   0.9%  Pass
+unix.stream.bw64k        4801.7 ns/op   5009.2 ns/op   1.043  [1.026, 1.049]   1.0%  Slower
+unix.stream.pingpong     4173.8 ns/op    846.0 ns/op   0.203  [0.201, 0.204]   0.3%  Win
+
+geometric mean ratio 0.632; 5 pass, 15 win, 4 slower, 14 noisy, 0 missing
+
+components (gate: geometric mean <= 1.02):
+event                    6 benchmarks   0.814  pass
+exec                     3 benchmarks   0.938  pass
+pty                      3 benchmarks   0.755  pass
+thr                     19 benchmarks   0.563  pass
+unix                     7 benchmarks   0.544  pass
+xtask: perf: report in /tmp/claude-1000/-home-jkane-Projects-OS-AbyssBSD-Rust/01d51f32-26f6-4b7d-be3b-2d355f75cbcf/scratchpad/p6-tty/report.txt

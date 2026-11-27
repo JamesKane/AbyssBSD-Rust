@@ -321,6 +321,16 @@ impl Default for NdInfo {
 }
 
 impl Ifnet {
+    /// Sets the enabled capabilities and tells the driver
+    /// ([`crate::link::Link::caps_changed`]).
+    pub fn set_capenable(&mut self, want: u32) {
+        let changed = self.capenable != want;
+        self.capenable = want;
+        if changed && let Some(l) = &self.link.0 {
+            l.caps_changed(want);
+        }
+    }
+
     /// `IN6_LINKMTU`: the advertised link MTU if it is below the
     /// interface's, else the interface's.
     #[must_use]

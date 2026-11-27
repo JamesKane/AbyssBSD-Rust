@@ -87,6 +87,9 @@ pub struct PktHdr {
     pub l4hlen: u8,
     /// The receive timestamp in nanoseconds, with `flags::TSTMP`.
     pub rcv_tstmp: u64,
+    /// TCP segments merged into this one by receive offload
+    /// (`lro_nsegs`); 0 for none.
+    pub lro_nsegs: u16,
 }
 
 /// A header a packet can be read as: `LEN` bytes, parsed or rejected.

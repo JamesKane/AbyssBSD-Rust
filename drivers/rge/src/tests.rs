@@ -607,3 +607,20 @@ fn rtl8125d_configure() {
     assert!(!s.bytes.contains_key(&(regs::INTMITI + 4 * 32)));
     assert!(s.csi.contains_key(&0x890));
 }
+
+/// A TSO frame is held to the large send's limits, not to the longest
+/// frame sent as it is (9212 bytes): 64,000 bytes of payload, 64 segments.
+#[test]
+fn tso_limits_are_the_large_sends() {
+    use crate::ring::tx::tso_fits;
+    let hdr = 14 + 20 + 32;
+    // Far past the jumbo frame, within the large send.
+    assert!(tso_fits(hdr + 44 * 1448, hdr, 1448));
+    assert!(tso_fits(hdr + 64_000, hdr, 1448));
+    assert!(!tso_fits(hdr + 64_001, hdr, 1448));
+    // 65 segments of a small MSS.
+    assert!(tso_fits(hdr + 64 * 500, hdr, 500));
+    assert!(!tso_fits(hdr + 64 * 500 + 1, hdr, 500));
+    assert!(!tso_fits(hdr, hdr, 1448));
+    assert!(!tso_fits(hdr + 100, hdr, 0));
+}

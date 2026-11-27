@@ -29,7 +29,7 @@ use sched::{Sleepable, WaitQueue};
 use sync::SpinLock;
 use vfs::Uio;
 
-use super::{CHUNK, Driver, Make, NO_PID, Output, Tty, get_int, put_int};
+use super::{CHUNK, COPY, Driver, Make, NO_PID, Output, Tty, get_int, put_int};
 
 /// The numbers in use (`pts_pool`).
 static UNITS: SpinLock<Vec<bool>> = SpinLock::new(Vec::new());
@@ -208,7 +208,10 @@ impl Master {
                         done += uio.copy_out(&[TIOCPKT_DATA])?;
                         st = self.tty.st.lock(s);
                     }
-                    let mut buf = [0u8; CHUNK * 4];
+                    // `ttydisc_getc_uio`: the pieces, then the writers
+                    // woken once, even after a fault.
+                    let mut buf = [0u8; COPY];
+                    let mut r = Ok(());
                     while uio.resid() > 0 {
                         let want = uio.resid().min(buf.len());
                         let n = self.tty.getc(&mut st, &mut buf[..want]);
@@ -217,11 +220,19 @@ impl Master {
                         }
                         self.tty.mirror(&st);
                         drop(st);
-                        done += uio.copy_out(&buf[..n])?;
+                        let copied = uio.copy_out(&buf[..n]);
                         st = self.tty.st.lock(s);
+                        match copied {
+                            Ok(c) => done += c,
+                            Err(e) => {
+                                r = Err(e);
+                                break;
+                            }
+                        }
                     }
+                    self.tty.getc_done(&mut st);
                     self.tty.mirror(&st);
-                    return Ok(done);
+                    return r.map(|()| done);
                 }
                 if self.sc.finished.load(Ordering::Acquire) {
                     return Ok(0);
@@ -383,14 +394,22 @@ impl Master {
         tty.tty_ioctl(s, req, arg, fflag).map(|()| 0)
     }
 
-    /// `ptsdev_poll`.
+    /// `ptsdev_poll`: a poller is registered only when nothing is ready
+    /// (`revents == 0`), and looks again after.
     pub(crate) fn poll(&self, events: i16, w: Option<&Arc<dyn event::Wake>>) -> i16 {
+        let revents = self.look(events);
+        let Some(w) = w.filter(|_| revents == 0) else {
+            return revents;
+        };
+        self.sc.notify.record(w);
+        self.look(events)
+    }
+
+    /// What [`Master::poll`] reports now.
+    fn look(&self, events: i16) -> i16 {
         use abi::event::{POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM};
         if self.sc.finished.load(Ordering::Acquire) {
             return (events & (POLLIN | POLLRDNORM)) | POLLHUP;
-        }
-        if let Some(w) = w {
-            self.sc.notify.record(w);
         }
         let mut revents = 0;
         if events & (POLLIN | POLLRDNORM) != 0

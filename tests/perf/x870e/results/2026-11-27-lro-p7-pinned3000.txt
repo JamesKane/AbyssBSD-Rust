@@ -1,0 +1,41 @@
+perf on the Ryzen 9 7900X / X870E: AbyssBSD 0e8973c vs FreeBSD 15.1-RELEASE GENERIC (stock)
+3 FreeBSD runs, 3 AbyssBSD runs; FreeBSD 15.1 userland on both
+
+freebsd: side=freebsd ident=GENERIC 15.1-RELEASE
+freebsd: cpu0 freq=3000 cx=C1
+freebsd: processes=50 load={ 0.06 0.01 0.00 }
+abyss: side=abyss ident=ABYSSBSD 15.1-RELEASE
+abyss: cpu0 freq=2994 cx=none
+abyss: processes=30 load={ 0.12 0.03 0.01 }
+
+core class all, AbyssBSD 0e8973c vs FreeBSD 15.1-RELEASE GENERIC (stock), 3/3 runs
+ratio = median(AbyssBSD) / median(FreeBSD); pass <= 1.02; noisy = FreeBSD CV > 1%
+
+benchmark                     FreeBSD       AbyssBSD   ratio  95% CI              CV  verdict
+sendfile.ktls            3488.3 ns/op   3490.2 ns/op   1.001  [0.999, 1.002]   0.0%  Pass
+sendfile.plain           3480.3 ns/op   3488.9 ns/op   1.002  [1.000, 1.003]   0.0%  Pass
+tcp.connect.lo          20957.0 ns/op  12779.6 ns/op   0.610  [0.604, 0.612]   0.4%  Win
+tcp.connect.net        203713.4 ns/op 191135.1 ns/op   0.938  [0.937, 0.944]   0.2%  Win
+tcp.cpu.rx                799.8 ns/op    712.8 ns/op   0.891  [0.647, 0.996]  20.0%  Noisy
+tcp.cpu.tx               1154.6 ns/op   1510.5 ns/op   1.308  [1.214, 1.385]   1.9%  Noisy
+tcp.lo.s1                 204.2 ns/op    123.0 ns/op   0.602  [0.595, 0.620]   0.1%  Win
+tcp.lo.s4                 113.3 ns/op     91.0 ns/op   0.803  [0.766, 0.821]   1.3%  Noisy
+tcp.rr.lo.p50              14537.0 ns      5912.0 ns   0.407  [0.402, 0.415]   1.1%  Noisy
+tcp.rr.lo.p99              15309.0 ns      7204.0 ns   0.471  [0.465, 0.479]   1.3%  Noisy
+tcp.rr.net.p50             93916.0 ns     96747.0 ns   1.030  [1.027, 1.031]   0.1%  Slower
+tcp.rr.net.p99            184306.0 ns    107396.0 ns   0.583  [0.582, 0.584]   0.0%  Win
+tcp.rx.s1                3480.4 ns/op   3480.3 ns/op   1.000  [0.951, 1.000]   2.9%  Noisy
+tcp.rx.s4                3480.4 ns/op   3480.4 ns/op   1.000  [1.000, 1.000]   0.0%  Pass
+tcp.tx.s1                3480.4 ns/op   3480.5 ns/op   1.000  [1.000, 1.000]   0.0%  Pass
+tcp.tx.s4                3480.4 ns/op   3480.4 ns/op   1.000  [1.000, 1.000]   0.0%  Pass
+udp.rx.bulk              3426.1 ns/op   3426.0 ns/op   1.000  [1.000, 1.000]   0.0%  Win
+udp.rx.small             1248.8 ns/op   1223.0 ns/op   0.979  [0.961, 0.996]   1.4%  Noisy
+udp.tx.bulk              3519.6 ns/op   3426.1 ns/op   0.973  [0.964, 0.977]   0.7%  Win
+udp.tx.small              702.4 ns/op    741.8 ns/op   1.056  [1.051, 1.070]   0.7%  Slower
+
+geometric mean ratio 0.849; 5 pass, 6 win, 2 slower, 7 noisy, 0 missing
+
+components (gate: geometric mean <= 1.02):
+sendfile                 2 benchmarks   1.002  pass
+tcp                     14 benchmarks   0.790  pass
+udp                      4 benchmarks   1.002  pass

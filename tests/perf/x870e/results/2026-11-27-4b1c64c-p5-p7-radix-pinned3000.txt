@@ -1,0 +1,117 @@
+perf on the Ryzen 9 7900X / X870E: AbyssBSD 0e8973c vs FreeBSD 15.1-RELEASE GENERIC (stock)
+3 FreeBSD runs, 3 AbyssBSD runs; FreeBSD 15.1 userland on both
+
+freebsd: side=freebsd ident=GENERIC 15.1-RELEASE
+freebsd: cpu0 freq=3000 cx=C1
+freebsd: processes=46 load={ 0.13 0.04 0.01 }
+abyss: side=abyss ident=ABYSSBSD 15.1-RELEASE
+abyss: cpu0 freq=2994 cx=none
+abyss: processes=30 load={ 0.11 0.03 0.01 }
+
+core class all, AbyssBSD 0e8973c vs FreeBSD 15.1-RELEASE GENERIC (stock), 3/3 runs
+ratio = median(AbyssBSD) / median(FreeBSD); pass <= 1.02; noisy = FreeBSD CV > 1%
+
+benchmark                     FreeBSD       AbyssBSD   ratio  95% CI              CV  verdict
+event.kevent.pipe1        444.8 ns/op    495.1 ns/op   1.113  [1.093, 1.142]   0.7%  Slower
+event.kevent.pipe1000     502.0 ns/op    572.0 ns/op   1.139  [1.114, 1.158]   0.8%  Slower
+event.poll1000         111531.4 ns/op  77591.9 ns/op   0.696  [0.683, 0.704]   1.0%  Win
+event.select1000        93076.2 ns/op  63154.1 ns/op   0.679  [0.670, 0.685]   0.7%  Win
+event.timer              3428.9 ns/op   3410.4 ns/op   0.995  [0.984, 1.031]   0.5%  Pass
+event.user.pingpong      4086.3 ns/op   2033.0 ns/op   0.498  [0.494, 0.513]   0.4%  Win
+exec.lib10             1011065.2 ns/op 974781.3 ns/op   0.964  [0.960, 0.971]   0.5%  Win
+exec.rcsubr            197823528.0 ns/op 180613333.8 ns/op   0.913  [0.906, 0.919]   0.5%  Win
+exec.true              267258.2 ns/op 248879.2 ns/op   0.931  [0.915, 0.952]   1.6%  Noisy
+fs.tmpfs.create          1038.5 ns/op   1158.1 ns/op   1.115  [1.019, 1.174]   6.9%  Noisy
+fs.tmpfs.extract       249332983.0 ns/op 248538727.0 ns/op   0.997  [0.991, 1.004]   0.3%  Pass
+fs.tmpfs.find          12125912.8 ns/op 12266590.4 ns/op   1.012  [0.989, 1.024]   1.1%  Noisy
+fs.tmpfs.fsx           130575099.0 ns/op 126503401.0 ns/op   0.969  [0.956, 0.973]   0.6%  Win
+fs.tmpfs.fsync            394.8 ns/op    358.5 ns/op   0.908  [0.881, 0.920]   1.9%  Noisy
+fs.tmpfs.open_close       404.1 ns/op    417.8 ns/op   1.034  [0.986, 1.061]   2.9%  Noisy
+fs.tmpfs.rand_read        449.5 ns/op    390.4 ns/op   0.869  [0.859, 0.870]   0.5%  Win
+fs.tmpfs.rand_write       472.7 ns/op    417.2 ns/op   0.883  [0.858, 0.889]   1.2%  Noisy
+fs.tmpfs.readdir           47.4 ns/op     31.2 ns/op   0.658  [0.583, 0.671]   6.5%  Noisy
+fs.tmpfs.rename          1204.6 ns/op   1401.8 ns/op   1.164  [1.061, 1.260]   8.1%  Noisy
+fs.tmpfs.seq_read.warm   4316.5 ns/op   4627.1 ns/op   1.072  [1.059, 1.078]   0.8%  Slower
+fs.tmpfs.seq_write       7541.8 ns/op   5686.6 ns/op   0.754  [0.731, 0.800]   4.4%  Noisy
+fs.tmpfs.stat.hit         261.8 ns/op    282.6 ns/op   1.079  [1.076, 1.105]   0.4%  Slower
+fs.tmpfs.stat.miss        225.5 ns/op    227.5 ns/op   1.009  [0.997, 1.032]   0.8%  Pass
+fs.tmpfs.unlink           886.4 ns/op   1022.5 ns/op   1.154  [1.039, 1.274]   9.7%  Noisy
+fs.ufs.create            3124.7 ns/op   2955.6 ns/op   0.946  [0.927, 0.951]   1.2%  Noisy
+fs.ufs.extract         346649325.0 ns/op 399535850.0 ns/op   1.153  [1.131, 1.162]   0.4%  Slower
+fs.ufs.find            12389226.9 ns/op 11952061.0 ns/op   0.965  [0.935, 0.972]   1.1%  Noisy
+fs.ufs.fsx             420499073.0 ns/op 314087511.0 ns/op   0.747  [0.737, 0.749]   0.4%  Win
+fs.ufs.fsync            32973.8 ns/op   8302.7 ns/op   0.252  [0.246, 0.255]   0.6%  Win
+fs.ufs.open_close         421.8 ns/op    424.9 ns/op   1.007  [0.978, 1.030]   0.8%  Pass
+fs.ufs.rand_read          484.0 ns/op    394.2 ns/op   0.814  [0.798, 0.822]   0.9%  Win
+fs.ufs.rand_write         839.2 ns/op    572.6 ns/op   0.682  [0.673, 0.690]   1.1%  Noisy
+fs.ufs.readdir             38.3 ns/op     25.0 ns/op   0.653  [0.638, 0.657]   1.4%  Noisy
+fs.ufs.rename            5279.5 ns/op   4026.0 ns/op   0.763  [0.745, 0.766]   1.2%  Noisy
+fs.ufs.seq_read.cold    21910.1 ns/op  17732.7 ns/op   0.809  [0.804, 0.863]   3.0%  Noisy
+fs.ufs.seq_read.warm     4783.2 ns/op   4704.6 ns/op   0.984  [0.968, 1.124]   7.8%  Noisy
+fs.ufs.seq_write        22310.8 ns/op  25750.9 ns/op   1.154  [1.050, 1.173]   5.8%  Noisy
+fs.ufs.stat.hit           274.1 ns/op    278.4 ns/op   1.016  [0.953, 1.039]   1.8%  Noisy
+fs.ufs.stat.miss          219.7 ns/op    228.0 ns/op   1.038  [0.922, 1.086]   5.3%  Noisy
+fs.ufs.unlink            3497.9 ns/op   2526.3 ns/op   0.722  [0.718, 0.728]   0.4%  Win
+pty.canon                2654.4 ns/op   2514.8 ns/op   0.947  [0.944, 0.949]   0.2%  Win
+pty.raw                  7798.0 ns/op   4311.5 ns/op   0.553  [0.546, 0.556]   0.7%  Win
+pty.relay                6637.2 ns/op   8675.0 ns/op   1.307  [1.285, 1.332]   0.4%  Slower
+sendfile.ktls            3481.7 ns/op   3486.2 ns/op   1.001  [0.999, 1.002]   0.0%  Pass
+sendfile.plain           3480.0 ns/op   3471.0 ns/op   0.997  [0.997, 1.001]   0.1%  Pass
+tcp.connect.lo          20775.0 ns/op  12742.8 ns/op   0.613  [0.603, 0.615]   0.8%  Win
+tcp.connect.net        203623.8 ns/op 190863.8 ns/op   0.937  [0.934, 0.943]   0.2%  Win
+tcp.cpu.rx                825.6 ns/op   1238.4 ns/op   1.500  [1.162, 1.636]  14.5%  Noisy
+tcp.cpu.tx               1038.6 ns/op   1460.0 ns/op   1.406  [1.265, 1.499]   6.8%  Noisy
+tcp.lo.s1                 186.8 ns/op    125.0 ns/op   0.669  [0.608, 0.897]  18.7%  Noisy
+tcp.lo.s4                 112.8 ns/op     90.4 ns/op   0.801  [0.775, 1.029]  13.2%  Noisy
+tcp.rr.lo.p50              14588.0 ns      5911.0 ns   0.405  [0.402, 0.412]   0.7%  Win
+tcp.rr.lo.p99              15409.0 ns      7113.0 ns   0.462  [0.452, 0.470]   0.6%  Win
+tcp.rr.net.p50             93636.0 ns     97116.0 ns   1.037  [1.034, 1.038]   0.1%  Slower
+tcp.rr.net.p99            184466.0 ns    107488.0 ns   0.583  [0.582, 0.584]   0.1%  Win
+tcp.rx.s1                3480.4 ns/op   3480.2 ns/op   1.000  [1.000, 1.000]   0.0%  Pass
+tcp.rx.s4                3480.4 ns/op   3480.6 ns/op   1.000  [1.000, 1.000]   0.0%  Pass
+tcp.tx.s1                3480.4 ns/op   3480.6 ns/op   1.000  [1.000, 1.000]   0.0%  Pass
+tcp.tx.s4                3480.4 ns/op   3480.7 ns/op   1.000  [1.000, 1.000]   0.0%  Pass
+thr.cond.pingpong        4517.6 ns/op   2503.7 ns/op   0.554  [0.536, 0.560]   1.1%  Noisy
+thr.create               4310.5 ns/op   3681.0 ns/op   0.854  [0.849, 0.863]   0.5%  Win
+thr.mutex.pi.t1            12.1 ns/op     12.1 ns/op   1.000  [1.000, 1.000]   0.0%  Pass
+thr.mutex.pi.t2            28.4 ns/op     15.2 ns/op   0.535  [0.521, 0.543]   0.4%  Win
+thr.mutex.pi.t4           100.6 ns/op     28.8 ns/op   0.286  [0.274, 0.303]   3.3%  Noisy
+thr.mutex.pi.t8           118.7 ns/op     53.5 ns/op   0.451  [0.387, 0.478]   4.7%  Noisy
+thr.mutex.pshared.t1       36.7 ns/op     36.1 ns/op   0.984  [0.973, 1.014]   1.6%  Noisy
+thr.mutex.pshared.t2      154.6 ns/op     40.6 ns/op   0.263  [0.261, 0.265]   0.6%  Win
+thr.mutex.pshared.t4      102.0 ns/op     58.0 ns/op   0.569  [0.549, 0.571]   1.5%  Noisy
+thr.mutex.pshared.t8       93.4 ns/op     82.0 ns/op   0.878  [0.787, 0.889]   6.6%  Noisy
+thr.mutex.t1               12.5 ns/op     12.4 ns/op   0.992  [0.992, 1.008]   0.5%  Pass
+thr.mutex.t2               25.5 ns/op     13.9 ns/op   0.545  [0.543, 0.555]   0.4%  Win
+thr.mutex.t4               45.7 ns/op     21.3 ns/op   0.466  [0.460, 0.476]   1.4%  Noisy
+thr.mutex.t8               43.5 ns/op     31.1 ns/op   0.715  [0.689, 0.729]   0.7%  Win
+thr.rwlock.t1              11.1 ns/op     11.1 ns/op   1.000  [0.965, 1.027]   1.4%  Noisy
+thr.rwlock.t2             366.8 ns/op     70.7 ns/op   0.193  [0.189, 0.199]   1.0%  Noisy
+thr.rwlock.t4             329.0 ns/op    159.4 ns/op   0.484  [0.458, 0.704]  14.3%  Noisy
+thr.rwlock.t8             395.3 ns/op    237.8 ns/op   0.602  [0.565, 0.681]   8.0%  Noisy
+thr.sem.pingpong         3964.4 ns/op   1807.4 ns/op   0.456  [0.449, 0.462]   0.5%  Win
+udp.rx.bulk              3426.1 ns/op   3426.0 ns/op   1.000  [1.000, 1.000]   0.0%  Pass
+udp.rx.small             1275.1 ns/op   1246.1 ns/op   0.977  [0.949, 1.025]   2.5%  Noisy
+udp.tx.bulk              3505.1 ns/op   3426.1 ns/op   0.977  [0.970, 0.978]   0.5%  Win
+udp.tx.small              702.6 ns/op    701.7 ns/op   0.999  [0.991, 1.055]   0.4%  Pass
+unix.connect             5193.7 ns/op   1950.8 ns/op   0.376  [0.374, 0.383]   0.4%  Win
+unix.dgram                499.5 ns/op    407.4 ns/op   0.816  [0.793, 0.819]   0.8%  Win
+unix.rights               608.3 ns/op    599.1 ns/op   0.985  [0.891, 1.136]   5.8%  Noisy
+unix.seqpacket.pingpong   4135.0 ns/op    841.8 ns/op   0.204  [0.202, 0.205]   0.1%  Win
+unix.stream.bw4k          528.9 ns/op    517.4 ns/op   0.978  [0.889, 1.034]   4.2%  Noisy
+unix.stream.bw64k        4928.4 ns/op   5184.0 ns/op   1.052  [0.988, 1.069]   3.3%  Noisy
+unix.stream.pingpong     4167.6 ns/op    835.6 ns/op   0.200  [0.200, 0.204]   0.5%  Win
+
+geometric mean ratio 0.769; 14 pass, 29 win, 7 slower, 39 noisy, 0 missing
+
+components (gate: geometric mean <= 1.02):
+event                    6 benchmarks   0.816  pass
+exec                     3 benchmarks   0.936  pass
+fs.tmpfs                15 benchmarks   0.968  pass
+fs.ufs                  16 benchmarks   0.816  pass
+pty                      3 benchmarks   0.881  pass
+sendfile                 2 benchmarks   0.999  pass
+tcp                     14 benchmarks   0.830  pass
+thr                     19 benchmarks   0.565  pass
+udp                      4 benchmarks   0.988  pass
+unix                     7 benchmarks   0.536  pass
