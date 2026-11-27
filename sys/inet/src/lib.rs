@@ -313,6 +313,7 @@ pub(crate) fn timer_kick() {
 pub fn init() {
     net::netisr::register(net::netisr::Proto::Ip, ip::input);
     net::netisr::register(net::netisr::Proto::Ipv6, ip6::input);
+    net::lro::set_forwarding_hook(|v| state::on(&state::of(v).conf.forwarding));
     net::set_in6_hooks(net::In6Hooks {
         resolve: nd6::resolve,
         ifa_added: nd6::ifa_added,

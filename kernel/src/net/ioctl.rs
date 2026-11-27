@@ -539,7 +539,7 @@ fn set(req: u32, arg: &mut [u8]) -> Result<usize, Errno> {
             if want & !i.capabilities != 0 {
                 return Err(Errno::EINVAL);
             }
-            n.with_iface(&name, |i| i.capenable = want);
+            n.with_iface(&name, |i| i.set_capenable(want));
         }
         sio::SIOCSIFFIB => {
             priv_check(Priv::NetSetiffib)?;

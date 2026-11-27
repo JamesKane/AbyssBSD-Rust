@@ -584,6 +584,17 @@ stock 15.1. Open:
   made `sendfile` 1.67x, 30 us with the 40 us gap brought it back to 1.000. Measured only on the RTL8125D;
   the RTL8126, `igc` and `virtio-net` do not poll. Left: software LRO for the per-segment stack cost
   (`tcp.cpu.rx` 1.35x, `tcp.cpu.tx` 1.4 to 1.6x and noisy, `tcp.rr.net.p50` 1.06x).
+  **Software LRO (2026-11-27):** stock's `re0` runs `tcp_lro`: at a gigabit it merges 13 segments
+  into each TCP input and sends one ACK per 15 segments; we ran TCP on every segment and acknowledged
+  every second. `sys/net/src/lro.rs` merges as `tcp_lro_condense` does (IPv4 TCP with checksums the
+  device verified, timestamps only, ACK and PSH only, in order, no forwarding), with the merged frame's
+  checksums rebuilt from each segment's own; `rge` offers `IFCAP_LRO` (on, as `re`), and since its
+  30 µs poll rounds see about 2.5 frames, keeps a connection's frame across rounds for up to 100 µs
+  (`tcp_lro_flush_inactive`'s mechanism), sending at each round what carries a PSH. 18 segments a
+  merge, one ACK per 23. Pure ACKs are not folded, unlike FreeBSD: folded, our sends to the build
+  server took 10,900 retransmissions in 5 s (the peer saw holes; neither NIC dropped), 365 Mbit/s
+  against 2 Gbit/s. Why stock survives folding is open, and is the way to `tcp.cpu.tx` (1.31). `p7`
+  (3 runs): every component passes, geometric mean 0.849, `tcp.cpu.rx` 1.50 to 0.89.
   **vm passes (2026-11-27):** split in userland on both kernels at 3000 MHz, the gap was in the new
   page's path: not teardown (`munmap` 27 ns a page against stock's 46), not superpages (stock with
   `vm.pmap.pg_ps_enabled=0` scored the same), not the shared fault path (a write fault on a resident

@@ -91,6 +91,12 @@ pub trait Link: Send + Sync {
     /// Called under the interfaces' lock, as `flags_changed` is.
     fn multicast_changed(&self, _groups: &[[u8; 6]]) {}
 
+    /// Its interface's enabled capabilities changed (`SIOCSIFCAP` to the
+    /// driver, or a bridge taking a member's LRO away): the new
+    /// `capenable`. Called under the interfaces' lock, as `flags_changed`
+    /// is.
+    fn caps_changed(&self, _capenable: u32) {}
+
     /// Whether a packet may go out now, checked before it is queued
     /// (`tunoutput`'s `EHOSTDOWN` while no one has the device open).
     ///

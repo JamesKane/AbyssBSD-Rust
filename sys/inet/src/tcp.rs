@@ -1854,6 +1854,9 @@ struct Arrival {
     iptos: u8,
     /// `M_BCAST` or `M_MCAST`, or a multicast or broadcast address.
     multi: bool,
+    /// Segments receive offload merged into this one (`lro_nsegs`, at
+    /// least 1).
+    nsegs: u16,
 }
 
 /// `tcp_input` for IPv4: `m` holds the IP header (`ip`) and the segment.
@@ -1904,6 +1907,7 @@ pub(crate) fn input4(vnet: &Arc<Vnet>, mut m: Packet, ip: &Ip) {
         zone: 0,
         iptos: ip.tos,
         multi,
+        nsegs: m.hdr.lro_nsegs.max(1),
     };
     input(vnet, st, m, &a);
 }
@@ -1953,6 +1957,7 @@ pub(crate) fn input6(vnet: &Arc<Vnet>, mut m: Packet, off: usize, h: &crate::ip6
         zone,
         iptos,
         multi,
+        nsegs: m.hdr.lro_nsegs.max(1),
     };
     input(vnet, st, m, &a);
 }
@@ -2058,7 +2063,7 @@ fn input(vnet: &Arc<Vnet>, st: &state::State, m: Packet, a: &Arrival) {
             opts,
             data: core::mem::take(&mut data),
             iptos: a.iptos,
-            nsegs: 1,
+            nsegs: a.nsegs,
         });
         let mut reset = false;
         let mut recycle = false;

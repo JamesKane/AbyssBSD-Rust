@@ -1809,7 +1809,7 @@ fn port_cost(link_state: u8, baudrate: u64) -> (u32, u32) {
 fn set_caps(n: &mut Net, index: u16, want: u32) {
     n.with_index(index, |i| {
         if i.capenable != want {
-            i.capenable = want & i.capabilities;
+            i.set_capenable(want & i.capabilities);
         }
     });
 }
