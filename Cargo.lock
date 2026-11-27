@@ -184,6 +184,7 @@ dependencies = [
  "abi",
  "acpi",
  "aml",
+ "apple-mac",
  "bus",
  "devtree",
  "regs",
@@ -202,6 +203,25 @@ dependencies = [
  "devtree",
  "sched",
  "sync",
+]
+
+[[package]]
+name = "bge"
+version = "0.0.0"
+dependencies = [
+ "abi",
+ "bus",
+ "devtree",
+ "hal",
+ "irq",
+ "mbuf",
+ "net",
+ "nicwatch",
+ "pci",
+ "regs",
+ "sched",
+ "sync",
+ "vm",
 ]
 
 [[package]]
@@ -363,6 +383,7 @@ dependencies = [
  "apple-mac",
  "asmc",
  "atrtc",
+ "bge",
  "bus",
  "cdnc-i2c",
  "cdns-gpio",

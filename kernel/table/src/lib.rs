@@ -45,6 +45,7 @@ macro_rules! drivers {
             virtio_blk::DRIVER,
             virtio_net::DRIVER,
             nvme::DRIVER,
+            bge::DRIVER,
             rge::DRIVER,
             igc::DRIVER,
             apei::DRIVER,

@@ -231,8 +231,29 @@ The planned checks:
   checks and the 57762's PHY). Host-tested against a register model, as `rge` was. It needs
   no other Broadcom chips.
 
-**MP3 status, 2026-11-27.** `ichwd` (Patsburg), `coretemp`, the ADR-0027 property applier and
-`asmc` are done; `bge` is open.
+**MP3 status, 2026-11-27.** `ichwd` (Patsburg), `coretemp`, the ADR-0027 property applier,
+`asmc` and a first `bge` are done.
+
+- **`drivers/bge`**, the BCM57765 family only (`BGE_FLAG_57765_PLUS`), from a line-cited digest of
+  `if_bge.c` and `brgphy.c`:
+  - identification by the `GEN15_PRODID_ASICREV` chip ID;
+  - `bge_reset` with the bootcode handshake, the configuration header and MSI capability saved and
+    restored around the core reset;
+  - `bge_chipinit`, `bge_blockinit`, and the station address (the bootcode's "HK" copy in SRAM,
+    else the EEPROM);
+  - MII and the BCM57765 PHY, which `brgphy` only resets;
+  - MSI with tagged status and one-shot, re-enabled after every reset;
+  - the producer, return and send rings, all below 4 GiB, with frames copied through 2 KiB slots;
+  - RX checksums; no TX checksum offload (FreeBSD's default), TSO, jumbo frames or VLAN tag
+    stripping yet;
+  - the PHY polled every second, where FreeBSD polls only while the link is down.
+
+  14 host tests run against a model chip with the Mac Pro's identity.
+- **Mac Pro facts** from the fork's capture (2026-11-27, FreeBSD 16 verbose boot): `bge0`/`bge1` are
+  device `14e4:1682` with CHIP ID **0x57766000** (ASIC rev 0x57766, chip rev 0x577660). So the 57766
+  branch applies: the PADRNG fix, a tolerated EEPROM configuration failure, and none of the 57765
+  A0 waits. The PHY is OUI 0x001be9, model 0x24, rev 0 (`brgphy`'s reset-only case). There was no
+  handshake timeout.
 
 - **`ichwd`:** LPC `0x1d40`/`0x1d41`.
 - **`coretemp`** (`kernel/src/coretemp.rs`):
@@ -282,7 +303,8 @@ The planned checks:
   - `coretemp`'s attach and sysctls (KVM shows no sensor);
   - the memory window inside the kernel;
   - the floor writes and the limit;
-  - the `asmc` sysctl handlers.
+  - the `asmc` sysctl handlers;
+  - all of `bge` beyond the host model (no emulator has this chip).
 
   All of these wait for MP4.
 

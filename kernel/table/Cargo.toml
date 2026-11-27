@@ -22,6 +22,7 @@ hsctrl = { path = "../../drivers/hsctrl" }
 iicbus = { path = "../../sys/iicbus" }
 nvme = { path = "../../drivers/nvme" }
 pci = { path = "../../sys/pci" }
+bge = { path = "../../drivers/bge" }
 rge = { path = "../../drivers/rge" }
 uart = { path = "../../drivers/uart" }
 umass = { path = "../../drivers/umass" }

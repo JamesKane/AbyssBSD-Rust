@@ -379,7 +379,7 @@ SSD holds macOS and is never written.
 | Timers | Invariant TSC, HPET, ACPI PM timer, LAPIC (TSC-deadline capable) | Existing paths |
 | Display | **Measured:** two FirePro D700 (Tahiti XT `1002:6798`): `pci0:2:0:0` subsystem `106b:0128` (compute, none connected) and `pci0:6:0:0` `106b:0127` (display), each with its own VBIOS. GCN 1, "Southern Islands". Outputs on six Thunderbolt 2 ports and one HDMI 1.4 port | GOP framebuffer console. Which output GOP lights, and at what mode, is to check. Native graphics is Southern Islands under M-G (FreeBSD: drm-kmod's `amdgpu` with `si_support=1` and `si_dpm`, measured) |
 | Storage | Apple PCIe SSD on a proprietary connector, **AHCI** (not NVMe) | `ahci` matches by class. **macOS 12.7.6 lives on it: never written.** AbyssBSD installs to an external USB 3 disk (MACPRO.md §1) |
-| Network | Two Broadcom BCM57762 GbE. Broadcom BCM4360 802.11ac, Bluetooth 4.0 | `bge` is new work. Wi-Fi is out of scope |
+| Network | **Measured:** two BCM57762 (`14e4:1682`, CHIP ID 0x57766000, PHY OUI 0x001be9 model 0x24). Broadcom BCM4360 802.11ac, Bluetooth 4.0 | `bge` (57765 family, host-tested; MACPRO.md MP3). Wi-Fi is out of scope |
 | USB | Four USB 3 ports; the controller (not in the C602J) is to identify | `xhci` if it is standard xHCI |
 | Thunderbolt | Three Intel Thunderbolt 2 controllers, six ports | Powered and enumerated only under the Darwin `_OSI`. Hot plug is later work |
 | Console | No serial port | As on the X870E: framebuffer, the loader's log on the ESP, the watchdog |
