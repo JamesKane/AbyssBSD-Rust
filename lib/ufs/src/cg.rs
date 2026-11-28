@@ -352,48 +352,87 @@ impl<'a> Cg<'a> {
     /// ones or the block's edge, from the byte holding fragment `start` on,
     /// wrapping (FreeBSD's `ffs_mapsearch`); sets the fragment rotor.
     pub(crate) fn mapsearch(&mut self, start: u32, allocsiz: u32, fpg: u32) -> Option<u32> {
-        let bytes = fpg.div_ceil(8);
-        let first = (start / 8).min(bytes.saturating_sub(1));
-        let want = RUN_BIT.get(idx(allocsiz)).copied().unwrap_or(0);
-        let mask = 0xff_u32 >> (8 - self.frag);
         let map = &self.b[self.freeoff()..];
-        let mut found = None;
-        'scan: for (lo, hi) in [(first, bytes), (0, first + 1)] {
-            let mut byte = lo;
-            while byte < hi {
-                // Eight bytes with nothing free at once: a full group's
-                // map is mostly those.
-                if byte % 8 == 0 && byte + 8 <= hi && map[idx(byte)..idx(byte + 8)] == [0; 8] {
-                    byte += 8;
-                    continue;
-                }
-                let bits = u32::from(map[idx(byte)]);
-                // Most bytes hold no run of the size: one lookup each.
-                if RUNS[idx(bits)] & want == 0 && self.frag == 8 {
-                    byte += 1;
-                    continue;
-                }
-                let base = byte * 8;
-                // The blocks this byte covers (one, or several small ones).
-                let mut bno = base;
-                while bno < base + 8 {
-                    let block = (bits >> (bno % 8)) & mask;
-                    if bno + self.frag <= fpg
-                        && RUNS[idx(block)] & want != 0
-                        && let Some(pos) = exact_run(block, self.frag, allocsiz)
-                    {
-                        found = Some((base, bno + pos));
-                        break 'scan;
-                    }
-                    bno += self.frag;
-                }
-                byte += 1;
-            }
-        }
-        let (base, bno) = found?;
+        let (base, bno) = search(map, self.frag, start, allocsiz, fpg)?;
         self.set_frotor(base);
         Some(bno)
     }
+}
+
+/// [`Cg::mapsearch`]'s search of free map `map`: the byte the run was
+/// found in (as a fragment number), and the run's first fragment.
+fn search(map: &[u8], frag: u32, start: u32, allocsiz: u32, fpg: u32) -> Option<(u32, u32)> {
+    let bytes = fpg.div_ceil(8);
+    let first = (start / 8).min(bytes.saturating_sub(1));
+    let want = RUN_BIT.get(idx(allocsiz)).copied().unwrap_or(0);
+    for (lo, hi) in [(first, bytes), (0, first + 1)] {
+        let hi = hi.min(count32(map.len()));
+        let found = if frag == 8 {
+            // A byte is one block: `scanc` over the run table, a word at
+            // a time past words with nothing free.
+            scan_blocks(&map[idx(lo)..idx(hi)], want).map(|at| lo + count32(at))
+        } else {
+            scan_small(map, frag, lo, hi, allocsiz, fpg)
+        };
+        if let Some(byte) = found {
+            let base = byte * 8;
+            let bits = u32::from(map[idx(byte)]);
+            let bno = if frag == 8 {
+                base + exact_run(bits, 8, allocsiz)?
+            } else {
+                // `scan_small` found the block; its run again.
+                small_run(bits, frag, base, allocsiz, fpg)?
+            };
+            return Some((base, bno));
+        }
+    }
+    None
+}
+
+/// The first byte of `map` whose block has a run `want` asks for
+/// (`scanc(len, cp, fragtbl[8], mask)`).
+fn scan_blocks(map: &[u8], want: u8) -> Option<usize> {
+    let (head, rest) = map.split_at(map.len().min(map.as_ptr().align_offset(8)));
+    let hit = |b: &u8| RUNS[usize::from(*b)] & want != 0;
+    if let Some(i) = head.iter().position(hit) {
+        return Some(i);
+    }
+    let mut at = head.len();
+    let (words, tail) = rest.as_chunks::<8>();
+    for w in words {
+        // Nothing free in eight blocks: a full group's map is mostly so.
+        if *w != [0; 8]
+            && let Some(i) = w.iter().position(hit)
+        {
+            return Some(at + i);
+        }
+        at += 8;
+    }
+    tail.iter().position(hit).map(|i| at + i)
+}
+
+/// The byte, from `lo` to `hi`, holding a block (of several small ones a
+/// byte) with a run of exactly `allocsiz` free fragments.
+fn scan_small(map: &[u8], frag: u32, lo: u32, hi: u32, allocsiz: u32, fpg: u32) -> Option<u32> {
+    (lo..hi)
+        .find(|&byte| small_run(u32::from(map[idx(byte)]), frag, byte * 8, allocsiz, fpg).is_some())
+}
+
+/// In map byte `bits` (fragments `base` on), the first fragment of a
+/// block's run of exactly `allocsiz` free fragments.
+fn small_run(bits: u32, frag: u32, base: u32, allocsiz: u32, fpg: u32) -> Option<u32> {
+    let mask = 0xff_u32 >> (8 - frag);
+    let mut bno = base;
+    while bno < base + 8 {
+        let block = (bits >> (bno % 8)) & mask;
+        if bno + frag <= fpg
+            && let Some(pos) = exact_run(block, frag, allocsiz)
+        {
+            return Some(bno + pos);
+        }
+        bno += frag;
+    }
+    None
 }
 
 /// For each byte of a block's free map, the lengths of the runs of free
@@ -449,7 +488,81 @@ fn exact_run(map: u32, frag: u32, len: u32) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RUNS, exact_run};
+    use super::{RUN_BIT, RUNS, exact_run, idx, search};
+
+    /// The search as it was, byte by byte: what the word-wise scan must
+    /// agree with.
+    fn search_ref(
+        map: &[u8],
+        frag: u32,
+        start: u32,
+        allocsiz: u32,
+        fpg: u32,
+    ) -> Option<(u32, u32)> {
+        let bytes = fpg.div_ceil(8);
+        let first = (start / 8).min(bytes.saturating_sub(1));
+        let want = RUN_BIT.get(idx(allocsiz)).copied().unwrap_or(0);
+        let mask = 0xff_u32 >> (8 - frag);
+        for (lo, hi) in [(first, bytes), (0, first + 1)] {
+            for byte in lo..hi {
+                let bits = u32::from(map[idx(byte)]);
+                if RUNS[idx(bits)] & want == 0 && frag == 8 {
+                    continue;
+                }
+                let base = byte * 8;
+                let mut bno = base;
+                while bno < base + 8 {
+                    let block = (bits >> (bno % 8)) & mask;
+                    if bno + frag <= fpg
+                        && let Some(pos) = exact_run(block, frag, allocsiz)
+                    {
+                        return Some((base, bno + pos));
+                    }
+                    bno += frag;
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn word_scan_agrees_with_the_byte_scan() {
+        let mut seed = 0x9e37_79b9_u32;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for round in 0..4000 {
+            let frag = [8, 4, 2, 1][round % 4];
+            let bytes = 1 + rnd() as usize % 300;
+            let fpg = u32::try_from(bytes * 8).unwrap();
+            // Mostly full maps, as a busy group's, with a few free runs.
+            let mut map = alloc::vec![0u8; bytes + 7];
+            for b in map.iter_mut().take(bytes) {
+                *b = match rnd() % 10 {
+                    0..=6 => 0,
+                    7 => 0xff,
+                    _ => u8::try_from(rnd() & 0xff).unwrap(),
+                };
+            }
+            // Any alignment of the map in memory.
+            let off = rnd() as usize % 8;
+            let mut buf = alloc::vec![0u8; off];
+            buf.extend_from_slice(&map[..bytes]);
+            let map = &buf[off..];
+            for _ in 0..4 {
+                let start = rnd() % fpg;
+                let allocsiz = 1 + rnd() % frag;
+                assert_eq!(
+                    search(map, frag, start, allocsiz, fpg),
+                    search_ref(map, frag, start, allocsiz, fpg),
+                    "frag {frag} bytes {bytes} start {start} size {allocsiz}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn runs_table_matches_exact_run() {
