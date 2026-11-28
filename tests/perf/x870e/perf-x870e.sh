@@ -38,6 +38,8 @@ ab() { timeout "${T:-120}" ssh $SSHOPT -o UserKnownHostsFile=$S/abyss_known_host
 on() { if [ "$1" = abyss ]; then shift; ab "$@"; else shift; fb "$@"; fi; }
 log() { echo "$(date +%T) $*"; }
 CMDLINE_NORMAL='boot_multicons=YES boot_serial=YES'
+# ABYSS_CMDLINE_EXTRA: more of AbyssBSD's boot options for the runs (a
+# tunable under test, as hw.rge.vectored=1), dropped with the pin at the end.
 
 which_os() {
 	case $(T=15 fb 'sysctl -n kern.ident') in
@@ -162,7 +164,7 @@ for run in $(seq 0 $((RUNS - 1))); do
 		rm -f "$out.tmp"
 		# Each run on a fresh boot; AbyssBSD's with the clock pin.
 		boot_to freebsd
-		set_cmdline freebsd "$CMDLINE_NORMAL abyss.bench.pin_perf=$PIN_PERF" || { log "could not set AbyssBSD's command line"; exit 1; }
+		set_cmdline freebsd "$CMDLINE_NORMAL abyss.bench.pin_perf=$PIN_PERF${ABYSS_CMDLINE_EXTRA:+ $ABYSS_CMDLINE_EXTRA}" || { log "could not set AbyssBSD's command line"; exit 1; }
 		if [ "$side" = abyss ]; then
 			boot_to abyss
 		fi
