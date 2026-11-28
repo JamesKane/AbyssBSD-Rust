@@ -562,6 +562,11 @@ impl<R: Regs> Chip<R> {
 
     /// Masks interrupts and resets (`rge_hw_reset`).
     pub fn hw_reset(&self) -> Result<(), HwError> {
+        if self.vectored() {
+            self.mask();
+            let st = self.regs.read32(regs::ISR_V2);
+            self.regs.write32(regs::ISR_V2, st);
+        }
         self.regs.write32(regs::IMR, 0);
         let isr = self.regs.read32(regs::ISR);
         self.regs.write32(regs::ISR, isr);
@@ -860,6 +865,19 @@ impl<R: Regs> Chip<R> {
         for i in 0..if r26 { 32 } else { 64 } {
             self.regs.write32(regs::INTMITI + 4 * i, 0);
         }
+        if self.vectored() {
+            // As Realtek's driver sets the RTL8125D up: the per-vector
+            // mapping on, nothing bypassing moderation, and the first
+            // queue's moderation word.
+            let v = (self.regs.read8(regs::INT_CFG0)
+                & !(regs::INT_CFG0_TIMEOUT_BYPASS
+                    | regs::INT_CFG0_MITIGATION_BYPASS
+                    | regs::INT_CFG0_MSIX_ENTRY_NUM_MODE))
+                | regs::INT_CFG0_EN;
+            self.regs.write8(regs::INT_CFG0, v);
+            self.regs.write16(regs::INT_CFG1, 0);
+            self.regs.write32(regs::INTMITI, regs::INTMITI_R25D);
+        }
         if r26 {
             self.clr8(
                 regs::INT_CFG0,
@@ -945,7 +963,14 @@ impl<R: Regs> Chip<R> {
             .write8(regs::CMD, regs::CMD_TXENB | regs::CMD_RXENB);
         self.regs.write16(regs::IM, 0);
         self.regs.write32(regs::TIMERINT0, 0);
-        self.regs.write32(regs::IMR, regs::INTRS);
+        self.unmask();
+    }
+
+    /// Whether the interrupts are in the per-vector mapping, moderated
+    /// (`hw.rge.vectored`, on an RTL8125D: Realtek's `HwSuppIsrVer` 5).
+    /// Its status reads as the single-vector mapping's bits.
+    pub fn vectored(&self) -> bool {
+        self.mac.is_r25d() && crate::vectored_wanted()
     }
 
     /// `rge_init_locked` up to starting the chip, from any state: stops
@@ -990,16 +1015,36 @@ impl<R: Regs> Chip<R> {
 
     /// Masks every interrupt (the filter, before the thread runs).
     pub fn mask(&self) {
-        self.regs.write32(regs::IMR, 0);
+        if self.vectored() {
+            self.regs.write32(regs::IMR_V2_CLEAR, u32::MAX);
+            self.regs.write32(regs::IMR_V4_L2_CLEAR, u32::MAX);
+        } else {
+            self.regs.write32(regs::IMR, 0);
+        }
     }
 
     /// Unmasks the interrupts [`Chip::start`] enabled.
     pub fn unmask(&self) {
-        self.regs.write32(regs::IMR, regs::INTRS);
+        if self.vectored() {
+            self.regs.write32(regs::IMR_V2_SET, regs::V5_INTRS);
+        } else {
+            self.regs.write32(regs::IMR, regs::INTRS);
+        }
     }
 
-    /// Reads and acknowledges what is pending.
+    /// Reads and acknowledges what is pending, as the single-vector
+    /// mapping's bits (all ones from a device that is gone).
     pub fn ack(&self) -> u32 {
+        if self.vectored() {
+            let st = self.regs.read32(regs::ISR_V2);
+            if st == u32::MAX {
+                return st;
+            }
+            if st != 0 {
+                self.regs.write32(regs::ISR_V2, st);
+            }
+            return v5_status(st);
+        }
         let st = self.regs.read32(regs::ISR);
         if st != 0 {
             self.regs.write32(regs::ISR, st);
@@ -1028,4 +1073,20 @@ impl<R: Regs> PhyTarget for &Chip<R> {
     fn load_phy_mcu(&mut self, version: u16) {
         Chip::load_phy_mcu(self, version);
     }
+}
+
+/// The RTL8125D's per-vector status as the single-vector mapping's bits.
+#[must_use]
+pub const fn v5_status(st: u32) -> u32 {
+    let mut out = 0;
+    if st & regs::V5_RXQ0 != 0 {
+        out |= regs::ISR_RX_OK;
+    }
+    if st & regs::V5_TXQ0 != 0 {
+        out |= regs::ISR_TX_OK;
+    }
+    if st & regs::V5_LINKCHG != 0 {
+        out |= regs::ISR_LINKCHG;
+    }
+    out
 }

@@ -47,6 +47,27 @@ pub const PPSW: usize = 0x00f2;
 pub const TIMERINT3: usize = 0x00f4;
 /// The interrupt moderation timers, 4 bytes each.
 pub const INTMITI: usize = 0x0a00;
+/// The RTL8125D's first moderation word, Realtek's value (if_re.c
+/// 1.102.01 for `MACFG_86` and `MACFG_87`), in the per-vector mapping.
+pub const INTMITI_R25D: u32 = 0x0014_0014;
+/// The per-vector mapping's mask (write 1 to mask), status (write 1 to
+/// clear) and unmask registers, and the second level's mask
+/// (delta spec 04 §4; Realtek's `RE_IMR_V2_*`, `RE_ISR_V2_8125`,
+/// `RE_IMR_V4_L2_CLEAR_REG_8125`).
+pub const IMR_V2_CLEAR: usize = 0x0d00;
+pub const ISR_V2: usize = 0x0d04;
+pub const IMR_V2_SET: usize = 0x0d0c;
+pub const IMR_V4_L2_CLEAR: usize = 0x0d10;
+/// The RTL8125D's bits in that mapping (Realtek's `RE_8125D_ISR_*`):
+/// receive queue 0, transmit queue 0, link change.
+pub const V5_RXQ0: u32 = 0x0000_0001;
+pub const V5_TXQ0: u32 = 0x0001_0000;
+pub const V5_LINKCHG: u32 = 0x0004_0000;
+/// What Realtek's driver unmasks on the RTL8125D (`RE_INTRS_8125D`): the
+/// link is followed by the tick.
+pub const V5_INTRS: u32 = V5_RXQ0 | V5_TXQ0;
+/// `INT_CFG0`'s MSI-X entry-number mode, cleared on the RTL8125D.
+pub const INT_CFG0_MSIX_ENTRY_NUM_MODE: u8 = 0x20;
 pub const PHYBASE: u16 = 0x0a40;
 pub const ADDR0: usize = 0x19e0;
 pub const ADDR1: usize = 0x19e4;

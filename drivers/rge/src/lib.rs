@@ -37,6 +37,21 @@ pub fn set_tunables(get: &dyn Fn(&str) -> Option<i32>) {
         // Relaxed: a tunable, read at attach.
         TSO.store(i32::from(v != 0), Ordering::Relaxed);
     }
+    if let Some(v) = get("hw.rge.vectored") {
+        VECTORED.store(i32::from(v != 0), Ordering::Relaxed);
+    }
+}
+
+/// `hw.rge.vectored` (a boot-time tunable): -1 unset, else 0 for off and 1
+/// for on. The RTL8125D's interrupts in the per-vector mapping, moderated,
+/// as Realtek's driver runs it ([`hw::Chip::vectored`]); on unless set to
+/// 0 (checked on the X870E: `p7` at 3000 MHz, `tcp.cpu.tx` 1.38 to 0.60,
+/// `udp` 1.028 to 0.993, 140,000 interrupts a second to 11,500 sending
+/// small datagrams).
+static VECTORED: AtomicI32 = AtomicI32::new(-1);
+
+pub(crate) fn vectored_wanted() -> bool {
+    VECTORED.load(Ordering::Relaxed) != 0
 }
 
 /// Whether a chip of type `mac` gets TSO: as the tunable says, else on the

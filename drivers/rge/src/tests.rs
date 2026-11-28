@@ -591,9 +591,25 @@ fn rtl8125d_configure() {
     assert_eq!(s.mac.get(&0xe0c0), Some(&0x4403));
     assert_eq!(s.mac.get(&0xe092).copied().unwrap_or(0) & 0x00ff, 0x0008);
     assert!(!s.bytes.contains_key(&0x0382), "RTL8125's write only");
-    // 64 moderation timers cleared (32 on the RTL8126), no INT_CFG1.
+    // 64 moderation timers cleared (32 on the RTL8126), then the
+    // per-vector mapping as Realtek's driver sets it: the first word,
+    // INT_CFG1 zero, INT_CFG0 enabled with no bypass.
     assert!(s.bytes.contains_key(&(regs::INTMITI + 4 * 63)));
-    assert!(!s.bytes.contains_key(&regs::INT_CFG1));
+    assert_eq!(s.get(regs::INTMITI, 4), regs::INTMITI_R25D);
+    assert_eq!(s.get(regs::INT_CFG1, 2), 0);
+    let cfg0 = s.get(regs::INT_CFG0, 1);
+    assert_eq!(
+        cfg0 & u32::from(regs::INT_CFG0_EN),
+        u32::from(regs::INT_CFG0_EN)
+    );
+    assert_eq!(
+        cfg0 & u32::from(
+            regs::INT_CFG0_TIMEOUT_BYPASS
+                | regs::INT_CFG0_MITIGATION_BYPASS
+                | regs::INT_CFG0_MSIX_ENTRY_NUM_MODE
+        ),
+        0
+    );
     // The L1 timeout is the RTL8126's.
     assert!(!s.csi.contains_key(&0x890));
     drop(s);
@@ -623,4 +639,16 @@ fn tso_limits_are_the_large_sends() {
     assert!(!tso_fits(hdr + 64 * 500 + 1, hdr, 500));
     assert!(!tso_fits(hdr, hdr, 1448));
     assert!(!tso_fits(hdr + 100, hdr, 0));
+}
+
+/// The RTL8125D's per-vector status reads as the single-vector bits.
+#[test]
+fn v5_status_maps_to_the_single_vector_bits() {
+    use crate::hw::v5_status;
+    assert_eq!(v5_status(0), 0);
+    assert_eq!(v5_status(regs::V5_RXQ0), regs::ISR_RX_OK);
+    assert_eq!(
+        v5_status(regs::V5_RXQ0 | regs::V5_TXQ0 | regs::V5_LINKCHG | 0x8000_0000),
+        regs::ISR_RX_OK | regs::ISR_TX_OK | regs::ISR_LINKCHG
+    );
 }
