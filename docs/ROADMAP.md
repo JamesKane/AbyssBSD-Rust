@@ -628,6 +628,13 @@ stock 15.1. Open:
   merge, one ACK per 23. Pure ACKs were at first not folded: folded, our sends to the build server lost data. The cause was
   `rge` (below), and they are folded now, as FreeBSD does. `p7`
   (3 runs): every component passes, geometric mean 0.849, `tcp.cpu.rx` 1.50 to 0.89.
+  **p7 passes with moderation (2026-11-27):** `rge` now runs the RTL8125D as Realtek's driver does, in
+  the per-vector interrupt mapping with moderation word 0x00140014 (`hw.rge.vectored=0` turns it off).
+  Sending small datagrams, 140,000 interrupts a second to 11,500 (stock 11,000). `p7` (3 runs):
+  `tcp.cpu.tx` 1.38 to 0.60, `udp` 0.993 (`udp.tx.small` steady at 1.010), `tcp.rr.net.p50` 0.943,
+  every component passes, geometric mean 0.819. Open: `tcp.connect.net` 0.957 to 1.146 (about 30 us a
+  connection, the moderation delay on the handshake), the scheduler's one-CPU-only CPU sets and missing
+  periodic balance, and `netstat`'s `Oerrs` not showing the driver's `oerrors`.
   **TSO, ACK folding, interrupts (2026-11-27):** `rge` refused every TSO frame longer than its 9,212-byte
   jumbo frame: the length check came before the TSO branch and the tap, and `netstat` does not show
   the driver's `oerrors`. Sending at a gigabit, 5,600 retransmissions in 10 s and TSO frames of two
