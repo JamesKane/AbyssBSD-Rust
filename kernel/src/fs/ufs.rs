@@ -91,16 +91,40 @@ struct InodeCell {
 }
 
 /// Bytes of file data being written without waiting, on every UFS mount
-/// (FreeBSD's `runningbufspace`), and the most a writer may start more
-/// past (`hirunningspace`): beyond it, it waits for some to finish.
+/// (FreeBSD's `runningbufspace`).
 static RUNNING: AtomicU64 = AtomicU64::new(0);
 static RUNNING_ROOM: WaitQueue = WaitQueue::new();
-const HI_RUNNING: u64 = 16 << 20;
+
+/// The most a writer may start more past, and where waiting writers are
+/// woken (`hirunningspace`, `lorunningspace`), sized from RAM as FreeBSD
+/// sizes them: on the X870E's 64 GiB 26 MiB and 17 MiB, where a fixed
+/// 16 MiB with a wakeup at every finished write made a sequential writer
+/// sleep and wake once per 1 MiB written out (`fs.ufs.seq_write` 1.15).
+fn running_space() -> bufcache::RunningSpace {
+    static SPACE: Once<bufcache::RunningSpace> = Once::new();
+    if let Some(r) = SPACE.get() {
+        return *r;
+    }
+    let r = bufcache::running_space(crate::mm::phys_stats().managed * 4096);
+    let _ = SPACE.set(r);
+    r
+}
 
 /// Waits while too much is being written (FreeBSD's
 /// `waitrunningbufspace`). The caller holds no lock.
 fn wait_running(s: &Sleepable) {
-    RUNNING_ROOM.wait_until(s, || RUNNING.load(Ordering::Acquire) < HI_RUNNING);
+    let hi = running_space().hi;
+    RUNNING_ROOM.wait_until(s, || RUNNING.load(Ordering::Acquire) <= hi);
+}
+
+/// `bytes` of writes finished (`runningbufwakeup`): writers wake only
+/// as the total falls to the low mark.
+fn running_done(bytes: u64) {
+    let before = RUNNING.fetch_sub(bytes, Ordering::AcqRel);
+    let lo = running_space().lo;
+    if before >= lo && before - bytes <= lo {
+        RUNNING_ROOM.wake_all();
+    }
 }
 
 /// A file's block writes started without waiting and not done yet
@@ -2599,12 +2623,11 @@ impl Pager for FilePager {
                     }
                 }
                 cell.writing.finish(lbns);
-                RUNNING.fetch_sub(bytes, Ordering::AcqRel);
-                RUNNING_ROOM.wake_all();
+                running_done(bytes);
             }
         });
         if let Err(parts) = started {
-            RUNNING.fetch_sub(bytes, Ordering::AcqRel);
+            running_done(bytes);
             self.cell.writing.finish(lbns);
             // Not started: the pages stay as they are.
             drop(parts);

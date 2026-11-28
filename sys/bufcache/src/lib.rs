@@ -771,5 +771,44 @@ impl BufCache {
     }
 }
 
+/// How much file data may be on its way to disk at once, as FreeBSD sizes
+/// it from physical memory (`hirunningspace`, `lorunningspace`): past
+/// `hi` a writer waits (`waitrunningbufspace`), and writers are woken once
+/// it falls to `lo` (`runningbufwakeup`), so a woken writer has room for
+/// more than one write before it waits again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RunningSpace {
+    pub hi: u64,
+    pub lo: u64,
+}
+
+/// [`RunningSpace`] for `phys_bytes` of RAM: `nbuf` as
+/// `kern_vfs_bio_buffer_alloc` sizes it (a quarter of the first 64 MiB in
+/// 16 KiB buffers, a tenth past it, capped), `hibufspace` from it, and
+/// `bufinit`'s `hirunningspace = max(min(roundup(hibufspace / 64,
+/// MAXBCACHEBUF), 128 * MAXPHYS), 1 MiB)`, `lorunningspace` two thirds.
+#[must_use]
+pub fn running_space(phys_bytes: u64) -> RunningSpace {
+    const BKVASIZE: u64 = 16 << 10;
+    const MAXBCACHEBUF: u64 = 64 << 10;
+    const MAXPHYS: u64 = 1 << 20;
+    let kb = phys_bytes / 1024;
+    let factor = 4 * BKVASIZE / 1024;
+    let mut nbuf = 50;
+    if kb > 4096 {
+        nbuf += ((kb - 4096) / factor).min(65_536 / factor);
+    }
+    if kb > 65_536 {
+        nbuf += ((kb - 65_536) * 2 / (factor * 5)).min(32 * 1024 * 1024 / (factor * 5));
+    }
+    let maxbufspace = nbuf * BKVASIZE;
+    let hibufspace = (3 * maxbufspace / 4).max(maxbufspace.saturating_sub(MAXBCACHEBUF * 10));
+    let hi = (hibufspace / 64)
+        .next_multiple_of(MAXBCACHEBUF)
+        .clamp(1 << 20, 128 * MAXPHYS);
+    let lo = (hi * 2 / 3).next_multiple_of(MAXBCACHEBUF);
+    RunningSpace { hi, lo }
+}
+
 #[cfg(test)]
 mod tests;

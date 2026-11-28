@@ -386,3 +386,13 @@ fn a_buffer_changed_while_written_stays_dirty() {
     assert_eq!((slow.disk.at(0), slow.disk.at(8192)), (4, 5));
     assert_eq!(c.usage().1, 0);
 }
+
+/// FreeBSD's values: the X870E's 64 GiB give `vfs.hirunningspace`
+/// 27131904 on stock 15.1, and a small machine gets the 1 MiB floor.
+#[test]
+fn running_space_as_freebsd_sizes_it() {
+    let r = crate::running_space(64 << 30);
+    assert_eq!(r.hi, 27_131_904);
+    assert_eq!(r.lo, 18_087_936);
+    assert_eq!(crate::running_space(32 << 20).hi, 1 << 20);
+}
