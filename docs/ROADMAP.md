@@ -628,6 +628,12 @@ stock 15.1. Open:
   merge, one ACK per 23. Pure ACKs were at first not folded: folded, our sends to the build server lost data. The cause was
   `rge` (below), and they are folded now, as FreeBSD does. `p7`
   (3 runs): every component passes, geometric mean 0.849, `tcp.cpu.rx` 1.50 to 0.89.
+  **One status read reverted (2026-11-27):** reading `rge`'s status once a service episode (8ae7352)
+  passed the pinned gate, but at full clock it lost receive interrupts: connections to the build server
+  took 1 to 100 ms each (a SYN-ACK or a byte waited in the ring until TCP retransmitted), found with
+  `ktrace`/`kdump -R` and bisected against saved kernels. The status is read again before each unmask.
+  `p7` (3 runs): `tcp.connect.net` 1.061 (was 1.146), `tcp.cpu.tx` 0.91, `udp` 0.996, every component
+  passes, geometric mean 0.858; full-clock connects 200 us. Driver changes get a full-clock check too.
   **p7 passes with moderation (2026-11-27):** `rge` now runs the RTL8125D as Realtek's driver does, in
   the per-vector interrupt mapping with moderation word 0x00140014 (`hw.rge.vectored=0` turns it off).
   Sending small datagrams, 140,000 interrupts a second to 11,500 (stock 11,000). `p7` (3 runs):
