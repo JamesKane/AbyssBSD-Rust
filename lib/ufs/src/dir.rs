@@ -287,7 +287,7 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
                 *f = (*f).max(reclen16(free));
             }
             if s.ino != 0 {
-                h.names.insert(n.into(), (s.ino, s.offset));
+                h.names.insert(n, (s.ino, s.offset));
             }
             false
         })?;
@@ -391,7 +391,7 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
                 };
                 let c = s.offset / crate::len64(DIRBLKSIZ);
                 if let Some(h) = dir.dirhash.as_mut() {
-                    h.names.insert(name.into(), (ino, offset));
+                    h.names.insert(name, (ino, offset));
                     if let Some(f) = h.free.get_mut(crate::idx64(c)) {
                         *f = reclen16(free);
                     }
@@ -441,7 +441,7 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
                 });
             })?;
         if let Some(h) = dir.dirhash.as_mut() {
-            h.names.insert(name.into(), (ino, offset));
+            h.names.insert(name, (ino, offset));
             h.free.push(reclen16(DIRBLKSIZ - need));
         }
         Ok(())
@@ -541,7 +541,7 @@ impl<B: crate::BlockIo> crate::Ufs<B> {
                 }
             })?;
         if let Some(h) = dir.dirhash.as_mut() {
-            h.names.insert(name.into(), (ino, s.offset));
+            h.names.insert(name, (ino, s.offset));
         }
         Ok(s.ino)
     }
