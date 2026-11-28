@@ -128,10 +128,39 @@ pub struct Stats {
     pub ffree: i64,
 }
 
+/// The CRC-32C the inode and cylinder-group check-hashes use
+/// (`calculate_crc32c`): the table one, unless the kernel gives one the
+/// CPU does in hardware (FreeBSD's `sse42_crc32c`, `armv8_crc32c`).
+#[derive(Clone, Copy)]
+pub struct Crc32c(pub fn(u32, &[u8]) -> u32);
+
+impl Default for Crc32c {
+    fn default() -> Self {
+        Self(crc32c)
+    }
+}
+
+impl core::fmt::Debug for Crc32c {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Crc32c")
+    }
+}
+
+/// Every way computes the same function: superblocks compare alike.
+impl PartialEq for Crc32c {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Crc32c {}
+
 /// A checked UFS2 superblock: the fields the engine uses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(missing_docs)]
 pub struct Superblock {
+    /// How check-hashes are computed (not on the disk).
+    pub crc32c: Crc32c,
     /// Offsets in fragments from a cylinder group's start: its superblock
     /// copy, its header, its inodes, and its data.
     pub sblkno: u32,
@@ -252,6 +281,7 @@ impl Superblock {
         let flags = u(off::FLAGS);
         let mut metackhash = u(off::METACKHASH);
         let sb = Self {
+            crc32c: Crc32c::default(),
             sblkno: u(off::SBLKNO),
             cblkno: u(off::CBLKNO),
             iblkno: u(off::IBLKNO),

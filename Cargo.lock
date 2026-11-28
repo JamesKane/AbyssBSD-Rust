@@ -828,6 +828,7 @@ dependencies = [
  "cd9660",
  "clock",
  "cpufreq",
+ "crc",
  "demangle",
  "devtree",
  "driver-table",

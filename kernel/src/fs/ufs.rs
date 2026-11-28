@@ -486,6 +486,13 @@ impl UfsFs {
         let sector = disk.sector_size();
         let io = DiskIo::new(disk);
         let mut ufs = ufs::Ufs::open(s, io, sector).map_err(errno)?;
+        // Check-hashes in hardware where the CPU has it.
+        #[cfg(target_arch = "x86_64")]
+        if crate::arch::cpu::has_sse42()
+            && crate::arch::cpu::crc32c_sse42(!0, b"123456789") == crc::crc32c(!0, b"123456789")
+        {
+            ufs.set_crc32c(crate::arch::cpu::crc32c_sse42);
+        }
         // Soft updates follow the superblock from the start, so a mount
         // made read-write later (`mount -u`) has its tracker.
         let mut deps = None;

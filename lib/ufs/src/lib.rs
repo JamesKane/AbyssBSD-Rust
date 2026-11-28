@@ -369,6 +369,12 @@ impl<B: BlockIo> Ufs<B> {
         if self.soft { Mode::Delayed } else { Mode::Sync }
     }
 
+    /// Has the check-hashes computed with `f`, a CRC-32C the CPU does in
+    /// hardware.
+    pub fn set_crc32c(&mut self, f: fn(u32, &[u8]) -> u32) {
+        self.sb.crc32c = sb::Crc32c(f);
+    }
+
     #[must_use]
     pub fn superblock(&self) -> &Superblock {
         &self.sb

@@ -10,7 +10,6 @@
 
 use crate::sb::{CK_CYLGRP, Superblock};
 use crate::{Error, count32, idx};
-use crc::crc32c;
 
 /// `CG_MAGIC`.
 pub const MAGIC: u32 = 0x0009_0255;
@@ -91,7 +90,7 @@ pub(crate) fn check(sb: &Superblock, b: &[u8], cg: u32, hashed: bool) -> Result<
     if u(off::MAGIC) != MAGIC || u(off::CGX) != cg {
         return Err(Error::Corrupt("cylinder group header"));
     }
-    if hashed && sb.metackhash & CK_CYLGRP != 0 && ckhash(b) != u(off::CKHASH) {
+    if hashed && sb.metackhash & CK_CYLGRP != 0 && ckhash(sb, b) != u(off::CKHASH) {
         return Err(Error::Integrity("cylinder group check-hash"));
     }
     // The maps must lie inside.
@@ -114,7 +113,8 @@ pub(crate) fn check(sb: &Superblock, b: &[u8], cg: u32, hashed: bool) -> Result<
 
 /// The check-hash of group bytes `b`, with the hash field taken as zero
 /// (FreeBSD's `ffs_ckhash_cg`).
-fn ckhash(b: &[u8]) -> u32 {
+fn ckhash(sb: &Superblock, b: &[u8]) -> u32 {
+    let crc32c = sb.crc32c.0;
     let crc = crc32c(!0, &b[..off::CKHASH]);
     let crc = crc32c(crc, &[0; 4]);
     crc32c(crc, &b[off::CKHASH + 4..])
@@ -124,7 +124,7 @@ fn ckhash(b: &[u8]) -> u32 {
 /// (FreeBSD sets it as the group goes to the disk).
 pub fn update_ckhash(sb: &Superblock, b: &mut [u8]) {
     if sb.metackhash & CK_CYLGRP != 0 {
-        let h = ckhash(b);
+        let h = ckhash(sb, b);
         b[off::CKHASH..off::CKHASH + 4].copy_from_slice(&h.to_le_bytes());
     }
 }

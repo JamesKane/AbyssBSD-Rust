@@ -3,7 +3,6 @@
 
 use crate::sb::{CK_INODE, Superblock};
 use crate::{Error, NIADDR, NXADDR};
-use crc::crc32c;
 
 /// `sizeof(struct ufs2_dinode)`.
 pub(crate) const SIZE: usize = 256;
@@ -128,6 +127,7 @@ impl Inode {
         let b = b.get(..SIZE).ok_or(Error::Corrupt("inode"))?;
         let mode = u16_at(b, off::MODE);
         if mode != 0 && sb.metackhash & CK_INODE != 0 {
+            let crc32c = sb.crc32c.0;
             let mut crc = crc32c(!0, &b[..off::CKHASH]);
             crc = crc32c(crc, &[0; 4]);
             crc = crc32c(crc, &b[off::CKHASH + 4..]);
@@ -243,7 +243,7 @@ impl Inode {
         p32(&mut b, off::DIRDEPTH, self.dirdepth);
         p32(&mut b, off::CKHASH, 0);
         if self.mode != 0 && sb.metackhash & CK_INODE != 0 {
-            let crc = crc32c(!0, &b);
+            let crc = (sb.crc32c.0)(!0, &b);
             p32(&mut b, off::CKHASH, crc);
         }
         b

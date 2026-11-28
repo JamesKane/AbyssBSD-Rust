@@ -470,3 +470,34 @@ pub fn hardware_random() -> Option<u64> {
     }
     None
 }
+
+/// Whether the CPU has SSE4.2, and with it the `crc32` instruction.
+#[must_use]
+pub fn has_sse42() -> bool {
+    core::arch::x86_64::__cpuid(1).ecx & (1 << 20) != 0
+}
+
+/// CRC-32C continued from `crc` over `data` with the `crc32` instruction
+/// (FreeBSD's `sse42_crc32c`, with no final inversion): only on a CPU
+/// with [`has_sse42`].
+#[must_use]
+pub fn crc32c_sse42(crc: u32, data: &[u8]) -> u32 {
+    let (words, tail) = data.as_chunks::<8>();
+    let mut c = u64::from(crc);
+    for w in words {
+        let v = u64::from_le_bytes(*w);
+        // SAFETY: `crc32` reads and writes registers only; the caller
+        // checked the CPU has it.
+        unsafe {
+            asm!("crc32 {c}, {v}", c = inout(reg) c, v = in(reg) v, options(pure, nomem, nostack));
+        }
+    }
+    let mut c = u32::try_from(c).unwrap_or(0);
+    for &b in tail {
+        // SAFETY: as above.
+        unsafe {
+            asm!("crc32 {c:e}, {b}", c = inout(reg) c, b = in(reg_byte) b, options(pure, nomem, nostack));
+        }
+    }
+    c
+}

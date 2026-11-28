@@ -16,6 +16,7 @@ bench = false
 ktest = []
 
 [dependencies]
+crc = { path = "../lib/crc" }
 bufcache = { path = "../sys/bufcache" }
 cd9660 = { path = "../lib/cd9660" }
 fat = { path = "../lib/fat" }
